@@ -1,9 +1,10 @@
 import { createInterface } from "node:readline";
-import { ManagedBrowser } from "./browser";
+import { ManagedBrowser, type LogQuery, type ScreenshotOptions } from "./browser";
 import { logger } from "./logging";
 import { connect } from "./rpc";
 
 const VERSION = "0.1.0";
+const MAX_STDOUT_BACKLOG = 64;
 type RpcRequest = { id: number; method: string; params?: Record<string, unknown> };
 
 function parseArgs(argv: string[]): { health: boolean; stdio: boolean; pipe: string | undefined } {
@@ -15,16 +16,54 @@ function parseArgs(argv: string[]): { health: boolean; stdio: boolean; pipe: str
   };
 }
 
+function writeLine(payload: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const line = `${JSON.stringify(payload)}\n`;
+    const accepted = process.stdout.write(line, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+    if (accepted) resolve();
+  });
+}
+
+async function emitEvent(
+  backlog: { count: number },
+  event: { type: string; payload: Record<string, unknown> },
+): Promise<void> {
+  if (backlog.count >= MAX_STDOUT_BACKLOG) return;
+  backlog.count += 1;
+  try {
+    await writeLine({ event });
+  } finally {
+    backlog.count -= 1;
+  }
+}
+
+function isMutatingMethod(method: string): boolean {
+  return method !== "browser.status" && method !== "browser.logs";
+}
+
 async function serveStdio(browser: ManagedBrowser): Promise<void> {
   const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
+  const backlog = { count: 0 };
+  let activeMutating = false;
   for await (const line of lines) {
     let request: RpcRequest;
     try {
       request = JSON.parse(line) as RpcRequest;
     } catch {
-      process.stdout.write(`${JSON.stringify({ id: 0, error: { message: "malformed JSON" } })}\n`);
+      await writeLine({ id: 0, error: { message: "malformed JSON" } });
       continue;
     }
+    if (isMutatingMethod(request.method) && activeMutating) {
+      await writeLine({
+        id: request.id,
+        error: { message: "browser service is busy with another mutating request" },
+      });
+      continue;
+    }
+    if (isMutatingMethod(request.method)) activeMutating = true;
     try {
       const params = request.params ?? {};
       let result: Record<string, unknown>;
@@ -36,13 +75,21 @@ async function serveStdio(browser: ManagedBrowser): Promise<void> {
           result = await browser.navigate(String(params.url ?? ""));
           break;
         case "browser.screenshot":
-          result = await browser.screenshot(String(params.path ?? ""));
+          result = await browser.screenshot({
+            path: String(params.path ?? ""),
+            fullPage: Boolean(params.fullPage),
+            type: params.type === "jpeg" ? "jpeg" : "png",
+            quality: typeof params.quality === "number" ? params.quality : undefined,
+          } satisfies ScreenshotOptions);
           break;
         case "browser.action":
           result = await browser.action(params);
           break;
         case "browser.logs":
-          result = browser.logs();
+          result = browser.logs({
+            offset: typeof params.offset === "number" ? params.offset : undefined,
+            limit: typeof params.limit === "number" ? params.limit : undefined,
+          } satisfies LogQuery);
           break;
         case "browser.status":
           result = browser.status();
@@ -53,11 +100,14 @@ async function serveStdio(browser: ManagedBrowser): Promise<void> {
         default:
           throw new Error(`unknown method: ${request.method}`);
       }
-      process.stdout.write(`${JSON.stringify({ id: request.id, result })}\n`);
+      await writeLine({ id: request.id, result });
     } catch (error) {
-      process.stdout.write(
-        `${JSON.stringify({ id: request.id, error: { message: error instanceof Error ? error.message : String(error) } })}\n`,
-      );
+      await writeLine({
+        id: request.id,
+        error: { message: error instanceof Error ? error.message : String(error) },
+      });
+    } finally {
+      if (isMutatingMethod(request.method)) activeMutating = false;
     }
   }
 }
@@ -66,8 +116,9 @@ async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   logger.info("browser service starting", { version: VERSION, pid: process.pid });
   if (args.health) return 0;
+  const backlog = { count: 0 };
   const emit = (event: { type: string; payload: Record<string, unknown> }): void => {
-    process.stdout.write(`${JSON.stringify({ event })}\n`);
+    void emitEvent(backlog, event);
   };
   const browser = new ManagedBrowser(emit);
   const rpc = args.stdio ? undefined : connect(args.pipe);

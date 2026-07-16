@@ -5,11 +5,12 @@
 use std::net::SocketAddr;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 use crate::error::{CoreError, ErrorCode, ErrorSource};
+use crate::frame::read_capped_line;
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
 use retcon_protocol::AuthLine;
@@ -46,7 +47,12 @@ impl Server {
 
         loop {
             tokio::select! {
-                _ = heartbeat.tick() => self.state.emit("system.heartbeat", json!({"uptime_ms": self.state.uptime().as_millis()})),
+                _ = heartbeat.tick() => {
+                    let _ = self.state.events().emit_volatile(
+                        "system.heartbeat",
+                        json!({"uptime_ms": self.state.uptime().as_millis()}),
+                    );
+                },
                 result = self.listener.accept() => match result {
                     Ok((stream, _)) => {
                         let token = self.token.clone();
@@ -78,11 +84,9 @@ async fn serve_connection(
     state: CoreState,
 ) -> Result<(), CoreError> {
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let auth_line = lines
-        .next_line()
-        .await
-        .map_err(|error| CoreError::io("read RPC authentication", error))?
+    let mut reader = tokio::io::BufReader::new(reader);
+    let auth_line = read_capped_line(&mut reader)
+        .await?
         .ok_or_else(|| invalid_request("Authentication is required."))?;
     let auth: AuthLine = serde_json::from_str(&auth_line)
         .map_err(|_| invalid_request("The authentication message is malformed."))?;
@@ -99,8 +103,8 @@ async fn serve_connection(
 
     loop {
         let message = tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line.map_err(|error| CoreError::io("read RPC request", error))? else { break };
+            line = read_capped_line(&mut reader) => {
+                let Some(line) = line? else { break };
                 let response = match serde_json::from_str::<Request>(&line) {
                     Ok(request) => dispatch(request, &state).await,
                     Err(error) => Response::error(0, &invalid_request(error.to_string())),
@@ -108,7 +112,7 @@ async fn serve_connection(
                 serde_json::to_value(response)
             }
             event = events.recv() => match event {
-                Ok(event) => Ok(json!({"event": event})),
+                Ok(event) => Ok(json!({"event": &*event})),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => Ok(json!({"event": {"kind":"system.eventsLagged", "payload":{"skipped":skipped}}})),
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -135,7 +139,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
         "core.health" => Some(state.health()),
         "core.version" => Some(json!({"version": env!("CARGO_PKG_VERSION"), "protocolVersion": 1})),
         "core.capabilities" => Some(state.capabilities()),
-        "core.diagnostics" => Some(state.diagnostics()),
+        "core.diagnostics" => Some(state.diagnostics().await),
         "core.shutdown" => {
             state.request_shutdown();
             Some(json!({"accepted": true}))
@@ -171,7 +175,19 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
                 Err(error) => return Response::error(request.id, &error),
             }
         }
-        "jobs.list" => Some(json!({"jobs": state.jobs().list()})),
+        "jobs.list" => {
+            let offset = request
+                .params
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let limit = request
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
+            Some(json!({"jobs": state.jobs().list(offset, limit)}))
+        }
         "jobs.get" | "jobs.cancel" | "jobs.forceStop" => {
             let Some(raw) = request.params.get("id").and_then(|v| v.as_str()) else {
                 return Response::error(request.id, &invalid_request("missing job id"));

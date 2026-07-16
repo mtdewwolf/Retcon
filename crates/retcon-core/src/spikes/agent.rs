@@ -122,15 +122,13 @@ fn start(state: CoreState, id: u64, params: &Value) -> Response {
             }
             let watch_state = state.clone();
             tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(code) = turn.lock().await.try_exit_code() {
-                        exit_state.emit("agent.exit", json!({ "id": turn_id, "exitCode": code }));
-                        if let Ok(mut map) = watch_state.agents().map.lock() {
-                            map.remove(&turn_id);
-                        }
-                        break;
-                    }
+                let code = {
+                    let mut guard = turn.lock().await;
+                    guard.wait().await
+                };
+                exit_state.emit("agent.exit", json!({ "id": turn_id, "exitCode": code }));
+                if let Ok(mut map) = watch_state.agents().map.lock() {
+                    map.remove(&turn_id);
                 }
             });
             tracing::info!(turn_id, "agent turn started");

@@ -9,13 +9,13 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-function activeLevel(): LogLevel {
+const ACTIVE_LEVEL: LogLevel = (() => {
   const raw = (process.env.RETCON_LOG ?? "info").toLowerCase();
   return raw in LEVEL_ORDER ? (raw as LogLevel) : "info";
-}
+})();
 
 export function log(level: LogLevel, message: string, fields: Record<string, unknown> = {}): void {
-  if (LEVEL_ORDER[level] < LEVEL_ORDER[activeLevel()]) return;
+  if (LEVEL_ORDER[level] < LEVEL_ORDER[ACTIVE_LEVEL]) return;
   const record = {
     timestamp: new Date().toISOString(),
     level: level.toUpperCase(),

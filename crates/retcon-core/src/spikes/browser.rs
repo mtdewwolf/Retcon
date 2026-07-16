@@ -7,20 +7,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use super::{fail, param_str};
 use crate::error::ErrorCode;
+use crate::frame::read_capped_line;
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+struct BrowserWriter {
+    stdin: ChildStdin,
+}
+
 struct BrowserProc {
     child: Child,
-    stdin: ChildStdin,
+    writer: Arc<Mutex<BrowserWriter>>,
     pending: Pending,
     next: AtomicU64,
 }
@@ -34,9 +39,7 @@ pub struct BrowserHandle {
 impl BrowserHandle {
     /// Stop the browser-service child if it is running.
     pub async fn shutdown(&self) {
-        if let Some(mut proc) = self.proc.lock().await.take() {
-            let _ = proc.child.kill().await;
-        }
+        stop_service(self).await;
     }
 }
 
@@ -46,10 +49,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
     match method.as_str() {
         "browser.startService" => start_service(state, id, &params).await,
         "browser.stopService" => {
-            let mut guard = state.browser().proc.lock().await;
-            if let Some(mut proc) = guard.take() {
-                let _ = proc.child.kill().await;
-            }
+            stop_service(state.browser()).await;
             Response::ok(id, json!({}))
         }
         "browser.call" => call(state, id, &params).await,
@@ -59,6 +59,19 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             "The requested browser operation is not available.",
             format!("unknown RPC method: {other}"),
         ),
+    }
+}
+
+async fn stop_service(handle: &BrowserHandle) {
+    if let Some(mut proc) = handle.proc.lock().await.take() {
+        let _ = write_rpc(
+            &proc.writer,
+            json!({ "id": u64::MAX, "method": "browser.close", "params": {} }),
+        )
+        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), proc.child.wait()).await;
+        let _ = proc.child.kill().await;
+        drain_pending(&proc.pending, json!({"error":{"message":"browser service stopped"}})).await;
     }
 }
 
@@ -77,15 +90,15 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
         return Response::ok(id, json!({ "alreadyRunning": true }));
     }
 
-    let spawned = tokio::process::Command::new("cmd")
-        .args(["/C", "bun", "run", "src/main.ts", "--stdio"])
+    let mut command = Command::new("bun");
+    command
+        .args(["run", "src/main.ts", "--stdio"])
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let mut child = match spawned {
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             return fail(
@@ -115,8 +128,8 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     };
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_capped_line(&mut reader).await {
                 tracing::debug!(target: "retcon_browser_service", "{line}");
             }
         });
@@ -125,9 +138,10 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let reader_pending = Arc::clone(&pending);
     let event_state = state.clone();
+    let cleanup_state = state.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stdout);
+        while let Ok(Some(line)) = read_capped_line(&mut reader).await {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -139,12 +153,18 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
                 event_state.emit("browser.event", value);
             }
         }
+        drain_pending(
+            &reader_pending,
+            json!({"error":{"message":"browser service exited"}}),
+        )
+        .await;
+        cleanup_state.browser().proc.lock().await.take();
         event_state.emit("browser.serviceExited", json!({}));
     });
 
     *guard = Some(BrowserProc {
         child,
-        stdin,
+        writer: Arc::new(Mutex::new(BrowserWriter { stdin })),
         pending,
         next: AtomicU64::new(0),
     });
@@ -163,25 +183,27 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
     };
     let inner_params = params.get("params").cloned().unwrap_or_else(|| json!({}));
 
-    let mut guard = state.browser().proc.lock().await;
-    let Some(proc) = guard.as_mut() else {
-        return fail(
-            id,
-            ErrorCode::NotFound,
-            "The browser service is not running.",
-            "call browser.startService first",
-        );
+    let (writer, call_id, rx) = {
+        let mut guard = state.browser().proc.lock().await;
+        let Some(proc) = guard.as_mut() else {
+            return fail(
+                id,
+                ErrorCode::NotFound,
+                "The browser service is not running.",
+                "call browser.startService first",
+            );
+        };
+        let call_id = proc.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = oneshot::channel();
+        proc.pending.lock().await.insert(call_id, tx);
+        (Arc::clone(&proc.writer), call_id, rx)
     };
 
-    let call_id = proc.next.fetch_add(1, Ordering::Relaxed) + 1;
-    let (tx, rx) = oneshot::channel();
-    proc.pending.lock().await.insert(call_id, tx);
-
-    let line = json!({ "id": call_id, "method": method, "params": inner_params }).to_string();
-    if proc.stdin.write_all(line.as_bytes()).await.is_err()
-        || proc.stdin.write_all(b"\n").await.is_err()
-    {
-        proc.pending.lock().await.remove(&call_id);
+    let request = json!({ "id": call_id, "method": method, "params": inner_params });
+    if write_rpc(&writer, request).await.is_err() {
+        if let Some(proc) = state.browser().proc.lock().await.as_mut() {
+            proc.pending.lock().await.remove(&call_id);
+        }
         return fail(
             id,
             ErrorCode::Io,
@@ -189,7 +211,6 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
             "stdin write failed; the service may have crashed",
         );
     }
-    drop(guard); // release the handle while waiting so other calls can queue
 
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(value)) => {
@@ -208,7 +229,6 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
             }
         }
         Ok(Err(_)) => {
-            // Reader task already removed the sender; drop any orphan defensively.
             if let Some(proc) = state.browser().proc.lock().await.as_mut() {
                 proc.pending.lock().await.remove(&call_id);
             }
@@ -220,7 +240,6 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
             )
         }
         Err(_) => {
-            // Timeout path must clear pending or timed-out call_ids leak forever.
             if let Some(proc) = state.browser().proc.lock().await.as_mut() {
                 proc.pending.lock().await.remove(&call_id);
             }
@@ -231,5 +250,23 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
                 format!("no reply to '{method}' within 60s"),
             )
         }
+    }
+}
+
+async fn write_rpc(writer: &Arc<Mutex<BrowserWriter>>, payload: Value) -> Result<(), ()> {
+    let mut guard = writer.lock().await;
+    let line = payload.to_string();
+    guard
+        .stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|_| ())?;
+    guard.stdin.write_all(b"\n").await.map_err(|_| ())
+}
+
+async fn drain_pending(pending: &Pending, response: Value) {
+    let mut waiters = pending.lock().await;
+    for (_, sender) in waiters.drain() {
+        let _ = sender.send(response.clone());
     }
 }

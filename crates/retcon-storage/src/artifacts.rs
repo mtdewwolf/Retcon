@@ -88,14 +88,22 @@ impl ArtifactStore {
         if destination.exists() {
             std::fs::remove_file(&temp)
                 .map_err(|e| StorageError::io("remove duplicate artifact", &temp, e))?;
-            self.verify(&hash)?;
-        } else if let Err(error) = std::fs::rename(&temp, &destination) {
+            let size = std::fs::metadata(&destination)
+                .map_err(|e| StorageError::io("read duplicate artifact metadata", &destination, e))?
+                .len();
+            return Ok(Artifact { hash, size });
+        }
+        if let Err(error) = std::fs::rename(&temp, &destination) {
             if destination.exists() {
                 let _ = std::fs::remove_file(&temp);
-                self.verify(&hash)?;
-            } else {
-                return Err(StorageError::io("publish artifact", &destination, error));
+                let size = std::fs::metadata(&destination)
+                    .map_err(|e| {
+                        StorageError::io("read duplicate artifact metadata", &destination, e)
+                    })?
+                    .len();
+                return Ok(Artifact { hash, size });
             }
+            return Err(StorageError::io("publish artifact", &destination, error));
         }
         Ok(Artifact { hash, size })
     }
@@ -135,6 +143,14 @@ impl ArtifactStore {
         Ok(total)
     }
 
+    /// Report disk usage without blocking async worker threads.
+    pub async fn disk_usage_async(&self) -> Result<u64> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.disk_usage())
+            .await
+            .map_err(|_| StorageError::ConnectionPoisoned)?
+    }
+
     /// Remove old artifacts except hashes explicitly protected by active records.
     pub fn cleanup(
         &self,
@@ -169,6 +185,19 @@ impl ArtifactStore {
     ) -> Result<ArtifactCleanup> {
         let protected = referenced_hashes(database)?;
         self.cleanup(older_than, &protected)
+    }
+
+    /// Async variant of [`Self::cleanup_referenced`].
+    pub async fn cleanup_referenced_async(
+        &self,
+        database: &Database,
+        older_than: Duration,
+    ) -> Result<ArtifactCleanup> {
+        let store = self.clone();
+        let database = database.clone();
+        tokio::task::spawn_blocking(move || store.cleanup_referenced(&database, older_than))
+            .await
+            .map_err(|_| StorageError::ConnectionPoisoned)?
     }
 
     fn path_for(&self, hash: &str) -> Result<PathBuf> {

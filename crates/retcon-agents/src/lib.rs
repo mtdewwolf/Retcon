@@ -7,10 +7,13 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+
+static CLAUDE_DETECTION: OnceLock<Mutex<Option<Result<ProviderInfo, String>>>> = OnceLock::new();
 
 /// Information about a detected provider CLI.
 #[derive(Debug, Clone, Serialize)]
@@ -31,7 +34,20 @@ pub struct ProviderInfo {
 ///
 /// Returns a message when the CLI is missing or does not respond.
 pub async fn detect_claude() -> Result<ProviderInfo, String> {
-    // `claude` is a .cmd shim on Windows; run it through cmd.
+    let cache = CLAUDE_DETECTION.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock()
+        && let Some(cached) = guard.as_ref()
+    {
+        return cached.clone();
+    }
+    let detected = detect_claude_uncached().await;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(detected.clone());
+    }
+    detected
+}
+
+async fn detect_claude_uncached() -> Result<ProviderInfo, String> {
     let output = Command::new("cmd")
         .args(["/C", "claude", "--version"])
         .stdin(Stdio::null())
@@ -69,18 +85,12 @@ pub async fn detect_claude() -> Result<ProviderInfo, String> {
 /// A running provider turn (one prompt being processed).
 pub struct AgentTurn {
     child: Child,
+    exit_code: Option<i32>,
 }
 
 impl AgentTurn {
     /// Start a non-interactive Claude Code turn in `cwd` for `prompt`,
     /// streaming newline-delimited JSON events.
-    ///
-    /// `on_line` receives each raw JSON line from the provider's stream;
-    /// `on_exit` fires with the exit code when the turn finishes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a message if the provider process cannot be spawned.
     pub fn start(
         cwd: &Path,
         prompt: &str,
@@ -136,8 +146,6 @@ impl AgentTurn {
             }
         });
 
-        // Reader task owns the exit notification: after stdout closes, the
-        // process is finished (or dying) — try_wait in a short loop.
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -145,7 +153,10 @@ impl AgentTurn {
             }
         });
 
-        Ok(Self { child })
+        Ok(Self {
+            child,
+            exit_code: None,
+        })
     }
 
     /// Cancel the running turn by killing the provider process.
@@ -156,8 +167,32 @@ impl AgentTurn {
     /// Poll whether the turn's process has exited, returning its code.
     pub fn try_exit_code(&mut self) -> Option<i32> {
         match self.child.try_wait() {
-            Ok(Some(status)) => status.code(),
+            Ok(Some(status)) => {
+                let code = status.code();
+                self.exit_code = code;
+                code
+            }
             _ => None,
         }
+    }
+
+    /// Wait until the provider process exits.
+    pub async fn wait(&mut self) -> Option<i32> {
+        if let Some(code) = self.exit_code {
+            return Some(code);
+        }
+        match self.child.wait().await {
+            Ok(status) => {
+                let code = status.code();
+                self.exit_code = code;
+                code
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Return the last known exit code after the process has exited.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code
     }
 }

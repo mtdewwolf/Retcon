@@ -16,6 +16,8 @@ use uuid::Uuid;
 use crate::{CoreError, ErrorCode};
 use retcon_storage::Database;
 
+const FINISHED_RETENTION_DAYS: i64 = 7;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -28,6 +30,27 @@ pub enum JobStatus {
     Stuck,
 }
 
+impl JobStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Stuck => "stuck",
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureClass {
@@ -37,6 +60,19 @@ pub enum FailureClass {
     Timeout,
     Cancelled,
     Internal,
+}
+
+impl FailureClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Provider => "provider",
+            Self::Process => "process",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +97,7 @@ struct JobEntry {
     snapshot: JobSnapshot,
     cancel: watch::Sender<bool>,
     handle: Option<JoinHandle<()>>,
+    dirty: bool,
 }
 
 #[derive(Clone)]
@@ -80,11 +117,14 @@ impl Default for JobSupervisor {
 
 impl JobSupervisor {
     pub fn with_storage(storage: Database) -> Self {
-        Self {
+        let supervisor = Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
-            storage: Some(storage),
-        }
+            storage: Some(storage.clone()),
+        };
+        supervisor.evict_stale_records();
+        supervisor
     }
+
     pub fn spawn<F, Fut>(
         &self,
         owner: impl Into<String>,
@@ -122,10 +162,11 @@ impl JobSupervisor {
                     snapshot,
                     cancel,
                     handle: None,
+                    dirty: true,
                 },
             );
         }
-        self.persist(id);
+        self.flush_persist(id, true);
         let supervisor = self.clone();
         let operation = Arc::new(operation);
         let handle = tokio::spawn(async move {
@@ -163,16 +204,21 @@ impl JobSupervisor {
         id
     }
 
-    pub fn list(&self) -> Vec<JobSnapshot> {
-        self.inner
+    pub fn list(&self, offset: usize, limit: usize) -> Vec<JobSnapshot> {
+        self.evict_finished_from_memory();
+        let mut jobs = self
+            .inner
             .lock()
             .map(|m| {
                 m.values()
                     .map(|e| with_elapsed(e.snapshot.clone()))
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        jobs.into_iter().skip(offset).take(limit.min(500)).collect()
     }
+
     pub fn get(&self, id: Uuid) -> Option<JobSnapshot> {
         self.inner
             .lock()
@@ -180,6 +226,7 @@ impl JobSupervisor {
             .get(&id)
             .map(|e| with_elapsed(e.snapshot.clone()))
     }
+
     pub fn cancel(&self, id: Uuid) -> bool {
         self.inner
             .lock()
@@ -187,6 +234,7 @@ impl JobSupervisor {
             .and_then(|m| m.get(&id).map(|e| e.cancel.send_replace(true)))
             .is_some()
     }
+
     pub fn force_stop(&self, id: Uuid) -> bool {
         let stopped = self
             .inner
@@ -211,6 +259,7 @@ impl JobSupervisor {
         }
         stopped
     }
+
     pub fn detect_stuck(&self, threshold: Duration) -> Vec<Uuid> {
         let now = Utc::now();
         let mut stuck = Vec::new();
@@ -224,12 +273,17 @@ impl JobSupervisor {
                     })
                 {
                     entry.snapshot.status = JobStatus::Stuck;
+                    entry.dirty = true;
                     stuck.push(*id);
                 }
             }
         }
+        for id in &stuck {
+            self.flush_persist(*id, true);
+        }
         stuck
     }
+
     pub fn track_child_process(&self, id: Uuid, process_id: u32) -> bool {
         let mut found = false;
         self.update(id, |job| {
@@ -240,6 +294,7 @@ impl JobSupervisor {
         });
         found
     }
+
     pub fn reconcile_orphans(&self) -> Vec<Uuid> {
         let mut orphaned = Vec::new();
         if let Ok(mut jobs) = self.inner.lock() {
@@ -254,15 +309,20 @@ impl JobSupervisor {
                     entry.snapshot.failure =
                         Some("supervised task exited without reporting completion".into());
                     entry.snapshot.finished_at = Some(Utc::now());
+                    entry.dirty = true;
                     orphaned.push(*id);
                 }
             }
         }
+        for id in &orphaned {
+            self.flush_persist(*id, true);
+        }
         orphaned
     }
+
     pub fn shutdown(&self) {
         let ids: Vec<_> = self
-            .list()
+            .list(0, usize::MAX)
             .into_iter()
             .filter(|j| {
                 matches!(
@@ -276,14 +336,17 @@ impl JobSupervisor {
             self.force_stop(id);
         }
     }
+
     fn update(&self, id: Uuid, action: impl FnOnce(&mut JobSnapshot)) {
         if let Ok(mut jobs) = self.inner.lock()
             && let Some(job) = jobs.get_mut(&id)
         {
             action(&mut job.snapshot);
+            job.dirty = true;
         }
-        self.persist(id);
+        self.flush_persist(id, false);
     }
+
     fn finish(
         &self,
         id: Uuid,
@@ -297,23 +360,39 @@ impl JobSupervisor {
             job.failure = failure;
             job.finished_at = Some(Utc::now());
         });
+        self.flush_persist(id, true);
+        self.evict_stale_records();
     }
-    fn persist(&self, id: Uuid) {
-        let Some(storage) = &self.storage else {
-            return;
+
+    fn flush_persist(&self, id: Uuid, force: bool) {
+        let snapshot = {
+            let Ok(mut jobs) = self.inner.lock() else {
+                return;
+            };
+            let Some(entry) = jobs.get_mut(&id) else {
+                return;
+            };
+            if !force && !entry.dirty {
+                return;
+            }
+            if !force && !entry.snapshot.status.is_terminal() {
+                return;
+            }
+            entry.dirty = false;
+            Some(entry.snapshot.clone())
         };
-        let snapshot = self
-            .inner
-            .lock()
-            .ok()
-            .and_then(|jobs| jobs.get(&id).map(|job| job.snapshot.clone()));
         let Some(job) = snapshot else {
             return;
         };
-        let status = format!("{:?}", job.status).to_ascii_lowercase();
-        let failure_class = job
-            .failure_class
-            .map(|value| format!("{value:?}").to_ascii_lowercase());
+        self.persist_snapshot(&job);
+    }
+
+    fn persist_snapshot(&self, job: &JobSnapshot) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let status = job.status.as_str();
+        let failure_class = job.failure_class.map(FailureClass::as_str);
         let children =
             serde_json::to_string(&job.child_process_ids).unwrap_or_else(|_| "[]".into());
         let created = job.created_at.timestamp_millis();
@@ -322,10 +401,55 @@ impl JobSupervisor {
         let attempts = i64::from(job.attempts);
         let max_attempts = i64::from(job.max_attempts);
         let timeout = i64::try_from(job.timeout_ms).unwrap_or(i64::MAX);
+        if let Err(error) = storage.read(|db| {
+            let mut statement = db.prepare_cached(
+                "INSERT INTO background_jobs (id,owner,name,status,created_at,started_at,finished_at,attempts,max_attempts,timeout_ms,failure_class,failure,child_process_ids_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET status=excluded.status,started_at=excluded.started_at,finished_at=excluded.finished_at,attempts=excluded.attempts,failure_class=excluded.failure_class,failure=excluded.failure,child_process_ids_json=excluded.child_process_ids_json",
+            )?;
+            statement.execute(rusqlite::params![
+                job.id.to_string(),
+                job.owner,
+                job.name,
+                status,
+                created,
+                started,
+                finished,
+                attempts,
+                max_attempts,
+                timeout,
+                failure_class,
+                job.failure,
+                children,
+            ])
+        }) {
+            tracing::error!(%error, job.id = %job.id, "failed to persist supervised job");
+        }
+    }
+
+    fn evict_finished_from_memory(&self) {
+        let cutoff = Utc::now() - chrono::Duration::days(FINISHED_RETENTION_DAYS);
+        if let Ok(mut jobs) = self.inner.lock() {
+            jobs.retain(|_, entry| {
+                !entry.snapshot.status.is_terminal()
+                    || entry
+                        .snapshot
+                        .finished_at
+                        .is_none_or(|finished| finished > cutoff)
+            });
+        }
+    }
+
+    fn evict_stale_records(&self) {
+        self.evict_finished_from_memory();
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let cutoff = (Utc::now() - chrono::Duration::days(FINISHED_RETENTION_DAYS)).timestamp_millis();
         if let Err(error) = storage.execute(
-            "INSERT INTO background_jobs (id,owner,name,status,created_at,started_at,finished_at,attempts,max_attempts,timeout_ms,failure_class,failure,child_process_ids_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET status=excluded.status,started_at=excluded.started_at,finished_at=excluded.finished_at,attempts=excluded.attempts,failure_class=excluded.failure_class,failure=excluded.failure,child_process_ids_json=excluded.child_process_ids_json",
-            &[&job.id.to_string(), &job.owner, &job.name, &status, &created, &started, &finished, &attempts, &max_attempts, &timeout, &failure_class, &job.failure, &children],
-        ) { tracing::error!(%error, job.id=%id, "failed to persist supervised job"); }
+            "DELETE FROM background_jobs WHERE finished_at IS NOT NULL AND finished_at < ?1",
+            &[&cutoff],
+        ) {
+            tracing::warn!(%error, "failed to prune finished background jobs");
+        }
     }
 }
 
@@ -355,6 +479,7 @@ fn classify(error: &CoreError) -> FailureClass {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn jobs_complete_and_cancel() {
         let jobs = JobSupervisor::default();
@@ -389,5 +514,22 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "succeeded");
+    }
+
+    #[tokio::test]
+    async fn list_supports_pagination() {
+        let jobs = JobSupervisor::default();
+        for index in 0..5 {
+            jobs.spawn(
+                "test",
+                format!("job-{index}"),
+                Duration::from_millis(1),
+                1,
+                || async { Ok(()) },
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(jobs.list(0, 2).len(), 2);
+        assert_eq!(jobs.list(2, 10).len(), 3);
     }
 }

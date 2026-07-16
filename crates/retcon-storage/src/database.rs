@@ -55,12 +55,12 @@ impl Database {
 
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let mut connection = Connection::open_with_flags(&path, flags)
             .map_err(|error| classify_database_error(&path, "open database", error))?;
         configure(&connection, &path)?;
         apply_migrations(&mut connection, &path)?;
-        integrity_check_connection(&connection, &path)?;
+        quick_check_connection(&connection, &path)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
@@ -123,6 +123,24 @@ impl Database {
         let connection = self.lock()?;
         operation(&connection)
             .map_err(|error| classify_database_error(&self.path, "query database", error))
+    }
+
+    /// Run a blocking database operation on Tokio's blocking thread pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection is unavailable or the query fails.
+    pub async fn read_async<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        let database = self.clone();
+        tokio::task::spawn_blocking(move || database.read(operation))
+            .await
+            .map_err(|_| StorageError::ConnectionPoisoned)?
     }
 
     /// Run a closure inside an immediate transaction.
@@ -226,9 +244,31 @@ fn configure(connection: &Connection, path: &Path) -> Result<()> {
             "PRAGMA foreign_keys = ON;\n\
              PRAGMA journal_mode = WAL;\n\
              PRAGMA synchronous = NORMAL;\n\
-             PRAGMA temp_store = MEMORY;",
+             PRAGMA temp_store = MEMORY;\n\
+             PRAGMA cache_size = -64000;\n\
+             PRAGMA mmap_size = 268435456;\n\
+             PRAGMA wal_autocheckpoint = 1000;",
         )
         .map_err(|error| classify_database_error(path, "configure database", error))
+}
+
+fn quick_check_connection(connection: &Connection, path: &Path) -> Result<IntegrityReport> {
+    let mut statement = connection
+        .prepare("PRAGMA quick_check")
+        .map_err(|error| classify_database_error(path, "prepare quick check", error))?;
+    let messages = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| classify_database_error(path, "run quick check", error))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| classify_database_error(path, "read quick check", error))?;
+    let healthy = messages.len() == 1 && messages[0].eq_ignore_ascii_case("ok");
+    if !healthy {
+        return Err(StorageError::Corrupt {
+            path: path.to_path_buf(),
+            details: messages.join("; "),
+        });
+    }
+    Ok(IntegrityReport { healthy, messages })
 }
 
 fn apply_migrations(connection: &mut Connection, path: &Path) -> Result<()> {
@@ -462,7 +502,7 @@ mod tests {
         drop(connection);
 
         let upgraded = Database::open(path).unwrap();
-        assert_eq!(upgraded.schema_version().unwrap(), 2);
+        assert_eq!(upgraded.schema_version().unwrap(), 3);
         upgraded
             .execute(
                 "INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES ('job','test','migrated','queued',1,0,1,1000)",

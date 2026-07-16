@@ -23,7 +23,7 @@ describe("managed Chromium", () => {
       expect(navigation.status).toBe(200);
       expect((await browser.action({ action: "text", selector: "#proof" })).text).toBe("proof");
       await browser.action({ action: "click", selector: "#proof" });
-      await browser.screenshot(screenshot);
+      await browser.screenshot({ path: screenshot });
       expect(existsSync(screenshot)).toBeTrue();
       expect((browser.logs().network as unknown[]).length).toBeGreaterThan(0);
       expect(events).toContain("browser.request");

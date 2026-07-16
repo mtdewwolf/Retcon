@@ -10,8 +10,8 @@ import 'package:retcon_design_system/retcon_design_system.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'src/core_client.dart';
+import 'src/desktop_shell.dart';
 import 'src/logging.dart';
-import 'src/shell_placeholder.dart';
 
 final _log = Logger('retcon.desktop');
 final services = GetIt.instance;
@@ -50,7 +50,7 @@ class RetconApp extends StatelessWidget {
       routes: [
         GoRoute(
           path: '/',
-          builder: (context, state) => ShellPlaceholder(core: client),
+          builder: (context, state) => DesktopShell(core: client),
         ),
       ],
     );

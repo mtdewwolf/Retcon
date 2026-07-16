@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro check && astro build",
+    "build": "node scripts/generate-brand-assets.mjs && astro check && astro build",
     "preview": "astro preview",
     "test": "npm run build && node scripts/verify-build.mjs",
     "check:launch": "node scripts/check-launch-assets.mjs",

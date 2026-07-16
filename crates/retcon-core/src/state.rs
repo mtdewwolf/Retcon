@@ -32,12 +32,14 @@ struct Inner {
     storage: Database,
     artifacts: ArtifactStore,
     recovery: RecoveryReport,
+    schema_version: Option<u32>,
 }
 
 impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
         let (shutdown, _) = watch::channel(false);
         let storage = Database::open(data_dir.join("retcon.db"))?;
+        let schema_version = storage.schema_version().ok();
         let recovery = storage.recover_interrupted()?;
         let artifacts = ArtifactStore::open(data_dir)?;
         let events = EventBus::open(storage.clone())?;
@@ -59,6 +61,7 @@ impl CoreState {
                 storage,
                 artifacts,
                 recovery,
+                schema_version,
             }),
         })
     }
@@ -112,7 +115,7 @@ impl CoreState {
     }
 
     pub fn health(&self) -> Value {
-        let schema_version = self.inner.storage.schema_version().ok();
+        let schema_version = self.inner.schema_version;
         let status = if schema_version.is_some() {
             "healthy"
         } else {
@@ -139,8 +142,8 @@ impl CoreState {
         })
     }
 
-    pub fn diagnostics(&self) -> Value {
-        let artifact_bytes = self.inner.artifacts.disk_usage().ok();
+    pub async fn diagnostics(&self) -> Value {
+        let artifact_bytes = self.inner.artifacts.disk_usage_async().await.ok();
         json!({
             "process_id": std::process::id(),
             "os": std::env::consts::OS,

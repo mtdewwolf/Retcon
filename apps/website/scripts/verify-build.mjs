@@ -21,6 +21,8 @@ for (const [name, value] of checks) {
 
 await Promise.all([
   access(join(dist, "assets", "brand", "favicon.svg")),
+  access(join(dist, "assets", "brand", "retcon-icon-192.png")),
+  access(join(dist, "assets", "brand", "retcon-icon-512.png")),
   access(join(dist, "assets", "social", "og-retcon.png")),
   access(join(dist, "site.webmanifest")),
   access(join(dist, "robots.txt")),

@@ -189,7 +189,7 @@ const principles = [
             <article class="proof-card">
               <div class:list={["proof-visual", { pending: !proof.ready }]}>
                 {proof.ready ? (
-                  <img src={`${base}assets/product/${proof.file}`} alt={proof.alt} loading="lazy" />
+                  <img src={`${base}assets/product/${proof.file}`} alt={proof.alt} width="960" height="540" loading="lazy" decoding="async" />
                 ) : (
                   <div class="capture-pending" aria-label={`${proof.alt} — capture pending`}>
                     <span class="crosshair"></span>
@@ -255,6 +255,8 @@ const principles = [
                   title="Join the Retcon early-access list"
                   src={`https://tally.so/embed/${tallyId}?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1`}
                   loading="lazy"
+                  width="100%"
+                  height="420"
                 ></iframe>
               </>
             ) : (

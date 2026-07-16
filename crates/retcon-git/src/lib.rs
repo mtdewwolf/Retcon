@@ -6,6 +6,11 @@
 use std::path::Path;
 
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+
+/// Maximum stdout captured from a single Git invocation.
+pub const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 /// A failed Git invocation, preserving what Git actually said.
 #[derive(Debug, Clone, Serialize)]
@@ -34,26 +39,113 @@ impl std::fmt::Display for GitError {
 ///
 /// Returns a [`GitError`] carrying Git's exit code and stderr on failure.
 pub async fn run_git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    let output = tokio::process::Command::new("git")
+    run_git_limited(repo, args, MAX_GIT_OUTPUT_BYTES).await
+}
+
+async fn run_git_limited(
+    repo: &Path,
+    args: &[&str],
+    max_bytes: usize,
+) -> Result<String, GitError> {
+    let command_label = args.join(" ");
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(repo)
-        .output()
-        .await
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| GitError {
-            command: args.join(" "),
+            command: command_label.clone(),
             exit_code: None,
             stderr: format!("failed to launch git: {e}"),
         })?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
+    let mut stdout = child.stdout.take().ok_or_else(|| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: "git process has no stdout".into(),
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: "git process has no stderr".into(),
+    })?;
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = stdout
+                .read(&mut chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            if buffer.len().saturating_add(read) > max_bytes {
+                return Err(format!("git output exceeded {max_bytes} bytes"));
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        Ok(buffer)
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stderr
+                .read(&mut chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        Ok(buffer)
+    });
+
+    let status = child.wait().await.map_err(|e| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: format!("failed to wait for git: {e}"),
+    })?;
+
+    let stdout_bytes = stdout_task
+        .await
+        .map_err(|e| GitError {
+            command: command_label.clone(),
+            exit_code: status.code(),
+            stderr: format!("stdout reader failed: {e}"),
+        })?
+        .map_err(|message| GitError {
+            command: command_label.clone(),
+            exit_code: status.code(),
+            stderr: message,
+        })?;
+    let stderr_bytes = stderr_task
+        .await
+        .map_err(|e| GitError {
+            command: command_label.clone(),
+            exit_code: status.code(),
+            stderr: format!("stderr reader failed: {e}"),
+        })?
+        .map_err(|message| GitError {
+            command: command_label.clone(),
+            exit_code: status.code(),
+            stderr: message,
+        })?;
+
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout_bytes)
             .trim_end()
             .to_owned())
     } else {
         Err(GitError {
-            command: args.join(" "),
-            exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            command: command_label,
+            exit_code: status.code(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
         })
     }
 }
@@ -76,23 +168,37 @@ pub struct RepoStatus {
     pub entries: Vec<StatusEntry>,
 }
 
-/// Read the current branch and porcelain status of `repo`.
+/// Read the current branch and porcelain status of `repo` in one Git invocation.
 ///
 /// # Errors
 ///
 /// Returns a [`GitError`] if the directory is not a repository or Git fails.
 pub async fn status(repo: &Path) -> Result<RepoStatus, GitError> {
-    let branch = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
-    let porcelain = run_git(repo, &["status", "--porcelain"]).await?;
-    let entries = porcelain
-        .lines()
-        .filter(|l| l.len() > 3)
-        .map(|l| StatusEntry {
-            code: l[..2].to_owned(),
-            path: l[3..].to_owned(),
+    let raw = run_git(repo, &["status", "--porcelain=v1", "--branch"]).await?;
+    let mut lines = raw.lines();
+    let branch = lines
+        .next()
+        .and_then(|line| line.strip_prefix("## "))
+        .map(parse_branch_header)
+        .unwrap_or_else(|| "HEAD".to_owned());
+    let entries = lines
+        .filter(|line| line.len() > 3)
+        .map(|line| StatusEntry {
+            code: line[..2].to_owned(),
+            path: line[3..].to_owned(),
         })
         .collect();
     Ok(RepoStatus { branch, entries })
+}
+
+fn parse_branch_header(header: &str) -> String {
+    header
+        .split("...")
+        .next()
+        .unwrap_or(header)
+        .trim_start_matches('#')
+        .trim()
+        .to_owned()
 }
 
 /// A worktree from `git worktree list --porcelain`.
@@ -202,6 +308,7 @@ pub async fn submodules(repo: &Path) -> Result<Vec<String>, GitError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn status_branch_diff_and_worktree_round_trip() {
         let dir = tempfile::tempdir().unwrap();

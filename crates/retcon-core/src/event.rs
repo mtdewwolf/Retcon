@@ -3,7 +3,10 @@
 #![allow(missing_docs)]
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,7 @@ use retcon_storage::Database;
 
 const DEFAULT_MAX_EVENTS: usize = 10_000;
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;
+const PRUNE_EVERY_N_INSERTS: u64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,34 +64,34 @@ pub struct EventEnvelope {
 }
 
 struct EventLog {
-    events: VecDeque<EventEnvelope>,
+    events: VecDeque<Arc<EventEnvelope>>,
     next_sequence: u64,
 }
 
-pub struct EventBus {
-    inner: Mutex<EventLog>,
-    sender: broadcast::Sender<EventEnvelope>,
+struct PersistJob {
+    event: Arc<EventEnvelope>,
+    encoded_payload: String,
+}
+
+struct EventBusInner {
+    log: Mutex<EventLog>,
+    sender: broadcast::Sender<Arc<EventEnvelope>>,
     database: Database,
+    persist_tx: Sender<PersistJob>,
+    inserts_since_prune: AtomicU64,
+    _writer: JoinHandle<()>,
+}
+
+/// Sequence-numbered event bus with in-memory replay and durable persistence.
+pub struct EventBus {
+    inner: Arc<EventBusInner>,
 }
 
 impl EventBus {
+    /// Open or create the event bus, hydrating only the retained in-memory window.
     pub fn open(database: Database) -> Result<Self, CoreError> {
-        let cutoff = (Utc::now() - Duration::days(DEFAULT_MAX_AGE_DAYS)).timestamp_millis();
-        database.execute("DELETE FROM agent_events WHERE created_at < ?1 OR id NOT IN (SELECT id FROM agent_events ORDER BY id DESC LIMIT ?2)", &[&cutoff, &(DEFAULT_MAX_EVENTS as i64)])?;
-        let mut events = database.read(|db| {
-            let mut statement = db.prepare("SELECT id,event_id,category,kind,payload_json,created_at FROM agent_events WHERE event_id IS NOT NULL ORDER BY id")?;
-            statement.query_map([], |row| {
-                let sequence: i64 = row.get(0)?;
-                let id_text: String = row.get(1)?;
-                let kind: String = row.get(3)?;
-                let payload_text: String = row.get(4)?;
-                let timestamp_ms: i64 = row.get(5)?;
-                let id = Uuid::parse_str(&id_text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(36, rusqlite::types::Type::Text, Box::new(e)))?;
-                let payload = serde_json::from_str(&payload_text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(payload_text.len(), rusqlite::types::Type::Text, Box::new(e)))?;
-                let timestamp = DateTime::from_timestamp_millis(timestamp_ms).ok_or_else(|| rusqlite::Error::IntegralValueOutOfRange(5, timestamp_ms))?;
-                Ok(EventEnvelope { id, sequence: sequence as u64, timestamp, category: category_for(&kind), kind, payload })
-            })?.collect::<rusqlite::Result<VecDeque<_>>>()
-        })?;
+        prune_database(&database)?;
+        let events = load_recent_events(&database)?;
         let next_sequence = database.read(|db| {
             db.query_row(
                 "SELECT coalesce(max(id), 0) + 1 FROM agent_events",
@@ -96,68 +100,221 @@ impl EventBus {
             )
         })?;
         let (sender, _) = broadcast::channel(1024);
+        let (persist_tx, persist_rx) = mpsc::channel();
+        let writer_db = database.clone();
+        let writer = thread::Builder::new()
+            .name("event-writer".into())
+            .spawn(move || event_writer_loop(persist_rx, writer_db))
+            .map_err(|error| internal_io(error.to_string()))?;
         Ok(Self {
-            inner: Mutex::new(EventLog {
-                events: std::mem::take(&mut events),
-                next_sequence,
+            inner: Arc::new(EventBusInner {
+                log: Mutex::new(EventLog {
+                    events,
+                    next_sequence,
+                }),
+                sender,
+                database,
+                persist_tx,
+                inserts_since_prune: AtomicU64::new(0),
+                _writer: writer,
             }),
-            sender,
-            database,
         })
     }
 
+    /// Persist and broadcast a durable event.
     pub fn emit(
         &self,
         kind: impl Into<String>,
         payload: Value,
     ) -> Result<EventEnvelope, CoreError> {
+        self.emit_internal(kind, payload, true)
+    }
+
+    /// Broadcast an event without SQLite persistence (heartbeats, high-frequency noise).
+    pub fn emit_volatile(
+        &self,
+        kind: impl Into<String>,
+        payload: Value,
+    ) -> Result<EventEnvelope, CoreError> {
+        self.emit_internal(kind, payload, false)
+    }
+
+    fn emit_internal(
+        &self,
+        kind: impl Into<String>,
+        payload: Value,
+        durable: bool,
+    ) -> Result<EventEnvelope, CoreError> {
         let kind = kind.into();
         let category = category_for(&kind);
-        let mut inner = self.inner.lock().map_err(|_| poisoned())?;
-        let event = EventEnvelope {
+        let encoded = serde_json::to_string(&payload).map_err(internal)?;
+        let event = Arc::new(EventEnvelope {
             id: Uuid::new_v4(),
-            sequence: inner.next_sequence,
+            sequence: 0,
             timestamp: Utc::now(),
             category,
             kind,
             payload,
+        });
+
+        let event = {
+            let mut inner = self.inner.log.lock().map_err(|_| poisoned())?;
+            let sequence = inner.next_sequence;
+            inner.next_sequence = sequence.saturating_add(1);
+            let event = Arc::new(EventEnvelope { sequence, ..(*event).clone() });
+            inner.events.push_back(Arc::clone(&event));
+            while inner.events.len() > DEFAULT_MAX_EVENTS {
+                inner.events.pop_front();
+            }
+            event
         };
-        let encoded = serde_json::to_string(&event.payload).map_err(internal)?;
-        self.database.execute("INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)", &[&(event.sequence as i64), &event.id.to_string(), &event.category.as_str(), &event.kind, &encoded, &event.timestamp.timestamp_millis()])?;
-        inner.next_sequence = inner.next_sequence.saturating_add(1);
-        inner.events.push_back(event.clone());
-        while inner.events.len() > DEFAULT_MAX_EVENTS {
-            inner.events.pop_front();
+
+        if durable {
+            self.inner
+                .persist_tx
+                .send(PersistJob {
+                    event: Arc::clone(&event),
+                    encoded_payload: encoded,
+                })
+                .map_err(|error| internal_io(error.to_string()))?;
+            let count = self
+                .inner
+                .inserts_since_prune
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            if count.is_multiple_of(PRUNE_EVERY_N_INSERTS) {
+                let _ = prune_database(&self.inner.database);
+                self.inner.inserts_since_prune.store(0, Ordering::Relaxed);
+            }
         }
-        drop(inner);
-        let _ = self.sender.send(event.clone());
-        Ok(event)
+
+        let _ = self.inner.sender.send(event.clone());
+        Ok((*event).clone())
     }
 
     pub fn replay(&self, after_sequence: u64, limit: usize) -> Vec<EventEnvelope> {
         self.inner
+            .log
             .lock()
             .map(|inner| {
-                inner
-                    .events
+                let events = &inner.events;
+                let start = partition_after(events, after_sequence);
+                events
                     .iter()
-                    .filter(|e| e.sequence > after_sequence)
+                    .skip(start)
                     .take(limit.min(1000))
-                    .cloned()
+                    .map(|event| (**event).clone())
                     .collect()
             })
             .unwrap_or_default()
     }
-    pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
-        self.sender.subscribe()
+
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<EventEnvelope>> {
+        self.inner.sender.subscribe()
     }
+
     pub fn latest_sequence(&self) -> u64 {
         self.inner
+            .log
             .lock()
             .ok()
-            .and_then(|i| i.events.back().map(|e| e.sequence))
+            .map(|inner| inner.next_sequence.saturating_sub(1))
             .unwrap_or(0)
     }
+}
+
+fn partition_after(events: &VecDeque<Arc<EventEnvelope>>, after_sequence: u64) -> usize {
+    if events.is_empty() {
+        return 0;
+    }
+    let mut low = 0_usize;
+    let mut high = events.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if events[mid].sequence <= after_sequence {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+fn event_writer_loop(rx: mpsc::Receiver<PersistJob>, database: Database) {
+    while let Ok(job) = rx.recv() {
+        if let Err(error) = database.read(|db| {
+            let mut statement = db.prepare_cached(
+                "INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            )?;
+            statement.execute(rusqlite::params![
+                job.event.sequence as i64,
+                job.event.id.to_string(),
+                job.event.category.as_str(),
+                job.event.kind,
+                job.encoded_payload,
+                job.event.timestamp.timestamp_millis(),
+            ])
+        }) {
+            tracing::error!(%error, sequence = job.event.sequence, "failed to persist event");
+        }
+    }
+}
+
+fn prune_database(database: &Database) -> Result<(), CoreError> {
+    let cutoff = (Utc::now() - Duration::days(DEFAULT_MAX_AGE_DAYS)).timestamp_millis();
+    database
+        .execute(
+            "DELETE FROM agent_events WHERE created_at < ?1 OR id NOT IN (SELECT id FROM agent_events ORDER BY id DESC LIMIT ?2)",
+            &[&cutoff, &(DEFAULT_MAX_EVENTS as i64)],
+        )
+        .map(|_| ())
+        .map_err(storage)
+}
+
+fn load_recent_events(database: &Database) -> Result<VecDeque<Arc<EventEnvelope>>, CoreError> {
+    database
+        .read(|db| {
+            let mut statement = db.prepare(
+                "SELECT id,event_id,category,kind,payload_json,created_at FROM agent_events WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT ?1",
+            )?;
+            let mut rows: Vec<EventEnvelope> = statement
+                .query_map([DEFAULT_MAX_EVENTS as i64], |row| {
+                    let sequence: i64 = row.get(0)?;
+                    let id_text: String = row.get(1)?;
+                    let kind: String = row.get(3)?;
+                    let payload_text: String = row.get(4)?;
+                    let timestamp_ms: i64 = row.get(5)?;
+                    let id = Uuid::parse_str(&id_text).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            36,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                    let payload = serde_json::from_str(&payload_text).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            payload_text.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                    let timestamp = DateTime::from_timestamp_millis(timestamp_ms).ok_or_else(
+                        || rusqlite::Error::IntegralValueOutOfRange(5, timestamp_ms),
+                    )?;
+                    Ok(EventEnvelope {
+                        id,
+                        sequence: sequence as u64,
+                        timestamp,
+                        category: category_for(&kind),
+                        kind,
+                        payload,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.reverse();
+            Ok(rows.into_iter().map(Arc::new).collect())
+        })
+        .map_err(storage)
 }
 
 fn category_for(kind: &str) -> EventCategory {
@@ -174,6 +331,7 @@ fn category_for(kind: &str) -> EventCategory {
         _ => EventCategory::System,
     }
 }
+
 fn poisoned() -> CoreError {
     CoreError::new(
         ErrorCode::Internal,
@@ -182,6 +340,7 @@ fn poisoned() -> CoreError {
         "event bus mutex poisoned",
     )
 }
+
 fn internal(error: serde_json::Error) -> CoreError {
     CoreError::new(
         ErrorCode::Internal,
@@ -191,11 +350,30 @@ fn internal(error: serde_json::Error) -> CoreError {
     )
 }
 
+fn internal_io(message: String) -> CoreError {
+    CoreError::new(
+        ErrorCode::Internal,
+        ErrorSource::Storage,
+        "The event store is unavailable.",
+        message,
+    )
+}
+
+fn storage(error: retcon_storage::StorageError) -> CoreError {
+    CoreError::new(
+        ErrorCode::Internal,
+        ErrorSource::Storage,
+        "Retcon could not access the event store.",
+        error.to_string(),
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;
+
     #[test]
     fn events_persist_replay_and_continue_sequences() {
         let database = Database::open_in_memory().unwrap();
@@ -203,10 +381,25 @@ mod tests {
         let first = bus
             .emit("terminal.output", json!({"text":"hello"}))
             .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
         drop(bus);
         let reopened = EventBus::open(database).unwrap();
         let second = reopened.emit("system.ready", json!({})).unwrap();
         assert_eq!(first.sequence + 1, second.sequence);
         assert_eq!(reopened.replay(0, 10).len(), 2);
+    }
+
+    #[test]
+    fn replay_uses_binary_search_for_large_logs() {
+        let database = Database::open_in_memory().unwrap();
+        let bus = EventBus::open(database).unwrap();
+        for index in 0..200 {
+            bus.emit("system.test", json!({ "index": index }))
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let slice = bus.replay(150, 10);
+        assert_eq!(slice.len(), 10);
+        assert_eq!(slice[0].sequence, 151);
     }
 }
