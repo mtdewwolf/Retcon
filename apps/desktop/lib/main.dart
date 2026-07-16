@@ -16,6 +16,9 @@ import 'src/shell_placeholder.dart';
 final _log = Logger('retcon.desktop');
 final services = GetIt.instance;
 
+final ThemeData _lunaDarkTheme = buildLunaDarkTheme();
+final Set<PointerDeviceKind> _dragDevices = PointerDeviceKind.values.toSet();
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   initLogging();
@@ -39,28 +42,34 @@ Future<void> main() async {
   runApp(RetconApp(core: services<CoreClient>()));
 }
 
-class RetconApp extends StatelessWidget {
+class RetconApp extends StatefulWidget {
   const RetconApp({super.key, this.core});
   final CoreClient? core;
 
   @override
+  State<RetconApp> createState() => _RetconAppState();
+}
+
+class _RetconAppState extends State<RetconApp> {
+  late final CoreClient _client = widget.core ?? CoreClient();
+  late final GoRouter _router = GoRouter(
+    routes: [
+      GoRoute(
+        path: '/',
+        builder: (context, state) => ShellPlaceholder(core: _client),
+      ),
+    ],
+  );
+
+  @override
   Widget build(BuildContext context) {
-    final client = core ?? CoreClient();
-    final router = GoRouter(
-      routes: [
-        GoRoute(
-          path: '/',
-          builder: (context, state) => ShellPlaceholder(core: client),
-        ),
-      ],
-    );
     return ChangeNotifierProvider.value(
-      value: client,
+      value: _client,
       child: MaterialApp.router(
         title: 'Retcon',
         debugShowCheckedModeBanner: false,
-        theme: buildLunaDarkTheme(),
-        routerConfig: router,
+        theme: _lunaDarkTheme,
+        routerConfig: _router,
         supportedLocales: const [Locale('en')],
         localizationsDelegates: const [
           GlobalMaterialLocalizations.delegate,
@@ -68,7 +77,7 @@ class RetconApp extends StatelessWidget {
           GlobalCupertinoLocalizations.delegate,
         ],
         scrollBehavior: const MaterialScrollBehavior().copyWith(
-          dragDevices: PointerDeviceKind.values.toSet(),
+          dragDevices: _dragDevices,
         ),
       ),
     );

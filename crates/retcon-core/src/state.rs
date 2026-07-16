@@ -76,6 +76,12 @@ impl CoreState {
             tracing::error!(error_id=%error.id, "failed to persist event");
         }
     }
+
+    pub fn emit_live(&self, kind: &str, payload: Value) {
+        if let Err(error) = self.inner.events.emit_live(kind, payload) {
+            tracing::error!(error_id=%error.id, "failed to publish live event");
+        }
+    }
     pub fn events(&self) -> &EventBus {
         &self.inner.events
     }

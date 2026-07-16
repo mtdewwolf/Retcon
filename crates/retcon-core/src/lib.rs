@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 pub mod error;
 pub mod event;
+pub mod frame;
 pub mod jobs;
 pub mod lifecycle;
 pub mod rpc;

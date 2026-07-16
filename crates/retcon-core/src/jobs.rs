@@ -16,6 +16,9 @@ use uuid::Uuid;
 use crate::{CoreError, ErrorCode};
 use retcon_storage::Database;
 
+const FINISHED_JOB_RETENTION: Duration = Duration::from_secs(60 * 60);
+const MAX_FINISHED_JOBS: usize = 100;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -164,6 +167,7 @@ impl JobSupervisor {
     }
 
     pub fn list(&self) -> Vec<JobSnapshot> {
+        self.evict_finished();
         self.inner
             .lock()
             .map(|m| {
@@ -297,7 +301,62 @@ impl JobSupervisor {
             job.failure = failure;
             job.finished_at = Some(Utc::now());
         });
+        self.evict_finished();
     }
+
+    fn evict_finished(&self) {
+        let now = Utc::now();
+        let mut removed = Vec::new();
+        if let Ok(mut jobs) = self.inner.lock() {
+            let mut finished: Vec<(Uuid, Option<DateTime<Utc>>)> = jobs
+                .iter()
+                .filter(|(_, entry)| is_terminal(entry.snapshot.status))
+                .map(|(id, entry)| (*id, entry.snapshot.finished_at))
+                .collect();
+            finished.sort_by_key(|(_, finished_at)| *finished_at);
+
+            for (id, finished_at) in &finished {
+                let expired = finished_at.is_some_and(|stamp| {
+                    now.signed_duration_since(stamp)
+                        .to_std()
+                        .is_ok_and(|age| age > FINISHED_JOB_RETENTION)
+                });
+                if expired {
+                    removed.push(*id);
+                }
+            }
+
+            let retained_finished = finished
+                .iter()
+                .filter(|(id, _)| !removed.contains(id))
+                .count();
+            if retained_finished > MAX_FINISHED_JOBS {
+                let overflow = retained_finished - MAX_FINISHED_JOBS;
+                for (id, _) in finished
+                    .iter()
+                    .filter(|(id, _)| !removed.contains(id))
+                    .take(overflow)
+                {
+                    removed.push(*id);
+                }
+            }
+
+            for id in &removed {
+                jobs.remove(id);
+            }
+        }
+        if let Some(storage) = &self.storage {
+            for id in removed {
+                if let Err(error) = storage.execute(
+                    "DELETE FROM background_jobs WHERE id=?1",
+                    &[&id.to_string()],
+                ) {
+                    tracing::error!(%error, job.id=%id, "failed to evict finished job");
+                }
+            }
+        }
+    }
+
     fn persist(&self, id: Uuid) {
         let Some(storage) = &self.storage else {
             return;
@@ -338,6 +397,16 @@ fn with_elapsed(mut snapshot: JobSnapshot) -> JobSnapshot {
             duration.as_millis().try_into().unwrap_or(u64::MAX)
         });
     snapshot
+}
+
+fn is_terminal(status: JobStatus) -> bool {
+    matches!(
+        status,
+        JobStatus::Succeeded
+            | JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::TimedOut
+    )
 }
 
 fn classify(error: &CoreError) -> FailureClass {
@@ -389,5 +458,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "succeeded");
+    }
+
+    #[tokio::test]
+    async fn finished_jobs_are_evicted_by_count() {
+        let jobs = JobSupervisor::default();
+        for index in 0..(MAX_FINISHED_JOBS + 5) {
+            let id = jobs.spawn(
+                "test",
+                format!("job-{index}"),
+                Duration::from_secs(1),
+                1,
+                || async { Ok(()) },
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert!(jobs.get(id).is_some() || jobs.list().len() <= MAX_FINISHED_JOBS);
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(jobs.list().len() <= MAX_FINISHED_JOBS);
     }
 }
