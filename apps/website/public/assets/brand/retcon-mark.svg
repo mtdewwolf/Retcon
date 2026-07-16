@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Retcon checkpoint rewind mark</title>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f79b5"/>
+      <stop offset=".48" stop-color="#2a4d82"/>
+      <stop offset="1" stop-color="#162b4d"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="8" fill="#10131c"/>
+  <path d="M5 11a6 6 0 0 1 6-6h42a6 6 0 0 1 6 6v42a6 6 0 0 1-6 6H11a6 6 0 0 1-6-6z" fill="url(#panel)" stroke="#7d99c3" stroke-width="2"/>
+  <path d="M13 17h38" stroke="#9bb5d6" stroke-width="2" opacity=".8"/>
+  <circle cx="13" cy="11" r="2" fill="#e4e6f0"/>
+  <path d="M23 29h-9l6-7" fill="none" stroke="#e4e6f0" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M17 28a17 17 0 1 1 4 18" fill="none" stroke="#e4e6f0" stroke-width="5" stroke-linecap="square"/>
+  <rect x="28" y="28" width="12" height="12" fill="#4e9a51" stroke="#a3d1a5" stroke-width="2"/>
+  <path d="M32 31v6h5" fill="none" stroke="#e9f6ea" stroke-width="2"/>
+</svg>

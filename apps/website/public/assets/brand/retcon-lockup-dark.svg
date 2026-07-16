@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 72" role="img" aria-labelledby="title">
+  <title id="title">Retcon</title>
+  <g transform="translate(4 4)">
+    <rect width="64" height="64" rx="9" fill="#e4e6f0"/>
+    <path d="M23 29h-9l6-7" fill="none" stroke="#16233f" stroke-width="5"/>
+    <path d="M17 28a17 17 0 1 1 4 18" fill="none" stroke="#16233f" stroke-width="5"/>
+    <rect x="28" y="28" width="12" height="12" fill="none" stroke="#16233f" stroke-width="3"/>
+  </g>
+  <text x="84" y="47" fill="#14161f" font-family="Tahoma, Segoe UI, sans-serif" font-size="44" font-weight="700" letter-spacing="-1.5">Retcon</text>
+</svg>

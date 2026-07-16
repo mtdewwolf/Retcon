@@ -29,6 +29,7 @@ See the full product definition in [docs/product/](docs/product/README.md).
 | Core service | `crates/retcon-core/` | Rust + Tokio |
 | CLI | `apps/cli/` | Rust |
 | Browser service | `apps/browser-service/` | TypeScript on Bun + Playwright (managed Chromium) |
+| Marketing website | `apps/website/` | Astro static site (GitHub Pages) |
 | Shared UI packages | `packages/` | Dart/Flutter |
 | Protocol & schemas | `schemas/` | Typed local RPC over named pipes / Unix sockets |
 
@@ -63,6 +64,9 @@ cd apps/desktop && flutter run -d windows
 
 # Browser service
 cd apps/browser-service && bun install && bun run start
+
+# Marketing website
+cd apps/website && npm install && npm run dev
 ```
 
 ## Contributing

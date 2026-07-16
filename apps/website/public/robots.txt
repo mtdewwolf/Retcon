@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://mtdewwolf.github.io/Retcon/sitemap-index.xml

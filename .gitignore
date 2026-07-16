@@ -18,6 +18,9 @@ apps/desktop/.metadata
 node_modules/
 bun.lockb
 
+# Astro (website)
+.astro/
+
 # IDE / editor
 .idea/
 .vscode/
