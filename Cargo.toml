@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = ["apps/cli", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mtdewwolf/Retcon"
+rust-version = "1.93"
+
+[workspace.dependencies]
+# Internal crates
+retcon-protocol = { path = "crates/retcon-protocol" }
+retcon-storage = { path = "crates/retcon-storage" }
+retcon-agents = { path = "crates/retcon-agents" }
+retcon-terminal = { path = "crates/retcon-terminal" }
+retcon-git = { path = "crates/retcon-git" }
+retcon-worktrees = { path = "crates/retcon-worktrees" }
+retcon-filesystem = { path = "crates/retcon-filesystem" }
+retcon-index = { path = "crates/retcon-index" }
+retcon-permissions = { path = "crates/retcon-permissions" }
+retcon-checkpoints = { path = "crates/retcon-checkpoints" }
+retcon-browser = { path = "crates/retcon-browser" }
+retcon-diagnostics = { path = "crates/retcon-diagnostics" }
+retcon-updater = { path = "crates/retcon-updater" }
+retcon-platform = { path = "crates/retcon-platform" }
+
+# External
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+# Development builds favor iteration speed; release builds favor a small, fast binary.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [Master, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+
+  flutter:
+    name: Flutter (analyze, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Design system — analyze & test
+        working-directory: packages/retcon-design-system
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Desktop app — analyze & test
+        working-directory: apps/desktop
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+  browser-service:
+    name: Browser service (lint, typecheck, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/browser-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Lint
+        run: bunx @biomejs/biome check src
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Tests
+        run: bun test
+
+  website:
+    name: Website (build and verify)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/website/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  windows-build:
+    name: Windows build
+    runs-on: windows-latest
+    needs: [rust, flutter]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.0"
+      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build Rust workspace (release)
+        run: cargo build --workspace --release
+      - name: Build desktop shell (Windows)
+        working-directory: apps/desktop
+        run: |
+          flutter pub get
+          flutter build windows --release
+      - name: Upload core service artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: retcon-core-windows
+          path: |
+            target/release/retcon-core.exe
+            target/release/retcon.exe
+      - name: Upload desktop shell artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: retcon-desktop-windows
+          path: apps/desktop/build/windows/x64/runner/Release/

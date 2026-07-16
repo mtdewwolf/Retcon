@@ -1,0 +1,45 @@
+# Release workflow skeleton (Phase 1).
+#
+# Real packaging — installer, code signing, update channels — is Phase 31.
+# For now a version tag produces the raw Windows binaries as a draft release
+# so the release plumbing is exercised early.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+jobs:
+  windows:
+    name: Windows release build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.0"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Build Rust workspace (release)
+        run: cargo build --workspace --release
+      - name: Build desktop shell (Windows)
+        working-directory: apps/desktop
+        run: |
+          flutter pub get
+          flutter build windows --release
+      - name: Draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            target/release/retcon-core.exe
+            target/release/retcon.exe

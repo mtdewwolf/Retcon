@@ -1,0 +1,280 @@
+---
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import "../styles/global.css";
+
+const base = import.meta.env.BASE_URL;
+const githubUrl = "https://github.com/mtdewwolf/Retcon";
+const tallyId = import.meta.env.PUBLIC_TALLY_FORM_ID;
+const tallyUrl = tallyId ? `https://tally.so/r/${tallyId}` : "#early-access";
+const canonical = new URL(base, Astro.site);
+
+const proofs = [
+  {
+    file: "supervision.webp",
+    number: "01",
+    title: "See the whole agent run",
+    body: "Commands, file changes, task state, and cost stay visible and attributable while the agent works.",
+    alt: "Retcon supervising an active AI coding-agent session",
+  },
+  {
+    file: "approval-review.webp",
+    number: "02",
+    title: "Decide before risk lands",
+    body: "Pause destructive or networked actions, inspect the context, then approve or deny with a durable audit trail.",
+    alt: "Retcon approval prompt and reviewable code changes",
+  },
+  {
+    file: "browser-verification.webp",
+    number: "03",
+    title: "Finish with evidence",
+    body: "Pair tests and clean builds with browser screenshots, console output, and network checks—not an agent's assertion.",
+    alt: "Retcon browser verification evidence for a completed task",
+  },
+].map((proof) => ({
+  ...proof,
+  ready: existsSync(
+    fileURLToPath(new URL(`../../public/assets/product/${proof.file}`, import.meta.url)),
+  ),
+}));
+
+const proofReady = proofs.every((proof) => proof.ready);
+
+const workflow = [
+  ["Delegate", "Start a task in an isolated Git worktree."],
+  ["Approve", "Retcon pauses before risky actions."],
+  ["Review", "Inspect every changed file and diff hunk."],
+  ["Verify", "Run tests, builds, and browser checks."],
+  ["Recover", "Checkpoint, roll back, or resume after a crash."],
+];
+
+const principles = [
+  ["Local-first", "Your repositories, run history, and artifacts stay on your machine by default."],
+  ["Provider-neutral", "Supervise the coding-agent CLI and provider account you already use."],
+  ["Native Windows", "A Flutter desktop shell—not Electron, not a replacement for your IDE."],
+  ["Open source", "Apache-2.0 licensed and designed to be auditable where trust matters most."],
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="theme-color" content="#16233f" />
+    <meta
+      name="description"
+      content="Retcon is the local-first control room for supervising, reviewing, and verifying AI coding agents on Windows."
+    />
+    <meta name="robots" content="index,follow" />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href={`${base}assets/brand/favicon.svg`} type="image/svg+xml" />
+    <link rel="manifest" href={`${base}site.webmanifest`} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Retcon" />
+    <meta property="og:title" content="Retcon — Put AI coding agents under supervision" />
+    <meta
+      property="og:description"
+      content="A native, local-first control room for reviewable agent runs and evidence-based completion."
+    />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL(`${base}assets/social/og-retcon.png`, Astro.site)} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Retcon — Put AI coding agents under supervision" />
+    <meta
+      name="twitter:description"
+      content="Supervised, reviewable, reversible AI coding-agent runs on your own machine."
+    />
+    <meta name="twitter:image" content={new URL(`${base}assets/social/og-retcon.png`, Astro.site)} />
+    <title>Retcon — Put AI coding agents under supervision</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" aria-label="Site header">
+      <a class="brand" href={base} aria-label="Retcon home">
+        <img src={`${base}assets/brand/retcon-mark.svg`} width="32" height="32" alt="" />
+        <span>Retcon</span>
+        <span class="pre-alpha">Pre-alpha</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#how-it-works">How it works</a>
+        <a href="#principles">Principles</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <a class="button button-small" href={githubUrl}>View on GitHub</a>
+    </header>
+
+    <main id="main">
+      <section class="hero section-shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="status-light"></span> Windows desktop · Pre-alpha</p>
+          <h1 id="hero-title">Put AI coding agents <em>under supervision.</em></h1>
+          <p class="hero-lede">
+            Retcon is the local-first control room for delegating real coding tasks—then seeing,
+            approving, reviewing, and verifying everything the agent does.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href={tallyUrl}>Join early access <span aria-hidden="true">→</span></a>
+            <a class="button" href={githubUrl}>Explore the source</a>
+          </div>
+          <p class="privacy-note">No cloud account. No Retcon subscription. Bring your own provider.</p>
+        </div>
+
+        <div class="control-window" aria-label="Retcon workflow status illustration">
+          <div class="window-titlebar">
+            <div class="window-icon"><img src={`${base}assets/brand/retcon-mark-mono.svg`} alt="" /></div>
+            <span>Retcon — task/session-042</span>
+            <div class="window-controls" aria-hidden="true"><i>_</i><i>□</i><i>×</i></div>
+          </div>
+          <div class="window-body">
+            <aside class="session-rail" aria-hidden="true">
+              <span class="rail-label">TASK</span>
+              <b>Agent run</b>
+              <span class="rail-item active"><i class="dot blue"></i> Working</span>
+              <span class="rail-item"><i class="dot amber"></i> 1 approval</span>
+              <span class="rail-item"><i class="dot green"></i> 14 checks</span>
+            </aside>
+            <div class="run-panel">
+              <div class="run-toolbar"><span>Activity</span><span class="mono">00:07:42</span></div>
+              <div class="terminal-line"><span class="prompt">›</span><code>npm run test</code><span class="state ok">passed</span></div>
+              <div class="terminal-line"><span class="prompt">›</span><code>git diff --stat</code><span class="state">3 files</span></div>
+              <div class="approval-box">
+                <div><span class="warning-icon">!</span><strong>Approval required</strong></div>
+                <p>Agent wants to install a new package.</p>
+                <div class="approval-actions"><span>Deny</span><span class="approve">Review &amp; approve</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="taskbar"><span class="start-pill"><img src={`${base}assets/brand/retcon-mark-mono.svg`} alt="" /> start</span><span class="task-tab">Retcon</span><span class="clock">10:42 PM</span></div>
+        </div>
+      </section>
+
+      <section class="trust-strip" aria-label="Product facts">
+        <span><i>◆</i> Apache-2.0 open source</span>
+        <span><i>◆</i> Windows 10 &amp; 11 first</span>
+        <span><i>◆</i> Bring your own provider</span>
+        <span><i>◆</i> Local by default</span>
+      </section>
+
+      <section class="section-shell split-section" aria-labelledby="problem-title">
+        <div>
+          <p class="section-kicker">The trust gap</p>
+          <h2 id="problem-title">Generation got fast.<br />Trust did not.</h2>
+        </div>
+        <div class="problem-copy">
+          <p>
+            Raw agent sessions make it hard to answer the questions that matter: What changed?
+            Which commands ran? Did the app actually work? Can I safely undo it?
+          </p>
+          <p>
+            Retcon turns an opaque run into a supervised workflow. Risky actions wait for you.
+            Changes stay attributable. “Done” requires evidence.
+          </p>
+        </div>
+      </section>
+
+      <section class="proof-section" aria-labelledby="proof-title">
+        <div class="section-shell section-heading">
+          <div>
+            <p class="section-kicker">Product proof</p>
+            <h2 id="proof-title">Nothing important stays hidden.</h2>
+          </div>
+          <p class:list={["capture-status", { ready: proofReady }]}>
+            <span></span>{proofReady ? "Verified product captures" : "Real product captures pending"}
+          </p>
+        </div>
+        <div class="section-shell proof-grid">
+          {proofs.map((proof) => (
+            <article class="proof-card">
+              <div class:list={["proof-visual", { pending: !proof.ready }]}>
+                {proof.ready ? (
+                  <img src={`${base}assets/product/${proof.file}`} alt={proof.alt} loading="lazy" />
+                ) : (
+                  <div class="capture-pending" aria-label={`${proof.alt} — capture pending`}>
+                    <span class="crosshair"></span>
+                    <strong>Product capture {proof.number}</strong>
+                    <small>Reserved for verified UI</small>
+                  </div>
+                )}
+              </div>
+              <div class="proof-copy"><span>{proof.number}</span><h3>{proof.title}</h3><p>{proof.body}</p></div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="how-it-works" class="section-shell workflow-section" aria-labelledby="workflow-title">
+        <p class="section-kicker">One durable loop</p>
+        <h2 id="workflow-title">From delegation to evidence.</h2>
+        <ol class="workflow-list">
+          {workflow.map(([title, body], index) => (
+            <li><span>{String(index + 1).padStart(2, "0")}</span><div><h3>{title}</h3><p>{body}</p></div></li>
+          ))}
+        </ol>
+      </section>
+
+      <section id="principles" class="principles-section" aria-labelledby="principles-title">
+        <div class="section-shell">
+          <p class="section-kicker">Built around your machine</p>
+          <h2 id="principles-title">A control room, not another black box.</h2>
+          <div class="principles-grid">
+            {principles.map(([title, body], index) => (
+              <article><span class="principle-icon">{["⌂", "↔", "▣", "◇"][index]}</span><h3>{title}</h3><p>{body}</p></article>
+            ))}
+          </div>
+          <div class="open-source-callout">
+            <div><span class="code-braces">{`{ }`}</span><div><p class="section-kicker">Auditable by design</p><h3>Trust the workflow. Inspect the code.</h3></div></div>
+            <a class="button" href={githubUrl}>Browse the repository <span aria-hidden="true">→</span></a>
+          </div>
+        </div>
+      </section>
+
+      <section id="faq" class="section-shell faq-section" aria-labelledby="faq-title">
+        <div><p class="section-kicker">Straight answers</p><h2 id="faq-title">Before you install.</h2></div>
+        <div class="faq-list">
+          <details open><summary>Is Retcon another AI coding agent?</summary><p>No. Retcon supervises the agent CLI you already use. It adds approvals, isolated worktrees, review, verification, rollback, and recovery around that agent.</p></details>
+          <details><summary>Does my code go to Retcon?</summary><p>Retcon is local-first and requires no Retcon-operated cloud service. Your chosen AI provider still receives the context you explicitly send through its own account.</p></details>
+          <details><summary>What platforms are supported?</summary><p>The MVP is focused on Windows 10 and 11. Linux and macOS are later possibilities, not pre-alpha promises.</p></details>
+          <details><summary>Can I use my existing IDE?</summary><p>Yes. Retcon is a control room, not a full IDE replacement. It is designed to open worktrees, files, and diffs in your preferred editor.</p></details>
+          <details><summary>When can I download it?</summary><p>Retcon is currently pre-alpha and not yet usable. Join early access for milestone updates and the first test-ready builds.</p></details>
+        </div>
+      </section>
+
+      <section id="early-access" class="cta-section" aria-labelledby="cta-title">
+        <div class="section-shell cta-inner">
+          <div>
+            <p class="section-kicker">Early access</p>
+            <h2 id="cta-title">Make delegation easier to trust.</h2>
+            <p>Get milestone updates and an invitation when Retcon is ready for real Windows repositories.</p>
+          </div>
+          <div class="signup-panel">
+            {tallyId ? (
+              <>
+                <iframe
+                  title="Join the Retcon early-access list"
+                  src={`https://tally.so/embed/${tallyId}?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1`}
+                  loading="lazy"
+                ></iframe>
+              </>
+            ) : (
+              <div class="signup-placeholder">
+                <strong>Early-access form awaiting launch configuration</strong>
+                <p>The site is ready; publishing remains gated until the live Tally form is connected.</p>
+              </div>
+            )}
+            <p>By signing up, you agree to receive Retcon project updates. Tally processes this form under its <a href="https://tally.so/help/privacy-policy">privacy policy</a>. Unsubscribe any time.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="section-shell footer-inner">
+        <a class="brand" href={base}><img src={`${base}assets/brand/retcon-mark.svg`} width="28" height="28" alt="" /><span>Retcon</span></a>
+        <p>Supervise and verify AI coding agents.</p>
+        <div><a href={githubUrl}>GitHub</a><a href={`${githubUrl}/blob/Master/LICENSE`}>Apache-2.0</a><a href={`${githubUrl}/blob/Master/SECURITY.md`}>Security</a></div>
+      </div>
+    </footer>
+  </body>
+</html>

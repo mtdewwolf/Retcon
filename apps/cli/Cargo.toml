@@ -1,0 +1,18 @@
+[package]
+name = "retcon-cli"
+description = "Command-line interface for Retcon: status, diagnostics, and headless control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "retcon"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

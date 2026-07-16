@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 310 72" role="img" aria-labelledby="title desc">
+  <title id="title">Retcon</title>
+  <desc id="desc">Checkpoint rewind mark and Retcon wordmark</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#4f79b5"/><stop offset=".48" stop-color="#2a4d82"/><stop offset="1" stop-color="#162b4d"/></linearGradient>
+  </defs>
+  <g transform="translate(4 4) scale(1)">
+    <rect width="64" height="64" rx="9" fill="#10131c"/>
+    <rect x="2" y="2" width="60" height="60" rx="8" fill="url(#panel)" stroke="#7d99c3" stroke-width="2"/>
+    <path d="M22 29h-9l6-7" fill="none" stroke="#e4e6f0" stroke-width="5"/>
+    <path d="M16 28a17 17 0 1 1 4 18" fill="none" stroke="#e4e6f0" stroke-width="5"/>
+    <rect x="27" y="28" width="12" height="12" fill="#4e9a51" stroke="#a3d1a5" stroke-width="2"/>
+  </g>
+  <text x="84" y="46" fill="#e4e6f0" font-family="Tahoma, Segoe UI, sans-serif" font-size="43" font-weight="700" letter-spacing="-1.5">Retcon</text>
+  <rect x="229" y="23" width="73" height="23" fill="#203357" stroke="#6684b7"/>
+  <text x="240" y="38" fill="#c9dafa" font-family="Consolas, monospace" font-size="10" font-weight="700" letter-spacing="1">PRE-ALPHA</text>
+</svg>
