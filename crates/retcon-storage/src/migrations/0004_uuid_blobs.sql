@@ -1,0 +1,2 @@
+-- Applied by `migrate_uuid_columns` in database.rs. It rebuilds the v1-v3
+-- tables with 16-byte UUID BLOB columns while preserving existing data.

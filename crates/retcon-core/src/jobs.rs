@@ -406,7 +406,7 @@ impl JobSupervisor {
                 "INSERT INTO background_jobs (id,owner,name,status,created_at,started_at,finished_at,attempts,max_attempts,timeout_ms,failure_class,failure,child_process_ids_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET status=excluded.status,started_at=excluded.started_at,finished_at=excluded.finished_at,attempts=excluded.attempts,failure_class=excluded.failure_class,failure=excluded.failure,child_process_ids_json=excluded.child_process_ids_json",
             )?;
             statement.execute(rusqlite::params![
-                job.id.to_string(),
+                job.id.as_bytes(),
                 job.owner,
                 job.name,
                 status,
@@ -443,7 +443,8 @@ impl JobSupervisor {
         let Some(storage) = &self.storage else {
             return;
         };
-        let cutoff = (Utc::now() - chrono::Duration::days(FINISHED_RETENTION_DAYS)).timestamp_millis();
+        let cutoff =
+            (Utc::now() - chrono::Duration::days(FINISHED_RETENTION_DAYS)).timestamp_millis();
         if let Err(error) = storage.execute(
             "DELETE FROM background_jobs WHERE finished_at IS NOT NULL AND finished_at < ?1",
             &[&cutoff],
@@ -508,7 +509,7 @@ mod tests {
             .read(|db| {
                 db.query_row(
                     "SELECT status FROM background_jobs WHERE id=?1",
-                    [id.to_string()],
+                    [id.as_bytes()],
                     |row| row.get(0),
                 )
             })

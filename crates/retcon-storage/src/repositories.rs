@@ -178,7 +178,7 @@ impl ProjectRepository<'_> {
         let now = now_ms();
         self.0.execute(
             "INSERT INTO projects (id,name,created_at,updated_at) VALUES (?1,?2,?3,?3)",
-            &[&project.id.to_string(), &project.name, &now],
+            &[&project.id.as_bytes(), &project.name, &now],
         )?;
         Ok(Project {
             id: project.id,
@@ -191,7 +191,7 @@ impl ProjectRepository<'_> {
         self.0.read(|db| {
             db.query_row(
                 "SELECT id,name,created_at,updated_at FROM projects WHERE id=?1",
-                [id.to_string()],
+                [id.as_bytes()],
                 row_project,
             )
             .optional()
@@ -204,7 +204,7 @@ impl SessionRepository<'_> {
         let now = now_ms();
         self.0.execute(
             "INSERT INTO sessions (id,project_id,title,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5)",
-            &[&session.id.to_string(), &session.project_id.to_string(), &session.title, &session.status, &now],
+            &[&session.id.as_bytes(), &session.project_id.as_bytes(), &session.title, &session.status, &now],
         )?;
         Ok(Session {
             id: session.id,
@@ -219,7 +219,7 @@ impl SessionRepository<'_> {
         self.0.read(|db| {
             db.query_row(
                 "SELECT id,project_id,title,status,created_at,updated_at FROM sessions WHERE id=?1",
-                [id.to_string()],
+                [id.as_bytes()],
                 row_session,
             )
             .optional()
@@ -228,14 +228,14 @@ impl SessionRepository<'_> {
     pub fn list_for_project(&self, project_id: Uuid) -> Result<Vec<Session>> {
         self.0.read(|db| {
             let mut statement = db.prepare("SELECT id,project_id,title,status,created_at,updated_at FROM sessions WHERE project_id=?1 ORDER BY updated_at DESC")?;
-            statement.query_map([project_id.to_string()], row_session)?.collect()
+            statement.query_map([project_id.as_bytes()], row_session)?.collect()
         })
     }
     pub fn set_status(&self, id: Uuid, status: &str) -> Result<bool> {
         let now = now_ms();
         Ok(self.0.execute(
             "UPDATE sessions SET status=?2,updated_at=?3 WHERE id=?1",
-            &[&id.to_string(), &status, &now],
+            &[&id.as_bytes(), &status, &now],
         )? > 0)
     }
 }
@@ -246,8 +246,8 @@ impl TurnRepository<'_> {
         self.0.execute(
             "INSERT INTO turns (id,session_id,sequence,status,started_at) VALUES (?1,?2,?3,?4,?5)",
             &[
-                &turn.id.to_string(),
-                &turn.session_id.to_string(),
+                &turn.id.as_bytes(),
+                &turn.session_id.as_bytes(),
                 &turn.sequence,
                 &turn.status,
                 &now,
@@ -263,13 +263,13 @@ impl TurnRepository<'_> {
         })
     }
     pub fn get(&self, id: Uuid) -> Result<Option<Turn>> {
-        self.0.read(|db| db.query_row("SELECT id,session_id,sequence,status,started_at,completed_at FROM turns WHERE id=?1", [id.to_string()], row_turn).optional())
+        self.0.read(|db| db.query_row("SELECT id,session_id,sequence,status,started_at,completed_at FROM turns WHERE id=?1", [id.as_bytes()], row_turn).optional())
     }
     pub fn set_status(&self, id: Uuid, status: &str, completed: bool) -> Result<bool> {
         let completed_at = completed.then(now_ms);
         Ok(self.0.execute(
             "UPDATE turns SET status=?2,completed_at=?3 WHERE id=?1",
-            &[&id.to_string(), &status, &completed_at],
+            &[&id.as_bytes(), &status, &completed_at],
         )? > 0)
     }
 }
@@ -277,8 +277,8 @@ impl TurnRepository<'_> {
 impl TaskRepository<'_> {
     pub fn create(&self, task: &NewTask) -> Result<Task> {
         let now = now_ms();
-        let session_id = task.session_id.map(|id| id.to_string());
-        self.0.execute("INSERT INTO tasks (id,session_id,title,description,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6)", &[&task.id.to_string(), &session_id, &task.title, &task.description, &task.status, &now])?;
+        let session_id = task.session_id.map(|id| id.as_bytes().to_vec());
+        self.0.execute("INSERT INTO tasks (id,session_id,title,description,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6)", &[&task.id.as_bytes(), &session_id, &task.title, &task.description, &task.status, &now])?;
         Ok(Task {
             id: task.id,
             session_id: task.session_id,
@@ -290,11 +290,11 @@ impl TaskRepository<'_> {
         })
     }
     pub fn get(&self, id: Uuid) -> Result<Option<Task>> {
-        self.0.read(|db| db.query_row("SELECT id,session_id,title,description,status,created_at,updated_at FROM tasks WHERE id=?1", [id.to_string()], row_task).optional())
+        self.0.read(|db| db.query_row("SELECT id,session_id,title,description,status,created_at,updated_at FROM tasks WHERE id=?1", [id.as_bytes()], row_task).optional())
     }
     pub fn set_status(&self, id: Uuid, status: &str) -> Result<bool> {
         let now = now_ms();
-        Ok(self.0.execute("UPDATE tasks SET status=?2,updated_at=?3,completed_at=CASE WHEN ?2='completed' THEN ?3 ELSE completed_at END WHERE id=?1", &[&id.to_string(), &status, &now])? > 0)
+        Ok(self.0.execute("UPDATE tasks SET status=?2,updated_at=?3,completed_at=CASE WHEN ?2='completed' THEN ?3 ELSE completed_at END WHERE id=?1", &[&id.as_bytes(), &status, &now])? > 0)
     }
 }
 
@@ -377,11 +377,11 @@ fn row_turn(row: &Row<'_>) -> rusqlite::Result<Turn> {
     })
 }
 fn row_task(row: &Row<'_>) -> rusqlite::Result<Task> {
-    let session: Option<String> = row.get(1)?;
+    let session: Option<Vec<u8>> = row.get(1)?;
     Ok(Task {
         id: uuid(row, 0)?,
         session_id: session
-            .map(|s| Uuid::parse_str(&s))
+            .map(|bytes| Uuid::from_slice(&bytes))
             .transpose()
             .map_err(from_uuid)?,
         title: row.get(2)?,
@@ -392,10 +392,10 @@ fn row_task(row: &Row<'_>) -> rusqlite::Result<Task> {
     })
 }
 fn uuid(row: &Row<'_>, index: usize) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&row.get::<_, String>(index)?).map_err(from_uuid)
+    Uuid::from_slice(&row.get::<_, Vec<u8>>(index)?).map_err(from_uuid)
 }
 fn from_uuid(error: uuid::Error) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(36, rusqlite::types::Type::Text, Box::new(error))
+    rusqlite::Error::FromSqlConversionFailure(16, rusqlite::types::Type::Blob, Box::new(error))
 }
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()

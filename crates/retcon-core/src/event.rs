@@ -161,7 +161,10 @@ impl EventBus {
             let mut inner = self.inner.log.lock().map_err(|_| poisoned())?;
             let sequence = inner.next_sequence;
             inner.next_sequence = sequence.saturating_add(1);
-            let event = Arc::new(EventEnvelope { sequence, ..(*event).clone() });
+            let event = Arc::new(EventEnvelope {
+                sequence,
+                ..(*event).clone()
+            });
             inner.events.push_back(Arc::clone(&event));
             while inner.events.len() > DEFAULT_MAX_EVENTS {
                 inner.events.pop_front();
@@ -248,7 +251,7 @@ fn event_writer_loop(rx: mpsc::Receiver<PersistJob>, database: Database) {
             )?;
             statement.execute(rusqlite::params![
                 job.event.sequence as i64,
-                job.event.id.to_string(),
+                job.event.id.as_bytes(),
                 job.event.category.as_str(),
                 job.event.kind,
                 job.encoded_payload,
@@ -280,14 +283,14 @@ fn load_recent_events(database: &Database) -> Result<VecDeque<Arc<EventEnvelope>
             let mut rows: Vec<EventEnvelope> = statement
                 .query_map([DEFAULT_MAX_EVENTS as i64], |row| {
                     let sequence: i64 = row.get(0)?;
-                    let id_text: String = row.get(1)?;
+                    let id_bytes: Vec<u8> = row.get(1)?;
                     let kind: String = row.get(3)?;
                     let payload_text: String = row.get(4)?;
                     let timestamp_ms: i64 = row.get(5)?;
-                    let id = Uuid::parse_str(&id_text).map_err(|e| {
+                    let id = Uuid::from_slice(&id_bytes).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            36,
-                            rusqlite::types::Type::Text,
+                            16,
+                            rusqlite::types::Type::Blob,
                             Box::new(e),
                         )
                     })?;
@@ -394,8 +397,7 @@ mod tests {
         let database = Database::open_in_memory().unwrap();
         let bus = EventBus::open(database).unwrap();
         for index in 0..200 {
-            bus.emit("system.test", json!({ "index": index }))
-                .unwrap();
+            bus.emit("system.test", json!({ "index": index })).unwrap();
         }
         std::thread::sleep(std::time::Duration::from_millis(30));
         let slice = bus.replay(150, 10);

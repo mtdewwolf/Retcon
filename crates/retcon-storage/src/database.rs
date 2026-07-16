@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
+use uuid::Uuid;
 
 use crate::error::{Result, StorageError};
 use crate::migrations::{LATEST_VERSION, MIGRATIONS};
@@ -288,8 +290,12 @@ fn apply_migrations(connection: &mut Connection, path: &Path) -> Result<()> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| classify_database_error(path, "begin schema migration", error))?;
-        transaction
-            .execute_batch(migration.sql)
+        let migration_result = if migration.version == 4 {
+            migrate_uuid_columns(&transaction)
+        } else {
+            transaction.execute_batch(migration.sql)
+        };
+        migration_result
             .map_err(|error| classify_database_error(path, "apply schema migration", error))?;
         transaction
             .execute_batch(&format!("PRAGMA user_version = {};", migration.version))
@@ -303,6 +309,127 @@ fn apply_migrations(connection: &mut Connection, path: &Path) -> Result<()> {
             migration.name,
             "applied database migration"
         );
+    }
+    Ok(())
+}
+
+const UUID_COLUMNS: &[(&str, &[&str])] = &[
+    ("projects", &["id"]),
+    ("repository_locations", &["id", "project_id"]),
+    (
+        "workspaces",
+        &["id", "project_id", "repository_location_id"],
+    ),
+    ("provider_installations", &["id"]),
+    ("provider_accounts", &["id", "provider_installation_id"]),
+    (
+        "sessions",
+        &["id", "project_id", "workspace_id", "provider_account_id"],
+    ),
+    ("turns", &["id", "session_id"]),
+    ("messages", &["id", "turn_id"]),
+    ("tool_calls", &["id", "turn_id"]),
+    ("agent_events", &["event_id", "session_id", "turn_id"]),
+    ("tasks", &["id", "session_id"]),
+    ("task_steps", &["id", "task_id"]),
+    ("acceptance_criteria", &["id", "task_id"]),
+    ("approvals", &["id", "session_id", "tool_call_id"]),
+    ("permission_rules", &["id", "project_id"]),
+    ("terminal_sessions", &["id", "session_id"]),
+    ("commands", &["id", "terminal_session_id"]),
+    (
+        "git_worktrees",
+        &["id", "session_id", "repository_location_id"],
+    ),
+    ("git_checkpoints", &["id", "git_worktree_id", "turn_id"]),
+    ("file_changes", &["id", "turn_id", "git_checkpoint_id"]),
+    ("browser_sessions", &["id", "session_id"]),
+    ("browser_events", &["browser_session_id"]),
+    ("screenshots", &["id", "browser_session_id"]),
+    ("test_runs", &["id", "session_id", "command_id"]),
+    ("diagnostics", &["id", "session_id"]),
+    (
+        "usage_records",
+        &["id", "session_id", "provider_account_id"],
+    ),
+    ("layouts", &["workspace_id"]),
+    ("project_memories", &["id", "project_id"]),
+    ("background_jobs", &["id"]),
+];
+
+fn migrate_uuid_columns(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+    transaction.create_scalar_function(
+        "uuid_blob",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let text: String = context.get(0)?;
+            let id = Uuid::parse_str(&text)
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            Ok(id.as_bytes().to_vec())
+        },
+    )?;
+    let schemas: Vec<(String, String)> = transaction.prepare("SELECT name, sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let indexes: Vec<String> = transaction
+        .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type='index' AND sql IS NOT NULL ORDER BY name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (table, _) in &schemas {
+        transaction.execute_batch(&format!(
+            "ALTER TABLE \"{table}\" RENAME TO \"{table}__uuid_text\";"
+        ))?;
+    }
+    for (table, schema) in &schemas {
+        let uuid_columns = UUID_COLUMNS
+            .iter()
+            .find_map(|(name, columns)| (*name == table).then_some(*columns))
+            .unwrap_or(&[]);
+        let mut schema = schema.clone();
+        for column in uuid_columns {
+            schema = schema.replace(&format!("{column} TEXT"), &format!("{column} BLOB"));
+        }
+        transaction.execute_batch(&schema)?;
+    }
+    for (table, _) in &schemas {
+        let columns: Vec<String> = transaction
+            .prepare(&format!("PRAGMA table_info(\"{table}\")"))?
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        let uuid_columns = UUID_COLUMNS
+            .iter()
+            .find_map(|(name, columns)| (*name == table).then_some(*columns))
+            .unwrap_or(&[]);
+        let source = columns
+            .iter()
+            .map(|column| {
+                if uuid_columns.contains(&column.as_str()) {
+                    format!(
+                        "CASE WHEN \"{column}\" IS NULL THEN NULL ELSE uuid_blob(\"{column}\") END"
+                    )
+                } else {
+                    format!("\"{column}\"")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let quoted = columns
+            .iter()
+            .map(|column| format!("\"{column}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        transaction.execute_batch(&format!(
+            "INSERT INTO \"{table}\" ({quoted}) SELECT {source} FROM \"{table}__uuid_text\";"
+        ))?;
+    }
+    for (table, _) in &schemas {
+        transaction.execute_batch(&format!("DROP TABLE \"{table}__uuid_text\";"))?;
+    }
+    for index in indexes {
+        transaction.execute_batch(&index)?;
     }
     Ok(())
 }

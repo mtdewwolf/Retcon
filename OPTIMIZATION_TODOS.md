@@ -62,11 +62,11 @@ meaningful optimization surface yet.
 
 ---
 
-## Deferred (future schema work)
+## Completed schema work
 
-- [ ] **P3** UUID-as-BLOB schema migration to shrink indexes (`repositories.rs`)
-  - Requires a coordinated schema v4 migration across every TEXT UUID column and all
-    client bindings; deferred until a dedicated migration sprint.
+- [x] **P3** UUID-as-BLOB schema migration (`retcon-storage` migration `0004`)
+  - Rebuilds v1-v3 databases transactionally, converts every UUID column to compact
+    16-byte BLOBs, recreates indexes, and updates active repository/core bindings.
 
 ---
 

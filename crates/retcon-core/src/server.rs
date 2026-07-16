@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 
 use serde_json::json;
-use tokio::io::{AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 

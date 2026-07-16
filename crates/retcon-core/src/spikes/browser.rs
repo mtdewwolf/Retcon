@@ -71,7 +71,11 @@ async fn stop_service(handle: &BrowserHandle) {
         .await;
         let _ = tokio::time::timeout(std::time::Duration::from_secs(3), proc.child.wait()).await;
         let _ = proc.child.kill().await;
-        drain_pending(&proc.pending, json!({"error":{"message":"browser service stopped"}})).await;
+        drain_pending(
+            &proc.pending,
+            json!({"error":{"message":"browser service stopped"}}),
+        )
+        .await;
     }
 }
 

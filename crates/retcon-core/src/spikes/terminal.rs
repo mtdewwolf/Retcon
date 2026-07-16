@@ -32,7 +32,12 @@ impl TerminalRegistry {
             .map
             .lock()
             .ok()
-            .map(|mut sessions| sessions.drain().map(|(_, session)| session).collect::<Vec<_>>())
+            .map(|mut sessions| {
+                sessions
+                    .drain()
+                    .map(|(_, session)| session)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         for session in sessions {
             session.kill();

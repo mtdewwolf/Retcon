@@ -42,11 +42,7 @@ pub async fn run_git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     run_git_limited(repo, args, MAX_GIT_OUTPUT_BYTES).await
 }
 
-async fn run_git_limited(
-    repo: &Path,
-    args: &[&str],
-    max_bytes: usize,
-) -> Result<String, GitError> {
+async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result<String, GitError> {
     let command_label = args.join(" ");
     let mut child = Command::new("git")
         .args(args)
@@ -138,9 +134,7 @@ async fn run_git_limited(
         })?;
 
     if status.success() {
-        Ok(String::from_utf8_lossy(&stdout_bytes)
-            .trim_end()
-            .to_owned())
+        Ok(String::from_utf8_lossy(&stdout_bytes).trim_end().to_owned())
     } else {
         Err(GitError {
             command: command_label,
