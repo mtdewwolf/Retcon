@@ -76,3 +76,153 @@ meaningful optimization surface yet.
 2. Event writer off async path + terminal coalesce (throughput) ✅
 3. Recovery indexes + Git/browser evidence polish (latency) ✅
 4. Storage pragma / statement-cache tuning (incremental) ✅
+
+---
+
+## Remaining — non-Rust (2026-07-16 review)
+
+Prior Done items above are still closed unless noted. Stub Flutter packages
+(`retcon-diff-viewer`, `retcon-file-viewer`, `retcon-plugin-sdk`,
+`retcon-terminal-view`) and empty `scripts/` / `examples/` / `tests/` trees
+have no optimization surface yet.
+
+### Incomplete from prior “Done”
+
+- [ ] **P1** Method-aware stdio concurrency is ineffective
+  (`apps/browser-service/src/main.ts` — `serveStdio`)
+  - `for await` awaits each handler (including navigate/screenshot) before
+    reading the next stdin line, so `browser.status` / `browser.logs` cannot
+    run while a mutating call is in flight despite `activeMutating`.
+  - Fix: parse lines on a reader loop; dispatch mutating work to a single-flight
+    queue and allow overlapping read-only handlers (or reply immediately from
+    a non-blocking path).
+
+### P0 — bounds / long-running memory
+
+- [ ] **P0** Cap per-entry console/network payload size
+  (`apps/browser-service/src/browser.ts` — console/request/response handlers)
+  - Ring buffer caps *count* (1000) but not *bytes*. `message.text()` and long
+    URLs can make each slot multi‑MB → multi‑GB RSS over a busy session.
+  - Fix: truncate text/URL fields (e.g. 2–8 KiB) before `pushCapped` / emit;
+    optionally track approximate buffer bytes.
+
+- [ ] **P0** Cap stdio RPC request line size before `JSON.parse`
+  (`apps/browser-service/src/main.ts` — `serveStdio`)
+  - `createInterface` + `JSON.parse(line)` accepts unbounded lines. Core now
+    caps frames; the browser-service stdin path does not.
+  - Fix: reject/drop lines over a fixed max (aligned with core frame limit)
+    before parse.
+
+### P1 — hot path / CI wall time
+
+- [ ] **P1** Clear log buffers on `close()` / failed relaunch
+  (`apps/browser-service/src/browser.ts` — `close`)
+  - `consoleEntries` / `networkEntries` survive `close()`; relaunch on the same
+    `ManagedBrowser` retains prior evidence and RAM.
+  - Fix: clear both arrays (and detach page listeners) in `close()`.
+
+- [ ] **P1** Sample or coalesce high-frequency network/console emits
+  (`apps/browser-service/src/browser.ts` + `main.ts` — `emit` / `emitEvent`)
+  - Every request/response/console line builds objects, ring-pushes, and tries
+    stdout JSON write (backlog 64 drops silently). Busy pages burn CPU even
+    when events are dropped.
+  - Fix: always buffer locally; throttle/sample live `browser.request` /
+    `browser.response` streams (or emit summaries); count drops.
+
+- [ ] **P1** Cache Playwright Chromium in CI
+  (`.github/workflows/ci.yml` — `browser-service` job)
+  - `bunx playwright install --with-deps chromium` runs cold every job.
+  - Fix: `actions/cache` on `~/.cache/ms-playwright` keyed by Playwright
+    version / `bun.lock`; keep `--with-deps` only on cache miss if possible.
+
+- [ ] **P1** Path-filter CI jobs / avoid full Windows rebuild on unrelated PRs
+  (`.github/workflows/ci.yml`)
+  - Every PR runs rust + flutter + browser-service + website + Windows release
+    build with no `paths` / `paths-ignore`.
+  - Fix: path filters (or a lightweight required set + conditional Windows);
+    don’t block website-only changes on `windows-build`.
+
+- [ ] **P1** Stabilize Flutter app root ownership
+  (`apps/desktop/lib/main.dart` — `RetconApp`)
+  - Stateless `build` creates `GoRouter`, `buildLunaDarkTheme()`, and
+    `CoreClient()` when `core == null` (never disposed). Fine for one-shot
+    `runApp` today; leaks / resets routing on any rebuild (tests use
+    `const RetconApp()`).
+  - Fix: `StatefulWidget` — own client + router in `initState`/`dispose`;
+    cache theme; make `initLogging` idempotent.
+
+### P2 — medium impact
+
+- [ ] **P2** Replace `splice`-based `pushCapped` with index ring buffer
+  (`apps/browser-service/src/browser.ts` — `pushCapped`)
+  - Overflow does `splice(0, n)` (O(n) copy) on every excess push under load.
+  - Fix: fixed array + head/length; slice for `logs()` pagination.
+
+- [ ] **P2** Clean up profile dir if `launchPersistentContext` fails
+  (`apps/browser-service/src/browser.ts` — `launch`)
+  - `mkdtemp` then launch; throw leaves temp profile on disk.
+  - Fix: try/finally remove profile when context was not established.
+
+- [ ] **P2** Attach console/network listeners for all pages
+  (`apps/browser-service/src/browser.ts` — `launch`)
+  - Handlers only on the first page; popups / `newPage` omit evidence.
+  - Fix: `context.on("page", …)` shared attach helper.
+
+- [ ] **P2** Lighter Chromium launch for ephemeral sessions
+  (`apps/browser-service/src/browser.ts` — `launch`)
+  - Persistent context + full resource load is heavier than needed for
+    headless verification.
+  - Fix: prefer `chromium.launch` + context when no profile persistence is
+    required; add args (`--disable-dev-shm-usage`, optional image blocking
+    via route) for lower RAM/CPU.
+
+- [ ] **P2** Narrow start-menu `setState` rebuilds
+  (`apps/desktop/lib/src/desktop_shell.dart` — `_DesktopShellState`)
+  - Toggling the start menu rebuilds title bar, menu bar, and workspace.
+  - Fix: localize overlay state (or `ValueListenableBuilder`) so chrome stays
+    const/stable.
+
+- [ ] **P2** Harden `CoreClient` line handling / sync I/O
+  (`apps/desktop/lib/src/core_client.dart`)
+  - `jsonDecode` in `_handleLine` can kill the subscription; `existsSync` in
+    `_launchCore` blocks the UI isolate.
+  - Fix: try/catch per line; `File.exists` async (or resolve executable once).
+
+- [ ] **P2** Skip website asset regeneration when outputs are fresh
+  (`apps/website/scripts/generate-brand-assets.mjs`, `package.json` `build`)
+  - Sharp regenerates committed PNGs on every `npm run build` / CI test.
+  - Fix: mtime/hash short-circuit, or generate only in `npm run assets` and
+    verify presence in build.
+
+- [ ] **P2** Add caches to release workflow; pin Bun
+  (`.github/workflows/release.yml`, `ci.yml` browser-service)
+  - Release lacks `Swatinem/rust-cache` / Flutter `cache: true`; CI uses
+    `bun-version: latest` (cache thrash) and no Bun install cache.
+  - Fix: mirror CI caches; pin Bun; cache Bun install directory.
+
+- [ ] **P2** Reduce duplicate Rust compile work in CI
+  (`.github/workflows/ci.yml` — `rust` job)
+  - `clippy --all-targets` then `cargo test` largely recompiles.
+  - Fix: `cargo clippy` then `cargo test --all-targets` with shared
+    `CARGO_TARGET_DIR` / sccache, or nextest after a single build.
+
+### P3 — polish
+
+- [ ] **P3** `writeLine` can settle the Promise twice when `stdout.write`
+  returns true (`apps/browser-service/src/main.ts`)
+- [ ] **P3** Cache default `buildLunaDarkTheme()` result
+  (`packages/retcon-design-system/lib/src/theme.dart`)
+- [ ] **P3** Hoist `Actions` map / avoid realloc on each shell build
+  (`apps/desktop/lib/src/desktop_shell.dart`)
+- [ ] **P3** Split `astro check` out of default `npm test` hot path
+  (`apps/website/package.json`) when iteration speed matters
+- [ ] **P3** Expand `audit.yml` path filters to website lockfile + pubspecs
+- [ ] **P3** Emit/log stdout event-drop counters when backlog is saturated
+
+### Suggested order of attack (non-Rust)
+
+1. Per-entry + stdin line caps; clear buffers on close (bounds)
+2. Fix real stdio concurrency; throttle live network emits (throughput)
+3. CI Playwright cache + path filters (developer time)
+4. Flutter root ownership + shell rebuild narrowing (desktop footing)
+5. Ring buffer / Chromium launch / asset short-circuit (incremental)
