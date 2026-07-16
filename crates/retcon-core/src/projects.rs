@@ -1,16 +1,17 @@
 //! Project opening, lightweight repository analysis, and health reporting.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::state::CoreState;
 
 const METADATA_KEY: &str = "project.metadata";
+const DEFAULT_LIST_LIMIT: usize = 50;
+const MAX_LIST_LIMIT: usize = 200;
 
 fn invalid(message: impl Into<String>) -> CoreError {
     CoreError::new(
@@ -45,12 +46,19 @@ fn canonical_directory(path: &str) -> Result<PathBuf, CoreError> {
 pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
     let root = canonical_directory(path)?;
     let root_text = root.to_string_lossy().into_owned();
-    let remote = git_output(&root, &["remote", "get-url", "origin"])
+    let remote = retcon_git::run_git(&root, &["remote", "get-url", "origin"])
         .await
         .ok()
         .filter(|s| !s.is_empty());
     let project = match state.storage().projects().find_by_path(&root_text)? {
-        Some(project) => project,
+        Some(project) => {
+            // Refresh last-seen / remote without a duplicate create-path insert.
+            state
+                .storage()
+                .projects()
+                .add_location(project.id, &root_text, remote.as_deref())?;
+            project
+        }
         None => {
             let project = state
                 .storage()
@@ -67,11 +75,6 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
             project
         }
     };
-    // A reopened project may have gained an origin or moved between remotes.
-    state
-        .storage()
-        .projects()
-        .add_location(project.id, &root_text, remote.as_deref())?;
     let current = metadata(state, project.id)?;
     let defaults = json!({
         "name": project.name, "repositoryPath": root_text, "remoteUrl": remote,
@@ -81,13 +84,25 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
     });
     let merged = merge(defaults, current);
     save_metadata(state, project.id, &merged)?;
+    let analysis = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || analyze(&root)
+    })
+    .await
+    .map_err(|error| {
+        CoreError::new(
+            ErrorCode::Internal,
+            ErrorSource::System,
+            "Retcon could not analyze that project.",
+            error.to_string(),
+        )
+    })?;
+    let health = health(&root).await;
     state.emit(
         "project.opened",
         json!({"projectId": project.id, "path": root}),
     );
-    Ok(
-        json!({"id": project.id, "metadata": merged, "analysis": analyze(&root), "health": health(&root).await}),
-    )
+    Ok(json!({"id": project.id, "metadata": merged, "analysis": analysis, "health": health}))
 }
 
 /// Clone a repository and then open the resulting folder.
@@ -103,39 +118,48 @@ pub async fn clone(
     if destination.exists() {
         return Err(invalid("clone destination already exists"));
     }
-    let output = Command::new("git")
-        .args(["clone", "--", remote_url, &destination.to_string_lossy()])
-        .output()
-        .await
-        .map_err(|e| {
-            CoreError::new(
-                ErrorCode::Io,
-                ErrorSource::System,
-                "Git is required to clone a project.",
-                format!("start git clone: {e}"),
-            )
-        })?;
-    if !output.status.success() {
-        return Err(CoreError::new(
+    let destination_text = destination.to_string_lossy().into_owned();
+    retcon_git::run_git_cwd(
+        None,
+        &["clone", "--", remote_url, destination_text.as_str()],
+    )
+    .await
+    .map_err(|error| {
+        CoreError::new(
             ErrorCode::Io,
             ErrorSource::System,
             "Retcon could not clone that repository.",
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    open(state, &destination.to_string_lossy()).await
+            error.stderr,
+        )
+    })?;
+    open(state, &destination_text).await
 }
 
 /// List recent projects, optionally filtering by name or repository path.
-pub fn list(state: &CoreState, query: Option<&str>) -> Result<Value, CoreError> {
+pub fn list(
+    state: &CoreState,
+    query: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Value, CoreError> {
     let needle = query.unwrap_or_default().to_ascii_lowercase();
-    let records = state
+    let limit = limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let records = state.storage().projects().list(limit)?;
+    let metadata_by_scope = state
         .storage()
-        .projects()
-        .list()?
+        .settings()
+        .list_by_key(METADATA_KEY)?
+        .into_iter()
+        .map(|setting| (setting.scope, setting.value))
+        .collect::<HashMap<_, _>>();
+    let projects = records
         .into_iter()
         .filter_map(|project| {
-            let data = metadata(state, project.id).ok()?;
+            let data = metadata_by_scope
+                .get(&scope(project.id))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let name = data
                 .get("name")
                 .and_then(Value::as_str)
@@ -150,7 +174,7 @@ pub fn list(state: &CoreState, query: Option<&str>) -> Result<Value, CoreError> 
             .then(|| json!({"id": project.id, "metadata": data, "updatedAt": project.updated_at}))
         })
         .collect::<Vec<_>>();
-    Ok(json!({"projects": records}))
+    Ok(json!({"projects": projects}))
 }
 
 /// Persist a partial metadata update for a project.
@@ -186,7 +210,20 @@ pub fn remove(state: &CoreState, id: Uuid) -> Result<(), CoreError> {
 /// Analyze a folder without adding it to the recent-project list.
 pub async fn inspect(path: &str) -> Result<Value, CoreError> {
     let root = canonical_directory(path)?;
-    Ok(json!({"analysis": analyze(&root), "health": health(&root).await}))
+    let analysis = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || analyze(&root)
+    })
+    .await
+    .map_err(|error| {
+        CoreError::new(
+            ErrorCode::Internal,
+            ErrorSource::System,
+            "Retcon could not analyze that project.",
+            error.to_string(),
+        )
+    })?;
+    Ok(json!({"analysis": analysis, "health": health(&root).await}))
 }
 
 fn metadata(state: &CoreState, id: Uuid) -> Result<Value, CoreError> {
@@ -299,50 +336,47 @@ fn analyze(root: &Path) -> Value {
 }
 
 async fn health(root: &Path) -> Value {
-    let git_version = Command::new("git")
-        .arg("--version")
-        .output()
+    let git_version = retcon_git::run_git_cwd(None, &["--version"])
+        .await
+        .is_ok();
+    let readable = retcon_git::run_git(root, &["rev-parse", "--is-inside-work-tree"])
         .await
         .ok()
-        .filter(|o| o.status.success())
-        .is_some();
-    let git_status = git_output(root, &["status", "--porcelain=v1", "--branch"])
-        .await
-        .ok();
-    let branch = git_status
-        .as_deref()
-        .and_then(|s| s.lines().next())
-        .and_then(|s| s.strip_prefix("## "))
-        .map(|s| s.split("...").next().unwrap_or(s));
-    let dirty = git_status
-        .as_deref()
-        .map(|s| s.lines().skip(1).next().is_some())
-        .unwrap_or(false);
+        .is_some_and(|value| value.trim() == "true");
+    let branch = if readable {
+        retcon_git::run_git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .ok()
+            .filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    // Exit-code / empty-output probes avoid buffering full porcelain for large trees.
+    let dirty = if readable {
+        let staged_dirty = retcon_git::run_git(root, &["diff", "--cached", "--quiet"])
+            .await
+            .is_err();
+        let unstaged_dirty = retcon_git::run_git(root, &["diff", "--quiet"]).await.is_err();
+        let untracked = retcon_git::run_git(root, &["ls-files", "--others", "--exclude-standard"])
+            .await
+            .ok()
+            .is_some_and(|output| !output.trim().is_empty());
+        staged_dirty || unstaged_dirty || untracked
+    } else {
+        false
+    };
     let disk = std::fs::metadata(root)
         .ok()
         .map(|_| "available")
         .unwrap_or("unavailable");
     json!({"checks": [
       {"name":"Git installed", "status": if git_version {"pass"} else {"warning"}},
-      {"name":"Repository readable", "status": if git_status.is_some() {"pass"} else {"warning"}},
+      {"name":"Repository readable", "status": if readable {"pass"} else {"warning"}},
       {"name":"Branch detected", "status": if branch.is_some() {"pass"} else {"warning"}, "detail": branch},
       {"name":"Working tree", "status": if dirty {"warning"} else {"pass"}, "detail": if dirty {"uncommitted changes"} else {"clean"}},
       {"name":"Project folder", "status": if disk == "available" {"pass"} else {"error"}},
       {"name":"Environment template", "status": if root.join(".env.example").is_file() || !root.join(".env").exists() {"pass"} else {"warning"}, "detail":"Review local environment files before running commands."}
     ]})
-}
-async fn git_output(root: &Path, args: &[&str]) -> Result<String, ()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|_| ())?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .ok_or(())
 }
 
 #[cfg(test)]
@@ -379,7 +413,7 @@ mod tests {
             &json!({"pinned": true, "testCommand": "cargo test"}),
         )
         .unwrap();
-        let projects = list(&state, None).unwrap();
+        let projects = list(&state, None, None).unwrap();
         assert_eq!(projects["projects"][0]["metadata"]["pinned"], true);
         assert_eq!(
             projects["projects"][0]["metadata"]["testCommand"],

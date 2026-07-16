@@ -39,22 +39,40 @@ impl std::fmt::Display for GitError {
 ///
 /// Returns a [`GitError`] carrying Git's exit code and stderr on failure.
 pub async fn run_git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    run_git_limited(repo, args, MAX_GIT_OUTPUT_BYTES).await
+    run_git_cwd(Some(repo), args).await
 }
 
-async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result<String, GitError> {
+/// Run `git` with `args` in an optional working directory, returning trimmed stdout.
+///
+/// Use this for commands that do not require an existing repository (for example `clone`).
+///
+/// # Errors
+///
+/// Returns a [`GitError`] carrying Git's exit code and stderr on failure.
+pub async fn run_git_cwd(cwd: Option<&Path>, args: &[&str]) -> Result<String, GitError> {
+    run_git_limited(cwd, args, MAX_GIT_OUTPUT_BYTES).await
+}
+
+async fn run_git_limited(
+    cwd: Option<&Path>,
+    args: &[&str],
+    max_bytes: usize,
+) -> Result<String, GitError> {
     let command_label = args.join(" ");
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
-        .current_dir(repo)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| GitError {
-            command: command_label.clone(),
-            exit_code: None,
-            stderr: format!("failed to launch git: {e}"),
-        })?;
+        .kill_on_drop(true);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command.spawn().map_err(|e| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: format!("failed to launch git: {e}"),
+    })?;
 
     let mut stdout = child.stdout.take().ok_or_else(|| GitError {
         command: command_label.clone(),
@@ -67,66 +85,54 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         stderr: "git process has no stderr".into(),
     })?;
 
-    let stdout_task = tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 8192];
-        loop {
-            let read = stdout
-                .read(&mut chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            if read == 0 {
-                break;
+    let stdout_fut = read_capped_stream(&mut stdout, max_bytes, "stdout");
+    let stderr_fut = read_capped_stream(&mut stderr, max_bytes, "stderr");
+    tokio::pin!(stdout_fut);
+    tokio::pin!(stderr_fut);
+
+    let mut stdout_bytes: Option<Result<Vec<u8>, String>> = None;
+    let mut stderr_bytes: Option<Result<Vec<u8>, String>> = None;
+
+    let status = loop {
+        tokio::select! {
+            result = &mut stdout_fut, if stdout_bytes.is_none() => {
+                if result.is_err() {
+                    let _ = child.start_kill();
+                }
+                stdout_bytes = Some(result);
             }
-            if buffer.len().saturating_add(read) > max_bytes {
-                return Err(format!("git output exceeded {max_bytes} bytes"));
+            result = &mut stderr_fut, if stderr_bytes.is_none() => {
+                if result.is_err() {
+                    let _ = child.start_kill();
+                }
+                stderr_bytes = Some(result);
             }
-            buffer.extend_from_slice(&chunk[..read]);
+            status = child.wait() => {
+                break status.map_err(|e| GitError {
+                    command: command_label.clone(),
+                    exit_code: None,
+                    stderr: format!("failed to wait for git: {e}"),
+                })?;
+            }
         }
-        Ok(buffer)
-    });
+    };
 
-    let stderr_task = tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 1024];
-        loop {
-            let read = stderr
-                .read(&mut chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            if read == 0 {
-                break;
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        Ok(buffer)
-    });
+    if stdout_bytes.is_none() {
+        stdout_bytes = Some(stdout_fut.await);
+    }
+    if stderr_bytes.is_none() {
+        stderr_bytes = Some(stderr_fut.await);
+    }
 
-    let status = child.wait().await.map_err(|e| GitError {
-        command: command_label.clone(),
-        exit_code: None,
-        stderr: format!("failed to wait for git: {e}"),
-    })?;
-
-    let stdout_bytes = stdout_task
-        .await
-        .map_err(|e| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: format!("stdout reader failed: {e}"),
-        })?
+    let stdout_bytes = stdout_bytes
+        .expect("stdout reader settled")
         .map_err(|message| GitError {
             command: command_label.clone(),
             exit_code: status.code(),
             stderr: message,
         })?;
-    let stderr_bytes = stderr_task
-        .await
-        .map_err(|e| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: format!("stderr reader failed: {e}"),
-        })?
+    let stderr_bytes = stderr_bytes
+        .expect("stderr reader settled")
         .map_err(|message| GitError {
             command: command_label.clone(),
             exit_code: status.code(),
@@ -142,6 +148,29 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
             stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
         })
     }
+}
+
+async fn read_capped_stream(
+    stream: &mut (impl AsyncReadExt + Unpin),
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if buffer.len().saturating_add(read) > max_bytes {
+            return Err(format!("git {label} exceeded {max_bytes} bytes"));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    Ok(buffer)
 }
 
 /// One entry from `git status --porcelain`.
