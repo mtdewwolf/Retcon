@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{Mutex, oneshot};
 
 use super::{fail, param_str};
 use crate::error::ErrorCode;
+use crate::frame::read_frame_line;
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
 
@@ -115,8 +116,8 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     };
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_frame_line(&mut reader).await {
                 tracing::debug!(target: "retcon_browser_service", "{line}");
             }
         });
@@ -126,8 +127,8 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     let reader_pending = Arc::clone(&pending);
     let event_state = state.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stdout);
+        while let Ok(Some(line)) = read_frame_line(&mut reader).await {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };

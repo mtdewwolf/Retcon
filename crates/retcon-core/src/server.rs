@@ -5,14 +5,15 @@
 use std::net::SocketAddr;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 use crate::error::{CoreError, ErrorCode, ErrorSource};
+use crate::frame::read_frame_line;
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
-use retcon_protocol::AuthLine;
+use retcon_protocol::{AuthLine, MAX_FRAME_BYTES};
 
 pub struct Server {
     listener: TcpListener,
@@ -46,7 +47,7 @@ impl Server {
 
         loop {
             tokio::select! {
-                _ = heartbeat.tick() => self.state.emit("system.heartbeat", json!({"uptime_ms": self.state.uptime().as_millis()})),
+                _ = heartbeat.tick() => self.state.emit_live("system.heartbeat", json!({"uptime_ms": self.state.uptime().as_millis()})),
                 result = self.listener.accept() => match result {
                     Ok((stream, _)) => {
                         let token = self.token.clone();
@@ -78,11 +79,9 @@ async fn serve_connection(
     state: CoreState,
 ) -> Result<(), CoreError> {
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let auth_line = lines
-        .next_line()
-        .await
-        .map_err(|error| CoreError::io("read RPC authentication", error))?
+    let mut reader = BufReader::new(reader);
+    let auth_line = read_frame_line(&mut reader)
+        .await?
         .ok_or_else(|| invalid_request("Authentication is required."))?;
     let auth: AuthLine = serde_json::from_str(&auth_line)
         .map_err(|_| invalid_request("The authentication message is malformed."))?;
@@ -99,8 +98,8 @@ async fn serve_connection(
 
     loop {
         let message = tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line.map_err(|error| CoreError::io("read RPC request", error))? else { break };
+            line = read_frame_line(&mut reader) => {
+                let Some(line) = line? else { break };
                 let response = match serde_json::from_str::<Request>(&line) {
                     Ok(request) => dispatch(request, &state).await,
                     Err(error) => Response::error(0, &invalid_request(error.to_string())),
@@ -121,6 +120,14 @@ async fn serve_connection(
                 error.to_string(),
             )
         })?;
+        if encoded.len() >= MAX_FRAME_BYTES {
+            return Err(CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::Rpc,
+                "Retcon could not send an oversized local frame.",
+                format!("RPC response exceeded {MAX_FRAME_BYTES} bytes"),
+            ));
+        }
         encoded.push(b'\n');
         writer
             .write_all(&encoded)

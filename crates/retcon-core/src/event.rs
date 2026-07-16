@@ -16,6 +16,7 @@ use retcon_storage::Database;
 
 const DEFAULT_MAX_EVENTS: usize = 10_000;
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;
+const PRUNE_EVERY_INSERTS: u64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +63,7 @@ pub struct EventEnvelope {
 struct EventLog {
     events: VecDeque<EventEnvelope>,
     next_sequence: u64,
+    inserts_since_prune: u64,
 }
 
 pub struct EventBus {
@@ -72,8 +74,7 @@ pub struct EventBus {
 
 impl EventBus {
     pub fn open(database: Database) -> Result<Self, CoreError> {
-        let cutoff = (Utc::now() - Duration::days(DEFAULT_MAX_AGE_DAYS)).timestamp_millis();
-        database.execute("DELETE FROM agent_events WHERE created_at < ?1 OR id NOT IN (SELECT id FROM agent_events ORDER BY id DESC LIMIT ?2)", &[&cutoff, &(DEFAULT_MAX_EVENTS as i64)])?;
+        prune_events(&database)?;
         let mut events = database.read(|db| {
             let mut statement = db.prepare("SELECT id,event_id,category,kind,payload_json,created_at FROM agent_events WHERE event_id IS NOT NULL ORDER BY id")?;
             statement.query_map([], |row| {
@@ -100,6 +101,7 @@ impl EventBus {
             inner: Mutex::new(EventLog {
                 events: std::mem::take(&mut events),
                 next_sequence,
+                inserts_since_prune: 0,
             }),
             sender,
             database,
@@ -125,11 +127,44 @@ impl EventBus {
         let encoded = serde_json::to_string(&event.payload).map_err(internal)?;
         self.database.execute("INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)", &[&(event.sequence as i64), &event.id.to_string(), &event.category.as_str(), &event.kind, &encoded, &event.timestamp.timestamp_millis()])?;
         inner.next_sequence = inner.next_sequence.saturating_add(1);
+        inner.inserts_since_prune = inner.inserts_since_prune.saturating_add(1);
+        let should_prune = inner.inserts_since_prune >= PRUNE_EVERY_INSERTS;
+        if should_prune {
+            inner.inserts_since_prune = 0;
+        }
         inner.events.push_back(event.clone());
         while inner.events.len() > DEFAULT_MAX_EVENTS {
             inner.events.pop_front();
         }
         drop(inner);
+        if should_prune {
+            prune_events(&self.database)?;
+        }
+        let _ = self.sender.send(event.clone());
+        Ok(event)
+    }
+
+    /// Broadcast a live-only event without persisting it to SQLite.
+    pub fn emit_live(
+        &self,
+        kind: impl Into<String>,
+        payload: Value,
+    ) -> Result<EventEnvelope, CoreError> {
+        let kind = kind.into();
+        let category = category_for(&kind);
+        let sequence = self
+            .inner
+            .lock()
+            .map(|inner| inner.next_sequence.saturating_sub(1))
+            .unwrap_or(0);
+        let event = EventEnvelope {
+            id: Uuid::new_v4(),
+            sequence,
+            timestamp: Utc::now(),
+            category,
+            kind,
+            payload,
+        };
         let _ = self.sender.send(event.clone());
         Ok(event)
     }
@@ -158,6 +193,15 @@ impl EventBus {
             .and_then(|i| i.events.back().map(|e| e.sequence))
             .unwrap_or(0)
     }
+}
+
+fn prune_events(database: &Database) -> Result<(), CoreError> {
+    let cutoff = (Utc::now() - Duration::days(DEFAULT_MAX_AGE_DAYS)).timestamp_millis();
+    database.execute(
+        "DELETE FROM agent_events WHERE created_at < ?1 OR id NOT IN (SELECT id FROM agent_events ORDER BY id DESC LIMIT ?2)",
+        &[&cutoff, &(DEFAULT_MAX_EVENTS as i64)],
+    )?;
+    Ok(())
 }
 
 fn category_for(kind: &str) -> EventCategory {
@@ -208,5 +252,23 @@ mod tests {
         let second = reopened.emit("system.ready", json!({})).unwrap();
         assert_eq!(first.sequence + 1, second.sequence);
         assert_eq!(reopened.replay(0, 10).len(), 2);
+    }
+
+    #[test]
+    fn live_events_are_not_persisted() {
+        let database = Database::open_in_memory().unwrap();
+        let bus = EventBus::open(database.clone()).unwrap();
+        let mut subscriber = bus.subscribe();
+        let live = bus
+            .emit_live("system.heartbeat", json!({"uptime_ms": 1}))
+            .unwrap();
+        assert_eq!(
+            subscriber.try_recv().unwrap().kind,
+            "system.heartbeat"
+        );
+        drop(bus);
+        let reopened = EventBus::open(database).unwrap();
+        assert!(reopened.replay(0, 10).is_empty());
+        assert_eq!(live.kind, "system.heartbeat");
     }
 }
