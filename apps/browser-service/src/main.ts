@@ -1,10 +1,11 @@
-import { createInterface } from "node:readline";
 import { ManagedBrowser, type LogQuery, type ScreenshotOptions } from "./browser";
 import { logger } from "./logging";
 import { connect } from "./rpc";
 
 const VERSION = "0.1.0";
 const MAX_STDOUT_BACKLOG = 64;
+/** Match core RPC frame budget so a hostile client cannot OOM via stdin. */
+export const MAX_RPC_LINE_BYTES = 1024 * 1024;
 type RpcRequest = { id: number; method: string; params?: Record<string, unknown> };
 
 function parseArgs(argv: string[]): { health: boolean; stdio: boolean; pipe: string | undefined } {
@@ -44,11 +45,73 @@ function isMutatingMethod(method: string): boolean {
   return method !== "browser.status" && method !== "browser.logs";
 }
 
+/** Read newline-delimited stdin frames with a hard byte cap. */
+export async function* readCappedLines(
+  input: NodeJS.ReadableStream,
+  maxBytes = MAX_RPC_LINE_BYTES,
+): AsyncGenerator<string> {
+  let buffer = Buffer.alloc(0);
+  for await (const chunk of input) {
+    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (buffer.length + piece.length > maxBytes + 1) {
+      throw new Error(`RPC line exceeds ${maxBytes} bytes`);
+    }
+    buffer = Buffer.concat([buffer, piece]);
+    let newline = buffer.indexOf(0x0a);
+    while (newline >= 0) {
+      const line = buffer.subarray(0, newline).toString("utf8").replace(/\r$/, "");
+      buffer = buffer.subarray(newline + 1);
+      if (line.length > 0) yield line;
+      newline = buffer.indexOf(0x0a);
+    }
+    if (buffer.length > maxBytes) {
+      throw new Error(`RPC line exceeds ${maxBytes} bytes`);
+    }
+  }
+  if (buffer.length > 0) {
+    yield buffer.toString("utf8").replace(/\r$/, "");
+  }
+}
+
+async function handleRequest(
+  browser: ManagedBrowser,
+  request: RpcRequest,
+): Promise<Record<string, unknown>> {
+  const params = request.params ?? {};
+  switch (request.method) {
+    case "browser.launch":
+      return browser.launch();
+    case "browser.navigate":
+      return browser.navigate(String(params.url ?? ""));
+    case "browser.screenshot":
+      return browser.screenshot({
+        path: String(params.path ?? ""),
+        fullPage: Boolean(params.fullPage),
+        type: params.type === "jpeg" ? "jpeg" : "png",
+        quality: typeof params.quality === "number" ? params.quality : undefined,
+      } satisfies ScreenshotOptions);
+    case "browser.action":
+      return browser.action(params);
+    case "browser.logs":
+      return browser.logs({
+        offset: typeof params.offset === "number" ? params.offset : undefined,
+        limit: typeof params.limit === "number" ? params.limit : undefined,
+      } satisfies LogQuery);
+    case "browser.status":
+      return browser.status();
+    case "browser.close":
+      return browser.close();
+    default:
+      throw new Error(`unknown method: ${request.method}`);
+  }
+}
+
 async function serveStdio(browser: ManagedBrowser): Promise<void> {
-  const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
   const backlog = { count: 0 };
-  let activeMutating = false;
-  for await (const line of lines) {
+  let activeMutating: Promise<void> | undefined;
+  let mutatingChain: Promise<void> = Promise.resolve();
+
+  for await (const line of readCappedLines(process.stdin)) {
     let request: RpcRequest;
     try {
       request = JSON.parse(line) as RpcRequest;
@@ -56,60 +119,39 @@ async function serveStdio(browser: ManagedBrowser): Promise<void> {
       await writeLine({ id: 0, error: { message: "malformed JSON" } });
       continue;
     }
-    if (isMutatingMethod(request.method) && activeMutating) {
-      await writeLine({
-        id: request.id,
-        error: { message: "browser service is busy with another mutating request" },
-      });
-      continue;
-    }
-    if (isMutatingMethod(request.method)) activeMutating = true;
-    try {
-      const params = request.params ?? {};
-      let result: Record<string, unknown>;
-      switch (request.method) {
-        case "browser.launch":
-          result = await browser.launch();
-          break;
-        case "browser.navigate":
-          result = await browser.navigate(String(params.url ?? ""));
-          break;
-        case "browser.screenshot":
-          result = await browser.screenshot({
-            path: String(params.path ?? ""),
-            fullPage: Boolean(params.fullPage),
-            type: params.type === "jpeg" ? "jpeg" : "png",
-            quality: typeof params.quality === "number" ? params.quality : undefined,
-          } satisfies ScreenshotOptions);
-          break;
-        case "browser.action":
-          result = await browser.action(params);
-          break;
-        case "browser.logs":
-          result = browser.logs({
-            offset: typeof params.offset === "number" ? params.offset : undefined,
-            limit: typeof params.limit === "number" ? params.limit : undefined,
-          } satisfies LogQuery);
-          break;
-        case "browser.status":
-          result = browser.status();
-          break;
-        case "browser.close":
-          result = await browser.close();
-          break;
-        default:
-          throw new Error(`unknown method: ${request.method}`);
+
+    const respond = async (): Promise<void> => {
+      try {
+        const result = await handleRequest(browser, request);
+        await writeLine({ id: request.id, result });
+      } catch (error) {
+        await writeLine({
+          id: request.id,
+          error: { message: error instanceof Error ? error.message : String(error) },
+        });
       }
-      await writeLine({ id: request.id, result });
-    } catch (error) {
-      await writeLine({
-        id: request.id,
-        error: { message: error instanceof Error ? error.message : String(error) },
+    };
+
+    if (isMutatingMethod(request.method)) {
+      // Serialize mutating methods; do not block the stdin read loop.
+      const run = mutatingChain.then(async () => {
+        activeMutating = respond();
+        try {
+          await activeMutating;
+        } finally {
+          activeMutating = undefined;
+        }
       });
-    } finally {
-      if (isMutatingMethod(request.method)) activeMutating = false;
+      mutatingChain = run.catch(() => undefined);
+      void run;
+    } else {
+      // Status/logs may overlap an in-flight mutating request.
+      void respond();
     }
   }
+
+  await mutatingChain;
+  if (activeMutating) await activeMutating;
 }
 
 async function main(): Promise<number> {
@@ -132,8 +174,17 @@ async function main(): Promise<number> {
   };
   process.on("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
   process.on("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
-  if (args.stdio) await serveStdio(browser);
-  else await new Promise(() => undefined);
+  if (args.stdio) {
+    try {
+      await serveStdio(browser);
+    } catch (error) {
+      logger.error("stdio RPC failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await shutdown("stdio-error");
+      return 1;
+    }
+  } else await new Promise(() => undefined);
   await shutdown("stdin-closed");
   return 0;
 }

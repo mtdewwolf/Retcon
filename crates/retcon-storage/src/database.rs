@@ -515,13 +515,15 @@ mod tests {
     fn creates_and_reopens_versioned_schema() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("retcon.db");
+        let project_id = Uuid::new_v4();
+        let id_bytes = project_id.as_bytes().as_slice();
         {
             let database = Database::open(&path).unwrap();
             assert_eq!(database.schema_version().unwrap(), LATEST_VERSION);
             database
                 .execute(
                     "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                    &[&"project-1", &"Retcon", &1_i64, &1_i64],
+                    &[&id_bytes, &"Retcon", &1_i64, &1_i64],
                 )
                 .unwrap();
         }
@@ -629,11 +631,13 @@ mod tests {
         drop(connection);
 
         let upgraded = Database::open(path).unwrap();
-        assert_eq!(upgraded.schema_version().unwrap(), 3);
+        assert_eq!(upgraded.schema_version().unwrap(), LATEST_VERSION);
+        let job_id = uuid::Uuid::new_v4();
+        let id_bytes = job_id.as_bytes().as_slice();
         upgraded
             .execute(
-                "INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES ('job','test','migrated','queued',1,0,1,1000)",
-                &[],
+                "INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES (?1,'test','migrated','queued',1,0,1,1000)",
+                &[&id_bytes],
             )
             .unwrap();
     }

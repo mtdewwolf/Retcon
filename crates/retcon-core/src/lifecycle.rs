@@ -273,7 +273,7 @@ mod tests {
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(health["result"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["status"], "healthy");
-        assert_eq!(health["result"]["storage"]["schema_version"], 3);
+        assert_eq!(health["result"]["storage"]["schema_version"], 4);
         assert_eq!(shutdown["result"]["accepted"], true);
 
         runtime.wait_for_shutdown_signal().await.unwrap();
