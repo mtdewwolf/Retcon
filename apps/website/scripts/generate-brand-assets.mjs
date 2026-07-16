@@ -27,7 +27,7 @@ const socialSvg = String.raw`<svg xmlns="http://www.w3.org/2000/svg" width="1200
   <text x="121" y="84" fill="#fff" font-family="Tahoma, Segoe UI, sans-serif" font-size="20" font-weight="700">Retcon — Pre-alpha</text>
   <g fill="#e4e6f0" font-family="Tahoma, Segoe UI, sans-serif" font-weight="700"><text x="100" y="240" font-size="68">Put AI coding agents</text><text x="100" y="320" fill="#81afe8" font-size="68">under supervision.</text></g>
   <text x="103" y="385" fill="#aeb5c7" font-family="Tahoma, Segoe UI, sans-serif" font-size="25">Local-first. Reviewable. Reversible. Verified with evidence.</text>
-  <rect x="103" y="446" width="315" height="58" fill="#315f34" stroke="#76b779" stroke-width="2"/><text x="133" y="483" fill="#fff" font-family="Tahoma, Segoe UI, sans-serif" font-size="20" font-weight="700">OPEN-SOURCE CONTROL ROOM</text>
+  <rect x="103" y="446" width="380" height="58" fill="#315f34" stroke="#76b779" stroke-width="2"/><text x="133" y="483" fill="#fff" font-family="Tahoma, Segoe UI, sans-serif" font-size="20" font-weight="700">OPEN-SOURCE CONTROL ROOM</text>
   <text x="932" y="548" fill="#8792a9" font-family="Consolas, monospace" font-size="16">RETCON / WINDOWS</text>
   <rect x="57" y="558" width="1086" height="23" fill="#182d52"/><path d="M57 558h1086" stroke="#5f7ca9"/>
 </svg>`;

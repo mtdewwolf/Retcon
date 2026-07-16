@@ -29,5 +29,6 @@ window before publishing details.
 - Sandbox/profile escapes in the managed browser service
 - Update-chain integrity issues
 
-See the security principles in [docs/product/principles.md](docs/product/principles.md) and
-the threat model work planned in Phase 32 of the development plan.
+These follow the project's security principles (least privilege, local-only authenticated
+IPC, secret redaction, signed updates) and the threat-model work planned for Phase 32 of
+the development plan.

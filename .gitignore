@@ -21,6 +21,9 @@ bun.lockb
 # Astro (website)
 .astro/
 
+# Internal docs (local-only)
+docs/
+
 # IDE / editor
 .idea/
 .vscode/
