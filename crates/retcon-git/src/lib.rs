@@ -68,8 +68,8 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         stderr: "git process has no stderr".into(),
     })?;
 
-    let mut stdout_fut = read_capped_stream(&mut stdout, max_bytes, "stdout");
-    let mut stderr_fut = read_capped_stream(&mut stderr, max_bytes, "stderr");
+    let stdout_fut = read_capped_stream(&mut stdout, max_bytes, "stdout");
+    let stderr_fut = read_capped_stream(&mut stderr, max_bytes, "stderr");
     tokio::pin!(stdout_fut);
     tokio::pin!(stderr_fut);
 

@@ -89,8 +89,8 @@ have no meaningful optimization surface yet.
 - [ ] **P3** Guard redundant focus `setState` in design-system controls —
   `packages/retcon-design-system/lib/src/components/controls.dart`
 - [ ] **P3** CI Playwright cache + path filters
-- [ ] **P3** Update storage/core tests for schema v4 UUID BLOBs (fixtures
-  still insert TEXT IDs / expect version 3)
+- [x] **P3** Update storage/core tests for schema v4 UUID BLOBs
+  (`database.rs`, `artifacts.rs`, `recovery.rs`, `lifecycle.rs`)
 
 ---
 
