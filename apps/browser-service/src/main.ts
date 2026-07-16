@@ -5,6 +5,8 @@ import { connect } from "./rpc";
 
 const VERSION = "0.1.0";
 const MAX_STDOUT_BACKLOG = 64;
+/** Align with retcon-protocol MAX_FRAME_BYTES so one stdin line cannot OOM the service. */
+const MAX_STDIN_LINE_CHARS = 1024 * 1024;
 type RpcRequest = { id: number; method: string; params?: Record<string, unknown> };
 
 function parseArgs(argv: string[]): { health: boolean; stdio: boolean; pipe: string | undefined } {
@@ -19,11 +21,10 @@ function parseArgs(argv: string[]): { health: boolean; stdio: boolean; pipe: str
 function writeLine(payload: unknown): Promise<void> {
   return new Promise((resolve, reject) => {
     const line = `${JSON.stringify(payload)}\n`;
-    const accepted = process.stdout.write(line, (error) => {
+    process.stdout.write(line, (error) => {
       if (error) reject(error);
       else resolve();
     });
-    if (accepted) resolve();
   });
 }
 
@@ -44,11 +45,50 @@ function isMutatingMethod(method: string): boolean {
   return method !== "browser.status" && method !== "browser.logs";
 }
 
+async function handleRequest(
+  browser: ManagedBrowser,
+  request: RpcRequest,
+): Promise<Record<string, unknown>> {
+  const params = request.params ?? {};
+  switch (request.method) {
+    case "browser.launch":
+      return browser.launch();
+    case "browser.navigate":
+      return browser.navigate(String(params.url ?? ""));
+    case "browser.screenshot":
+      return browser.screenshot({
+        path: String(params.path ?? ""),
+        fullPage: Boolean(params.fullPage),
+        type: params.type === "jpeg" ? "jpeg" : "png",
+        quality: typeof params.quality === "number" ? params.quality : undefined,
+      } satisfies ScreenshotOptions);
+    case "browser.action":
+      return browser.action(params);
+    case "browser.logs":
+      return browser.logs({
+        offset: typeof params.offset === "number" ? params.offset : undefined,
+        limit: typeof params.limit === "number" ? params.limit : undefined,
+      } satisfies LogQuery);
+    case "browser.status":
+      return browser.status();
+    case "browser.close":
+      return browser.close();
+    default:
+      throw new Error(`unknown method: ${request.method}`);
+  }
+}
+
 async function serveStdio(browser: ManagedBrowser): Promise<void> {
   const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
-  const backlog = { count: 0 };
+  let mutating: Promise<void> | undefined;
   let activeMutating = false;
+
   for await (const line of lines) {
+    if (line.length > MAX_STDIN_LINE_CHARS) {
+      await writeLine({ id: 0, error: { message: "oversized request line" } });
+      continue;
+    }
+
     let request: RpcRequest;
     try {
       request = JSON.parse(line) as RpcRequest;
@@ -56,60 +96,45 @@ async function serveStdio(browser: ManagedBrowser): Promise<void> {
       await writeLine({ id: 0, error: { message: "malformed JSON" } });
       continue;
     }
-    if (isMutatingMethod(request.method) && activeMutating) {
+
+    if (!isMutatingMethod(request.method)) {
+      try {
+        const result = await handleRequest(browser, request);
+        await writeLine({ id: request.id, result });
+      } catch (error) {
+        await writeLine({
+          id: request.id,
+          error: { message: error instanceof Error ? error.message : String(error) },
+        });
+      }
+      continue;
+    }
+
+    if (activeMutating) {
       await writeLine({
         id: request.id,
         error: { message: "browser service is busy with another mutating request" },
       });
       continue;
     }
-    if (isMutatingMethod(request.method)) activeMutating = true;
-    try {
-      const params = request.params ?? {};
-      let result: Record<string, unknown>;
-      switch (request.method) {
-        case "browser.launch":
-          result = await browser.launch();
-          break;
-        case "browser.navigate":
-          result = await browser.navigate(String(params.url ?? ""));
-          break;
-        case "browser.screenshot":
-          result = await browser.screenshot({
-            path: String(params.path ?? ""),
-            fullPage: Boolean(params.fullPage),
-            type: params.type === "jpeg" ? "jpeg" : "png",
-            quality: typeof params.quality === "number" ? params.quality : undefined,
-          } satisfies ScreenshotOptions);
-          break;
-        case "browser.action":
-          result = await browser.action(params);
-          break;
-        case "browser.logs":
-          result = browser.logs({
-            offset: typeof params.offset === "number" ? params.offset : undefined,
-            limit: typeof params.limit === "number" ? params.limit : undefined,
-          } satisfies LogQuery);
-          break;
-        case "browser.status":
-          result = browser.status();
-          break;
-        case "browser.close":
-          result = await browser.close();
-          break;
-        default:
-          throw new Error(`unknown method: ${request.method}`);
+
+    activeMutating = true;
+    mutating = (async () => {
+      try {
+        const result = await handleRequest(browser, request);
+        await writeLine({ id: request.id, result });
+      } catch (error) {
+        await writeLine({
+          id: request.id,
+          error: { message: error instanceof Error ? error.message : String(error) },
+        });
+      } finally {
+        activeMutating = false;
       }
-      await writeLine({ id: request.id, result });
-    } catch (error) {
-      await writeLine({
-        id: request.id,
-        error: { message: error instanceof Error ? error.message : String(error) },
-      });
-    } finally {
-      if (isMutatingMethod(request.method)) activeMutating = false;
-    }
+    })();
   }
+
+  if (mutating) await mutating;
 }
 
 async function main(): Promise<number> {

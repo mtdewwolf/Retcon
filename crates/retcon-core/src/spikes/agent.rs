@@ -111,7 +111,7 @@ fn start(state: CoreState, id: u64, params: &Value) -> Response {
         // Forward parsed provider JSON when possible, raw text otherwise.
         let payload =
             serde_json::from_str::<Value>(&line).unwrap_or_else(|_| Value::String(line.clone()));
-        line_state.emit("agent.line", json!({ "id": turn_id, "message": payload }));
+        line_state.emit_volatile("agent.line", json!({ "id": turn_id, "message": payload }));
     });
 
     match turn {

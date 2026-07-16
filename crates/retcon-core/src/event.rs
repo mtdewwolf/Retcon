@@ -245,27 +245,44 @@ fn partition_after(events: &VecDeque<Arc<EventEnvelope>>, after_sequence: u64) -
     low
 }
 
+const PERSIST_BATCH_CAP: usize = 64;
+
 fn event_writer_loop(rx: mpsc::Receiver<PersistJob>, database: Database) {
     let mut inserts_since_prune = 0_u64;
-    while let Ok(job) = rx.recv() {
-        if let Err(error) = database.read(|db| {
-            let mut statement = db.prepare_cached(
+    while let Ok(first) = rx.recv() {
+        let mut batch = Vec::with_capacity(PERSIST_BATCH_CAP);
+        batch.push(first);
+        while batch.len() < PERSIST_BATCH_CAP {
+            match rx.try_recv() {
+                Ok(job) => batch.push(job),
+                Err(_) => break,
+            }
+        }
+        if let Err(error) = database.transaction(|tx| {
+            let mut statement = tx.prepare_cached(
                 "INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
             )?;
-            statement.execute(rusqlite::params![
-                job.event.sequence as i64,
-                job.event.id.as_bytes(),
-                job.event.category.as_str(),
-                job.event.kind,
-                job.encoded_payload,
-                job.event.timestamp.timestamp_millis(),
-            ])
+            for job in &batch {
+                statement.execute(rusqlite::params![
+                    job.event.sequence as i64,
+                    job.event.id.as_bytes(),
+                    job.event.category.as_str(),
+                    job.event.kind,
+                    job.encoded_payload,
+                    job.event.timestamp.timestamp_millis(),
+                ])?;
+            }
+            Ok(())
         }) {
-            tracing::error!(%error, sequence = job.event.sequence, "failed to persist event");
+            tracing::error!(
+                %error,
+                batch_size = batch.len(),
+                "failed to persist event batch"
+            );
             continue;
         }
-        inserts_since_prune = inserts_since_prune.saturating_add(1);
-        if inserts_since_prune.is_multiple_of(PRUNE_EVERY_N_INSERTS) {
+        inserts_since_prune = inserts_since_prune.saturating_add(batch.len() as u64);
+        if inserts_since_prune >= PRUNE_EVERY_N_INSERTS {
             if let Err(error) = prune_database(&database) {
                 tracing::warn!(%error, "event retention prune failed");
             }
@@ -294,17 +311,11 @@ fn load_recent_events(database: &Database) -> Result<VecDeque<Arc<EventEnvelope>
             let mut rows: Vec<EventEnvelope> = statement
                 .query_map([DEFAULT_MAX_EVENTS as i64], |row| {
                     let sequence: i64 = row.get(0)?;
-                    let id_bytes: Vec<u8> = row.get(1)?;
+                    let id_bytes: [u8; 16] = row.get(1)?;
                     let kind: String = row.get(3)?;
                     let payload_text: String = row.get(4)?;
                     let timestamp_ms: i64 = row.get(5)?;
-                    let id = Uuid::from_slice(&id_bytes).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            16,
-                            rusqlite::types::Type::Blob,
-                            Box::new(e),
-                        )
-                    })?;
+                    let id = Uuid::from_bytes(id_bytes);
                     let payload = serde_json::from_str(&payload_text).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
                             payload_text.len(),

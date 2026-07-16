@@ -79,6 +79,13 @@ impl CoreState {
             tracing::error!(error_id=%error.id, "failed to persist event");
         }
     }
+
+    /// Broadcast a high-frequency event without durable SQLite persistence.
+    pub fn emit_volatile(&self, kind: &str, payload: Value) {
+        if let Err(error) = self.inner.events.emit_volatile(kind, payload) {
+            tracing::error!(error_id=%error.id, "failed to emit volatile event");
+        }
+    }
     pub fn events(&self) -> &EventBus {
         &self.inner.events
     }

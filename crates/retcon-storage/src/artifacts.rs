@@ -316,7 +316,12 @@ mod tests {
         let store = ArtifactStore::open(dir.path()).unwrap();
         let db = Database::open_in_memory().unwrap();
         let artifact = store.store_bytes(b"terminal log").unwrap();
-        db.execute("INSERT INTO terminal_sessions (id,status,shell,cwd,started_at,ended_at,log_artifact_hash) VALUES ('terminal','ended','pwsh','.',1,2,?1)", &[&artifact.hash]).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        db.execute(
+            "INSERT INTO terminal_sessions (id,status,shell,cwd,started_at,ended_at,log_artifact_hash) VALUES (?1,'ended','pwsh','.',1,2,?2)",
+            &[&session_id.as_bytes() as &dyn rusqlite::ToSql, &artifact.hash],
+        )
+        .unwrap();
         let report = store.cleanup_referenced(&db, Duration::ZERO).unwrap();
         assert_eq!(report.retained_files, 1);
         assert!(store.verify(&artifact.hash).is_ok());

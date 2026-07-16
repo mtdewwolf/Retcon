@@ -130,7 +130,11 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
                 chunk = rx.recv() => {
                     let Some(chunk) = chunk else {
                         if !buffer.is_empty() {
-                            output_state.emit("terminal.output", json!({ "id": terminal_id, "data": buffer }));
+                            let data = std::mem::take(&mut buffer);
+                            output_state.emit_volatile(
+                                "terminal.output",
+                                json!({ "id": terminal_id, "data": data }),
+                            );
                         }
                         let dropped = drop_counter.load(Ordering::Relaxed);
                         if dropped > 0 {
@@ -144,14 +148,20 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
                     };
                     buffer.push_str(&chunk);
                     if buffer.len() >= OUTPUT_COALESCE_BYTES {
-                        output_state.emit("terminal.output", json!({ "id": terminal_id, "data": buffer.clone() }));
-                        buffer.clear();
+                        let data = std::mem::take(&mut buffer);
+                        output_state.emit_volatile(
+                            "terminal.output",
+                            json!({ "id": terminal_id, "data": data }),
+                        );
                     }
                 }
                 _ = ticker.tick() => {
                     if !buffer.is_empty() {
-                        output_state.emit("terminal.output", json!({ "id": terminal_id, "data": buffer.clone() }));
-                        buffer.clear();
+                        let data = std::mem::take(&mut buffer);
+                        output_state.emit_volatile(
+                            "terminal.output",
+                            json!({ "id": terminal_id, "data": data }),
+                        );
                     }
                 }
             }

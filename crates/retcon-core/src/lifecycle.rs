@@ -97,8 +97,11 @@ impl CoreRuntime {
         self.state.request_shutdown();
         self.state.jobs().shutdown();
         self.state.cleanup_children().await;
-        if let Err(error) = self.state.storage().maintain() {
-            tracing::warn!(%error, "database maintenance failed during shutdown");
+        let storage = self.state.storage().clone();
+        match tokio::task::spawn_blocking(move || storage.maintain()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "database maintenance failed during shutdown"),
+            Err(error) => tracing::warn!(%error, "database maintenance task failed during shutdown"),
         }
         match self
             .state
@@ -277,7 +280,7 @@ mod tests {
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(health["result"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["status"], "healthy");
-        assert_eq!(health["result"]["storage"]["schema_version"], 3);
+        assert_eq!(health["result"]["storage"]["schema_version"], 4);
         assert_eq!(shutdown["result"]["accepted"], true);
 
         runtime.wait_for_shutdown_signal().await.unwrap();
