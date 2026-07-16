@@ -64,6 +64,7 @@ class CoreClient extends ChangeNotifier {
         int.parse(address.last),
         timeout: const Duration(seconds: 3),
       );
+      _teardownTransport(drainPending: false);
       _socket = socket;
       socket.writeln(jsonEncode({'auth': discovery['token']}));
       _lines = socket
@@ -86,6 +87,7 @@ class CoreClient extends ChangeNotifier {
       });
       await request('core.health');
     } catch (error) {
+      _teardownTransport(drainPending: true);
       _setStatus(CoreConnectionStatus.disconnected);
       rethrow;
     }
@@ -140,18 +142,13 @@ class CoreClient extends ChangeNotifier {
   void _handleDisconnect([Object? error]) {
     if (_closing || _reconnectScheduled) return;
     _log.warning('core connection closed', error);
-    _socket = null;
-    for (final pending in _pending.values) {
-      if (!pending.isCompleted) {
-        pending.completeError(CoreRpcException('Core connection closed.'));
-      }
-    }
-    _pending.clear();
+    _teardownTransport(drainPending: true);
     _setStatus(CoreConnectionStatus.reconnecting);
     _reconnectScheduled = true;
+    final generation = _generation;
     Future<void>.delayed(const Duration(milliseconds: 500), () async {
       _reconnectScheduled = false;
-      if (_closing) return;
+      if (_closing || generation != _generation) return;
       try {
         await connect();
       } catch (_) {
@@ -160,6 +157,23 @@ class CoreClient extends ChangeNotifier {
         }
       }
     });
+  }
+
+  void _teardownTransport({required bool drainPending}) {
+    _heartbeat?.cancel();
+    _heartbeat = null;
+    _lines?.cancel();
+    _lines = null;
+    _socket?.destroy();
+    _socket = null;
+    if (drainPending) {
+      for (final pending in _pending.values) {
+        if (!pending.isCompleted) {
+          pending.completeError(CoreRpcException('Core connection closed.'));
+        }
+      }
+      _pending.clear();
+    }
   }
 
   Future<Map<String, dynamic>?> _readDiscovery() async {
@@ -218,9 +232,7 @@ class CoreClient extends ChangeNotifier {
   @override
   void dispose() {
     _closing = true;
-    _heartbeat?.cancel();
-    _lines?.cancel();
-    _socket?.destroy();
+    _teardownTransport(drainPending: true);
     _events.close();
     super.dispose();
   }
