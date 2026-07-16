@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -26,6 +26,297 @@ pub struct ProviderInfo {
     pub authenticated: bool,
     /// The spike's conservative outdated check (major version zero).
     pub outdated: bool,
+}
+
+/// Severity of an individual provider health check.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    /// The check completed successfully.
+    Ready,
+    /// The check found a non-blocking condition needing attention.
+    Warning,
+    /// The check found a condition that prevents provider use.
+    Failure,
+}
+
+/// One diagnostic performed by the provider doctor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheck {
+    /// Stable identifier for the check.
+    pub id: String,
+    /// Human-readable check name.
+    pub label: String,
+    /// Result severity.
+    pub status: HealthStatus,
+    /// Safe diagnostic detail.
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// A user-facing next step, when available.
+    pub suggested_action: Option<String>,
+}
+
+/// A complete, safe-to-share setup report for the supported provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderDoctorReport {
+    /// Stable provider identifier.
+    pub provider_id: String,
+    /// Human-readable provider name.
+    pub provider_name: String,
+    /// Highest severity across all checks.
+    pub overall_status: HealthStatus,
+    /// Resolved executable path.
+    pub executable_path: Option<String>,
+    /// Version returned by the executable.
+    pub version: Option<String>,
+    /// Lowest version Retcon supports.
+    pub minimum_supported_version: String,
+    /// Whether the provider reports a signed-in account.
+    pub authenticated: bool,
+    /// Existing provider configuration directory.
+    pub configuration_path: Option<String>,
+    /// Individual health-check results.
+    pub checks: Vec<HealthCheck>,
+}
+
+const MINIMUM_CLAUDE_VERSION: &str = "1.0.0";
+
+/// Run non-invasive setup checks for Claude Code.
+///
+/// The doctor never starts an agent session or sends a prompt, so it does not
+/// spend provider credits or expose project content.
+pub async fn doctor_claude() -> ProviderDoctorReport {
+    let executable_path = find_executable("claude").await;
+    let configuration_path = claude_configuration_path();
+    let mut checks = Vec::new();
+
+    let Some(path) = executable_path.clone() else {
+        checks.push(check(
+            "executable",
+            "Claude Code installation",
+            HealthStatus::Failure,
+            "The `claude` command was not found on PATH.",
+            Some("Install Claude Code, or repair PATH and then retry this check.".to_owned()),
+        ));
+        checks.push(check(
+            "authentication",
+            "Account authentication",
+            HealthStatus::Failure,
+            "Authentication cannot be checked until Claude Code is installed.",
+            Some("Install Claude Code first.".to_owned()),
+        ));
+        return ProviderDoctorReport {
+            provider_id: "claude-code".to_owned(),
+            provider_name: "Claude Code".to_owned(),
+            overall_status: HealthStatus::Failure,
+            executable_path: None,
+            version: None,
+            minimum_supported_version: MINIMUM_CLAUDE_VERSION.to_owned(),
+            authenticated: false,
+            configuration_path,
+            checks,
+        };
+    };
+
+    let version_result = run_claude(&["--version"]).await;
+    let version = version_result
+        .as_ref()
+        .ok()
+        .map(|output| output.trim().to_owned())
+        .filter(|output| !output.is_empty());
+    match &version {
+        Some(version) if version_is_supported(version) => checks.push(check(
+            "version",
+            "Supported version",
+            HealthStatus::Ready,
+            format!("Claude Code {version} meets the minimum supported version."),
+            None,
+        )),
+        Some(version) => checks.push(check(
+            "version",
+            "Supported version",
+            HealthStatus::Warning,
+            format!("Claude Code {version} is older than {MINIMUM_CLAUDE_VERSION}."),
+            Some("Update Claude Code, then retry this check.".to_owned()),
+        )),
+        None => checks.push(check(
+            "version",
+            "Executable response",
+            HealthStatus::Failure,
+            version_result
+                .err()
+                .unwrap_or_else(|| "Claude Code returned no version.".to_owned()),
+            Some("Reinstall Claude Code or select another executable.".to_owned()),
+        )),
+    }
+
+    checks.push(check(
+        "executable",
+        "Claude Code installation",
+        HealthStatus::Ready,
+        format!("Found executable at {path}."),
+        None,
+    ));
+
+    let authenticated = run_claude(&["auth", "status"])
+        .await
+        .is_ok_and(|output| !output.trim().is_empty());
+    checks.push(check(
+        "authentication",
+        "Account authentication",
+        if authenticated {
+            HealthStatus::Ready
+        } else {
+            HealthStatus::Failure
+        },
+        if authenticated {
+            "Claude Code reports an active authenticated account.".to_owned()
+        } else {
+            "Claude Code did not report an authenticated account.".to_owned()
+        },
+        (!authenticated).then_some("Run `claude auth login` to reconnect your account.".to_owned()),
+    ));
+
+    let config_status = if configuration_path.is_some() {
+        HealthStatus::Ready
+    } else {
+        HealthStatus::Warning
+    };
+    checks.push(check(
+        "configuration",
+        "Configuration location",
+        config_status,
+        configuration_path.clone().map_or_else(
+            || "No Claude configuration directory was found yet.".to_owned(),
+            |path| format!("Configuration directory: {path}"),
+        ),
+        configuration_path
+            .is_none()
+            .then_some("Sign in to Claude Code to create its configuration.".to_owned()),
+    ));
+    checks.push(check(
+        "network_and_model_access",
+        "Network and model access",
+        HealthStatus::Warning,
+        "Not tested: this check would need to start a provider session and could consume usage."
+            .to_owned(),
+        Some(
+            "Start a session when ready; Retcon will report any connection or model-access error."
+                .to_owned(),
+        ),
+    ));
+
+    let overall_status = checks
+        .iter()
+        .map(|check| check.status)
+        .max_by_key(status_rank)
+        .unwrap_or(HealthStatus::Failure);
+    ProviderDoctorReport {
+        provider_id: "claude-code".to_owned(),
+        provider_name: "Claude Code".to_owned(),
+        overall_status,
+        executable_path: Some(path),
+        version,
+        minimum_supported_version: MINIMUM_CLAUDE_VERSION.to_owned(),
+        authenticated,
+        configuration_path,
+        checks,
+    }
+}
+
+fn check(
+    id: &str,
+    label: &str,
+    status: HealthStatus,
+    detail: impl Into<String>,
+    suggested_action: Option<String>,
+) -> HealthCheck {
+    HealthCheck {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        status,
+        detail: detail.into(),
+        suggested_action,
+    }
+}
+
+fn status_rank(status: &HealthStatus) -> u8 {
+    match status {
+        HealthStatus::Ready => 0,
+        HealthStatus::Warning => 1,
+        HealthStatus::Failure => 2,
+    }
+}
+
+fn version_is_supported(version: &str) -> bool {
+    let found = version
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()));
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    match found {
+        Some(value) => parse(value) >= parse(MINIMUM_CLAUDE_VERSION),
+        None => false,
+    }
+}
+
+async fn find_executable(name: &str) -> Option<String> {
+    let output = Command::new("cmd")
+        .args(["/C", "where", name])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        })
+        .filter(|path| !path.is_empty())
+}
+
+async fn run_claude(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("cmd")
+        .args(["/C", "claude"])
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("Could not launch Claude Code: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    }
+}
+
+fn claude_configuration_path() -> Option<String> {
+    let home = std::env::var_os("USERPROFILE")?;
+    let path = Path::new(&home).join(".claude");
+    path.is_dir().then(|| path.display().to_string())
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::version_is_supported;
+
+    #[test]
+    fn version_check_handles_prefixes_and_old_versions() {
+        assert!(version_is_supported("Claude Code 1.2.3"));
+        assert!(version_is_supported("1.0.0"));
+        assert!(!version_is_supported("0.9.9"));
+        assert!(!version_is_supported("unknown"));
+    }
 }
 
 /// Detect the Claude Code CLI and read its version.
@@ -48,36 +339,15 @@ pub async fn detect_claude() -> Result<ProviderInfo, String> {
 }
 
 async fn detect_claude_uncached() -> Result<ProviderInfo, String> {
-    let output = Command::new("cmd")
-        .args(["/C", "claude", "--version"])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("failed to launch claude CLI: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "claude --version exited with {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if version.is_empty() {
-        return Err("claude --version produced no output".to_owned());
-    }
-    let auth = Command::new("cmd")
-        .args(["/C", "claude", "auth", "status"])
-        .stdin(Stdio::null())
-        .output()
-        .await;
-    let authenticated = auth.is_ok_and(|result| result.status.success());
-    let outdated = version
-        .trim_start_matches(|c: char| !c.is_ascii_digit())
-        .starts_with("0.");
+    let report = doctor_claude().await;
+    let version = report
+        .version
+        .ok_or_else(|| "Claude Code was not found or did not return a version.".to_owned())?;
+    let outdated = !version_is_supported(&version);
     Ok(ProviderInfo {
         id: "claude-code".to_owned(),
         version,
-        authenticated,
+        authenticated: report.authenticated,
         outdated,
     })
 }

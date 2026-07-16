@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -77,6 +78,8 @@ class _DesktopShellState extends State<DesktopShell> {
         await _workspace.float(PanelDefinition.browser, const Size(900, 600));
       case ShellCommand.commandPalette:
         await _showCommandPalette();
+      case ShellCommand.settings:
+        await _showProviderDoctor();
       case ShellCommand.fullScreen:
         await widget.windowController.toggleFullScreen();
       case ShellCommand.exit:
@@ -89,6 +92,11 @@ class _DesktopShellState extends State<DesktopShell> {
   Future<void> _showCommandPalette() => showDialog<void>(
     context: context,
     builder: (context) => _CommandPalette(onSelected: _run),
+  );
+
+  Future<void> _showProviderDoctor() => showDialog<void>(
+    context: context,
+    builder: (context) => _ProviderDoctorDialog(core: widget.core),
   );
 
   @override
@@ -148,6 +156,144 @@ class _DesktopShellState extends State<DesktopShell> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ProviderDoctorDialog extends StatefulWidget {
+  const _ProviderDoctorDialog({required this.core});
+  final CoreClient? core;
+  @override
+  State<_ProviderDoctorDialog> createState() => _ProviderDoctorDialogState();
+}
+
+class _ProviderDoctorDialogState extends State<_ProviderDoctorDialog> {
+  Map<String, dynamic>? _report;
+  Object? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refresh());
+  }
+
+  Future<void> _refresh() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final result =
+          await widget.core?.request('provider.doctor') ?? <String, dynamic>{};
+      if (mounted) setState(() => _report = result);
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Provider Doctor'),
+    content: SizedBox(
+      width: 620,
+      child: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? Text('Could not run the provider checks: $_error')
+          : _report == null || _report!.isEmpty
+          ? const Text('Retcon Core is unavailable. Start the core and retry.')
+          : _DoctorReport(report: _report!),
+    ),
+    actions: [
+      if (_report != null && _report!.isNotEmpty)
+        TextButton(
+          onPressed: () => Clipboard.setData(
+            ClipboardData(
+              text: const JsonEncoder.withIndent('  ').convert(_report),
+            ),
+          ),
+          child: const Text('Copy diagnostics'),
+        ),
+      TextButton(
+        onPressed: _loading ? null : _refresh,
+        child: const Text('Retry checks'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Close'),
+      ),
+    ],
+  );
+}
+
+class _DoctorReport extends StatelessWidget {
+  const _DoctorReport({required this.report});
+  final Map<String, dynamic> report;
+  @override
+  Widget build(BuildContext context) {
+    final checks = (report['checks'] as List? ?? const []).cast<Map>();
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${report['providerName'] ?? 'Provider'} ${report['version'] ?? 'not installed'}',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 12),
+          for (final raw in checks)
+            _DoctorCheck(check: raw.cast<String, dynamic>()),
+        ],
+      ),
+    );
+  }
+}
+
+class _DoctorCheck extends StatelessWidget {
+  const _DoctorCheck({required this.check});
+  final Map<String, dynamic> check;
+  @override
+  Widget build(BuildContext context) {
+    final status = check['status']?.toString() ?? 'warning';
+    final color = switch (status) {
+      'ready' => Colors.greenAccent,
+      'failure' => Colors.redAccent,
+      _ => Colors.amberAccent,
+    };
+    final icon = switch (status) {
+      'ready' => Icons.check_circle,
+      'failure' => Icons.error,
+      _ => Icons.warning,
+    };
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  check['label']?.toString() ?? 'Check',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                Text(check['detail']?.toString() ?? ''),
+                if (check['suggested_action'] != null)
+                  Text(
+                    check['suggested_action'].toString(),
+                    style: TextStyle(color: color),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

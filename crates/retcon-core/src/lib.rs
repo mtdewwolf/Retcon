@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod lifecycle;
 pub mod projects;
 mod projects_rpc;
+mod providers_rpc;
 pub mod rpc;
 pub mod server;
 pub mod spikes;
