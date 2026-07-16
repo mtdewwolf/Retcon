@@ -262,10 +262,7 @@ mod tests {
         let live = bus
             .emit_live("system.heartbeat", json!({"uptime_ms": 1}))
             .unwrap();
-        assert_eq!(
-            subscriber.try_recv().unwrap().kind,
-            "system.heartbeat"
-        );
+        assert_eq!(subscriber.try_recv().unwrap().kind, "system.heartbeat");
         drop(bus);
         let reopened = EventBus::open(database).unwrap();
         assert!(reopened.replay(0, 10).is_empty());

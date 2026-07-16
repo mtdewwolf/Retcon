@@ -402,10 +402,7 @@ fn with_elapsed(mut snapshot: JobSnapshot) -> JobSnapshot {
 fn is_terminal(status: JobStatus) -> bool {
     matches!(
         status,
-        JobStatus::Succeeded
-            | JobStatus::Failed
-            | JobStatus::Cancelled
-            | JobStatus::TimedOut
+        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled | JobStatus::TimedOut
     )
 }
 
@@ -474,10 +471,7 @@ mod tests {
         }
         for _ in 0..50 {
             if jobs.list().len() <= MAX_FINISHED_JOBS
-                && jobs
-                    .list()
-                    .iter()
-                    .all(|job| is_terminal(job.status))
+                && jobs.list().iter().all(|job| is_terminal(job.status))
             {
                 break;
             }
