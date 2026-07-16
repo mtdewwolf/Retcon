@@ -235,23 +235,41 @@ class WorkspaceController extends ChangeNotifier {
     : _store = store ?? FileWorkspaceStore();
   final WorkspaceStore _store;
   WorkspaceLayout _layout = WorkspaceLayout.initial();
+  bool _disposed = false;
+  int _mutationEpoch = 0;
+  static const _maxClosedPanels = 32;
+
   WorkspaceLayout get layout => _layout;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
   Future<void> restore() async {
+    final epoch = _mutationEpoch;
+    WorkspaceLayout restored;
     try {
-      _layout = await _store.read() ?? WorkspaceLayout.initial();
+      restored = await _store.read() ?? WorkspaceLayout.initial();
     } on Object {
-      _layout = WorkspaceLayout.initial();
+      restored = WorkspaceLayout.initial();
     }
-    notifyListeners();
+    // Skip applying restore if the user already mutated layout or we were disposed.
+    if (_disposed || epoch != _mutationEpoch) return;
+    _layout = restored;
+    _notify();
   }
 
   Future<void> reset() async {
+    _mutationEpoch += 1;
     _layout = WorkspaceLayout.initial();
     await _save();
   }
 
   Future<void> reopenLast() async {
     if (_layout.closedPanels.isEmpty) return;
+    _mutationEpoch += 1;
     final panel = _layout.closedPanels.last;
     _layout = WorkspaceLayout(
       root: _append(_layout.root, panel),
@@ -265,10 +283,17 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   Future<void> close(PanelDefinition panel) async {
+    _mutationEpoch += 1;
+    final removed = _remove(_layout.root, panel.id);
+    final closed = [..._layout.closedPanels, panel];
     _layout = WorkspaceLayout(
-      root: _remove(_layout.root, panel.id),
-      floatingPanels: _layout.floatingPanels,
-      closedPanels: [..._layout.closedPanels, panel],
+      root: removed.node,
+      floatingPanels: _layout.floatingPanels
+          .where((item) => item.panel.id != panel.id)
+          .toList(),
+      closedPanels: closed.length > _maxClosedPanels
+          ? closed.sublist(closed.length - _maxClosedPanels)
+          : closed,
     );
     await _save();
   }
@@ -278,11 +303,35 @@ class WorkspaceController extends ChangeNotifier {
     Size workspace, {
     bool detached = false,
   }) async {
+    _mutationEpoch += 1;
+    final existing = _layout.floatingPanels
+        .where((item) => item.panel.id == panel.id)
+        .toList();
+    if (existing.isNotEmpty) {
+      // Singleton panels: focus/reuse the existing floating instance.
+      _layout = WorkspaceLayout(
+        root: _remove(_layout.root, panel.id).node,
+        closedPanels: _layout.closedPanels,
+        floatingPanels: _layout.floatingPanels
+            .map(
+              (item) => item.panel.id == panel.id
+                  ? FloatingPanel(
+                      panel: item.panel,
+                      rect: item.rect,
+                      detached: detached,
+                    )
+                  : item,
+            )
+            .toList(),
+      );
+      await _save();
+      return;
+    }
     final safe = Rect.fromLTWH(48, 48, 360, 260).shift(
       Offset(workspace.width > 500 ? 80 : 0, workspace.height > 400 ? 40 : 0),
     );
     _layout = WorkspaceLayout(
-      root: _remove(_layout.root, panel.id),
+      root: _remove(_layout.root, panel.id).node,
       closedPanels: _layout.closedPanels,
       floatingPanels: [
         ..._layout.floatingPanels,
@@ -293,6 +342,7 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   Future<void> dock(FloatingPanel floating) async {
+    _mutationEpoch += 1;
     _layout = WorkspaceLayout(
       root: _append(_layout.root, floating.panel),
       closedPanels: _layout.closedPanels,
@@ -303,9 +353,49 @@ class WorkspaceController extends ChangeNotifier {
     await _save();
   }
 
+  Future<void> activateTab(TabGroup group, int index) async {
+    if (index < 0 || index >= group.panels.length) return;
+    if (group.activeIndex == index) return;
+    _mutationEpoch += 1;
+    _layout = WorkspaceLayout(
+      root: _setActiveTab(_layout.root, group, index),
+      floatingPanels: _layout.floatingPanels,
+      closedPanels: _layout.closedPanels,
+    );
+    await _save();
+  }
+
   Future<void> _save() async {
-    notifyListeners();
+    _notify();
     await _store.write(_layout);
+  }
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  WorkspaceNode _setActiveTab(
+    WorkspaceNode node,
+    TabGroup target,
+    int index,
+  ) => switch (node) {
+    TabGroup group => identical(group, target) || _sameTabGroup(group, target)
+        ? TabGroup(panels: group.panels, activeIndex: index)
+        : group,
+    SplitGroup split => SplitGroup(
+      axis: split.axis,
+      first: _setActiveTab(split.first, target, index),
+      second: _setActiveTab(split.second, target, index),
+      fraction: split.fraction,
+    ),
+  };
+
+  bool _sameTabGroup(TabGroup left, TabGroup right) {
+    if (left.panels.length != right.panels.length) return false;
+    for (var i = 0; i < left.panels.length; i++) {
+      if (left.panels[i].id != right.panels[i].id) return false;
+    }
+    return true;
   }
 
   WorkspaceNode _append(WorkspaceNode node, PanelDefinition panel) =>
@@ -321,19 +411,41 @@ class WorkspaceController extends ChangeNotifier {
           fraction: split.fraction,
         ),
       };
-  WorkspaceNode _remove(WorkspaceNode node, String id) => switch (node) {
-    TabGroup group => TabGroup(
-      panels: group.panels.where((panel) => panel.id != id).toList().isEmpty
-          ? const [PanelDefinition.workspace]
-          : group.panels.where((panel) => panel.id != id).toList(),
-    ),
-    SplitGroup split => SplitGroup(
-      axis: split.axis,
-      first: _remove(split.first, id),
-      second: _remove(split.second, id),
-      fraction: split.fraction,
-    ),
-  };
+
+  ({WorkspaceNode node, bool removed}) _remove(WorkspaceNode node, String id) {
+    switch (node) {
+      case TabGroup group:
+        final panels = group.panels.where((panel) => panel.id != id).toList();
+        if (panels.length == group.panels.length) {
+          return (node: group, removed: false);
+        }
+        if (panels.isEmpty) {
+          return (
+            node: const TabGroup(panels: [PanelDefinition.workspace]),
+            removed: true,
+          );
+        }
+        return (
+          node: TabGroup(
+            panels: panels,
+            activeIndex: group.activeIndex.clamp(0, panels.length - 1),
+          ),
+          removed: true,
+        );
+      case SplitGroup split:
+        final first = _remove(split.first, id);
+        final second = _remove(split.second, id);
+        return (
+          node: SplitGroup(
+            axis: split.axis,
+            first: first.node,
+            second: second.node,
+            fraction: split.fraction,
+          ),
+          removed: first.removed || second.removed,
+        );
+    }
+  }
 }
 
 class DockingWorkspace extends StatefulWidget {
@@ -364,7 +476,11 @@ class _DockingWorkspaceState extends State<DockingWorkspace> {
             ),
           ),
           for (final floating in widget.controller.layout.floatingPanels)
-            _FloatingView(floating: floating, controller: widget.controller),
+            _FloatingView(
+              key: ValueKey('floating-${floating.panel.id}'),
+              floating: floating,
+              controller: widget.controller,
+            ),
         ],
       ),
     ),
@@ -441,16 +557,18 @@ class _TabGroupView extends StatelessWidget {
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
-                        for (final item in group.panels)
+                        for (var index = 0; index < group.panels.length; index++)
                           Padding(
                             padding: const EdgeInsets.only(left: 2),
                             child: TextButton.icon(
-                              onPressed: () {},
+                              onPressed: () => unawaited(
+                                controller.activateTab(group, index),
+                              ),
                               icon: Icon(
-                                _icon(item.icon),
+                                _icon(group.panels[index].icon),
                                 size: RetconIconSizes.small,
                               ),
-                              label: Text(item.title),
+                              label: Text(group.panels[index].title),
                             ),
                           ),
                       ],
@@ -489,7 +607,11 @@ class _TabGroupView extends StatelessWidget {
 }
 
 class _FloatingView extends StatelessWidget {
-  const _FloatingView({required this.floating, required this.controller});
+  const _FloatingView({
+    super.key,
+    required this.floating,
+    required this.controller,
+  });
   final FloatingPanel floating;
   final WorkspaceController controller;
   @override

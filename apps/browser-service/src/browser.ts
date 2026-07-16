@@ -5,6 +5,10 @@ import { type Browser, type BrowserContext, type Page, chromium } from "playwrig
 
 /** Retained console/network evidence per session (ring buffer). */
 export const MAX_LOG_ENTRIES = 1_000;
+/** Per-field text/url byte budget for buffered evidence. */
+export const MAX_LOG_FIELD_CHARS = 4_096;
+/** Cap for `browser.action` text extraction responses. */
+export const MAX_ACTION_TEXT_CHARS = 64_000;
 
 export interface BrowserEvent {
   type: string;
@@ -31,9 +35,16 @@ export function pushCapped<T>(buffer: T[], entry: T, max: number): void {
   }
 }
 
+/** Truncate oversized strings so count-capped buffers stay byte-bounded. */
+export function truncateField(value: string, max = MAX_LOG_FIELD_CHARS): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}…[truncated ${value.length - max} chars]`;
+}
+
 function sliceLogs<T>(entries: T[], query: LogQuery = {}): T[] {
-  const offset = Math.max(0, query.offset ?? 0);
   const limit = Math.min(Math.max(1, query.limit ?? 100), MAX_LOG_ENTRIES);
+  const defaultOffset = Math.max(0, entries.length - limit);
+  const offset = Math.max(0, query.offset ?? defaultOffset);
   return entries.slice(offset, offset + limit);
 }
 
@@ -42,6 +53,7 @@ export class ManagedBrowser {
   private context: BrowserContext | undefined;
   private page: Page | undefined;
   private profile: string | undefined;
+  private closing = false;
   private readonly consoleEntries: Record<string, unknown>[] = [];
   private readonly networkEntries: Record<string, unknown>[] = [];
 
@@ -49,6 +61,7 @@ export class ManagedBrowser {
 
   async launch(): Promise<Record<string, unknown>> {
     if (this.context) return { alreadyRunning: true };
+    this.closing = false;
     this.profile = await mkdtemp(join(tmpdir(), "retcon-browser-"));
     const executablePath = process.env.RETCON_CHROMIUM_PATH;
     this.context = await chromium.launchPersistentContext(this.profile, {
@@ -57,31 +70,13 @@ export class ManagedBrowser {
       ...(executablePath ? { executablePath } : {}),
     });
     this.browser = this.context.browser() ?? undefined;
-    this.context.on("close", () => this.emit({ type: "browser.crashed", payload: {} }));
+    this.context.on("close", () => {
+      if (!this.closing) {
+        this.emit({ type: "browser.crashed", payload: {} });
+      }
+    });
     this.page = this.context.pages()[0] ?? (await this.context.newPage());
-    this.page.on("console", (message) => {
-      const entry = {
-        type: message.type(),
-        text: message.text(),
-        timestamp: new Date().toISOString(),
-      };
-      pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.console", payload: entry });
-    });
-    this.page.on("request", (request) => {
-      const entry = {
-        method: request.method(),
-        url: request.url(),
-        resourceType: request.resourceType(),
-      };
-      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.request", payload: entry });
-    });
-    this.page.on("response", (response) => {
-      const entry = { status: response.status(), url: response.url() };
-      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.response", payload: entry });
-    });
+    this.attachPageListeners(this.page);
     return { launched: true, profile: this.profile };
   }
 
@@ -121,8 +116,10 @@ export class ManagedBrowser {
       case "press":
         await page.locator(selector).press(String(params.value ?? "Enter"));
         break;
-      case "text":
-        return { text: await page.locator(selector).innerText() };
+      case "text": {
+        const text = await page.locator(selector).innerText();
+        return { text: truncateField(text, MAX_ACTION_TEXT_CHARS) };
+      }
       default:
         throw new Error(`unsupported action: ${String(params.action)}`);
     }
@@ -130,15 +127,20 @@ export class ManagedBrowser {
   }
 
   logs(query: LogQuery = {}): Record<string, unknown> {
+    const limit = Math.min(Math.max(1, query.limit ?? 100), MAX_LOG_ENTRIES);
+    const consoleOffset =
+      query.offset ?? Math.max(0, this.consoleEntries.length - limit);
+    const networkOffset =
+      query.offset ?? Math.max(0, this.networkEntries.length - limit);
     return {
-      console: sliceLogs(this.consoleEntries, query),
-      network: sliceLogs(this.networkEntries, query),
+      console: sliceLogs(this.consoleEntries, { ...query, offset: consoleOffset, limit }),
+      network: sliceLogs(this.networkEntries, { ...query, offset: networkOffset, limit }),
       totals: {
         console: this.consoleEntries.length,
         network: this.networkEntries.length,
       },
-      offset: query.offset ?? 0,
-      limit: query.limit ?? 100,
+      offset: query.offset ?? consoleOffset,
+      limit,
     };
   }
 
@@ -150,6 +152,7 @@ export class ManagedBrowser {
   }
 
   async close(): Promise<Record<string, unknown>> {
+    this.closing = true;
     const context = this.context;
     this.browser = undefined;
     this.context = undefined;
@@ -158,6 +161,32 @@ export class ManagedBrowser {
     if (this.profile) await rm(this.profile, { recursive: true, force: true });
     this.profile = undefined;
     return { closed: true };
+  }
+
+  private attachPageListeners(page: Page): void {
+    page.on("console", (message) => {
+      const entry = {
+        type: message.type(),
+        text: truncateField(message.text()),
+        timestamp: new Date().toISOString(),
+      };
+      pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
+      this.emit({ type: "browser.console", payload: entry });
+    });
+    page.on("request", (request) => {
+      const entry = {
+        method: request.method(),
+        url: truncateField(request.url()),
+        resourceType: request.resourceType(),
+      };
+      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
+      this.emit({ type: "browser.request", payload: entry });
+    });
+    page.on("response", (response) => {
+      const entry = { status: response.status(), url: truncateField(response.url()) };
+      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
+      this.emit({ type: "browser.response", payload: entry });
+    });
   }
 
   private requirePage(): Page {

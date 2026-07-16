@@ -122,9 +122,15 @@ fn start(state: CoreState, id: u64, params: &Value) -> Response {
             }
             let watch_state = state.clone();
             tokio::spawn(async move {
-                let code = {
-                    let mut guard = turn.lock().await;
-                    guard.wait().await
+                // Poll under short lock acquisitions so `agent.cancel` can kill the process.
+                let code = loop {
+                    {
+                        let mut guard = turn.lock().await;
+                        if let Some(code) = guard.try_exit_code() {
+                            break code;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 };
                 exit_state.emit("agent.exit", json!({ "id": turn_id, "exitCode": code }));
                 if let Ok(mut map) = watch_state.agents().map.lock() {
