@@ -332,13 +332,13 @@ impl JobSupervisor {
                 .count();
             if retained_finished > MAX_FINISHED_JOBS {
                 let overflow = retained_finished - MAX_FINISHED_JOBS;
-                for (id, _) in finished
+                let overflow_ids: Vec<Uuid> = finished
                     .iter()
                     .filter(|(id, _)| !removed.contains(id))
                     .take(overflow)
-                {
-                    removed.push(*id);
-                }
+                    .map(|(id, _)| *id)
+                    .collect();
+                removed.extend(overflow_ids);
             }
 
             for id in &removed {
@@ -464,17 +464,25 @@ mod tests {
     async fn finished_jobs_are_evicted_by_count() {
         let jobs = JobSupervisor::default();
         for index in 0..(MAX_FINISHED_JOBS + 5) {
-            let id = jobs.spawn(
+            jobs.spawn(
                 "test",
                 format!("job-{index}"),
                 Duration::from_secs(1),
                 1,
                 || async { Ok(()) },
             );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            assert!(jobs.get(id).is_some() || jobs.list().len() <= MAX_FINISHED_JOBS);
         }
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        for _ in 0..50 {
+            if jobs.list().len() <= MAX_FINISHED_JOBS
+                && jobs
+                    .list()
+                    .iter()
+                    .all(|job| is_terminal(job.status))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(jobs.list().len() <= MAX_FINISHED_JOBS);
     }
 }
