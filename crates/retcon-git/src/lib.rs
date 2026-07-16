@@ -97,6 +97,9 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
             if read == 0 {
                 break;
             }
+            if buffer.len().saturating_add(read) > max_bytes {
+                return Err(format!("git stderr exceeded {max_bytes} bytes"));
+            }
             buffer.extend_from_slice(&chunk[..read]);
         }
         Ok(buffer)

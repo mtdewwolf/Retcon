@@ -10,10 +10,13 @@ use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 static CLAUDE_DETECTION: OnceLock<Mutex<Option<Result<ProviderInfo, String>>>> = OnceLock::new();
+
+/// Reject or truncate single provider lines larger than this to avoid unbounded allocation.
+const MAX_AGENT_LINE_BYTES: usize = 64 * 1024;
 
 /// Information about a detected provider CLI.
 #[derive(Debug, Clone, Serialize)]
@@ -140,15 +143,15 @@ impl AgentTurn {
             .ok_or_else(|| "no stderr handle".to_owned())?;
 
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut lines = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_capped_line(&mut lines).await {
                 tracing::debug!(target: "retcon_agents::stderr", "{line}");
             }
         });
 
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut lines = BufReader::new(stdout);
+            while let Ok(Some(line)) = read_capped_line(&mut lines).await {
                 on_line(line);
             }
         });
@@ -195,4 +198,30 @@ impl AgentTurn {
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
     }
+}
+
+async fn read_capped_line<R: AsyncReadExt + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<String>, std::io::Error> {
+    let mut buf = Vec::with_capacity(256);
+    loop {
+        let mut byte = [0_u8; 1];
+        match reader.read(&mut byte).await? {
+            0 => {
+                if buf.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            _ if byte[0] == b'\n' => break,
+            _ if buf.len() < MAX_AGENT_LINE_BYTES => buf.push(byte[0]),
+            _ => {
+                // Drop overflow until newline or EOF without growing the buffer.
+            }
+        }
+    }
+    while buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
