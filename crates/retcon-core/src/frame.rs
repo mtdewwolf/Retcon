@@ -58,10 +58,10 @@ fn oversized() -> Result<Option<String>, CoreError> {
 }
 
 fn trimmed_line(mut buffer: Vec<u8>) -> Result<Option<String>, CoreError> {
-    if buffer.ends_with(b'\n') {
+    if buffer.ends_with(b"\n") {
         buffer.pop();
     }
-    if buffer.ends_with(b'\r') {
+    if buffer.ends_with(b"\r") {
         buffer.pop();
     }
     if buffer.is_empty() {
