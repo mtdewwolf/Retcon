@@ -1,5 +1,6 @@
 //! Entry point for the `retcon-core` service binary.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -16,6 +17,10 @@ struct Args {
     /// Initialize, report health, and exit immediately (used by CI and diagnostics).
     #[arg(long)]
     health: bool,
+
+    /// Directory used for the process lock and local discovery file.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -52,7 +57,14 @@ fn main() -> ExitCode {
         }
     };
 
-    match runtime.block_on(retcon_core::run()) {
+    let data_dir = args.data_dir.unwrap_or_else(|| {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Retcon")
+    });
+
+    match runtime.block_on(retcon_core::run(data_dir)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "core service exited with error");

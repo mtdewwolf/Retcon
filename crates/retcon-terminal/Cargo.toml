@@ -8,6 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+portable-pty = "0.9"
+tracing.workspace = true
 
 [lints]
 workspace = true

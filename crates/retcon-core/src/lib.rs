@@ -6,6 +6,16 @@
 //! land in Phase 3; the local protocol lands in Phase 4.
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
+
+pub mod error;
+pub mod lifecycle;
+pub mod rpc;
+pub mod server;
+pub mod state;
+
+pub use error::{CoreError, ErrorCode, ErrorSource};
+pub use lifecycle::{CoreConfig, CoreRuntime};
 
 /// How log output is formatted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,19 +80,17 @@ pub fn install_panic_hook() {
 /// # Errors
 ///
 /// Returns an error message if the shutdown signal cannot be installed.
-pub async fn run() -> Result<(), String> {
+pub async fn run(data_dir: PathBuf) -> Result<(), CoreError> {
     tracing::info!(
         version = version(),
         pid = std::process::id(),
         "retcon-core started"
     );
 
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| format!("failed to listen for shutdown signal: {e}"))?;
-
-    tracing::info!("shutdown signal received; retcon-core stopping");
-    Ok(())
+    let runtime = CoreRuntime::start(CoreConfig::new(data_dir)).await?;
+    tracing::info!(address = %runtime.address(), "retcon-core is ready");
+    runtime.wait_for_shutdown_signal().await?;
+    runtime.shutdown().await
 }
 
 #[cfg(test)]
