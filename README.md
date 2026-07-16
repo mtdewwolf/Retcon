@@ -19,7 +19,7 @@ something breaks.
   browser — not the agent's say-so.
 - **Survive crashes** without losing sessions, and stay honest about failures.
 
-See the full product definition in [docs/product/](docs/product/README.md).
+The full product definition lives in the maintainers' internal `docs/` directory.
 
 ## Architecture
 

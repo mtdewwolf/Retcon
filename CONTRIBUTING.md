@@ -4,13 +4,12 @@ Thanks for your interest! Retcon is early — expect churn while the foundation 
 
 ## Ground rules
 
-- Read the product definition in [docs/product/](docs/product/README.md) first. The MVP
-  scope is frozen; PRs adding out-of-scope features will be declined regardless of quality.
-- The architectural non-negotiables in
-  [docs/product/principles.md](docs/product/principles.md) are binding: no Electron, no
-  WebView2 for the primary UI, no custom rendering engine.
-- Significant design decisions get an ADR in [docs/adr/](docs/adr/) before or alongside the
-  code.
+- The MVP scope is frozen; PRs adding out-of-scope features will be declined regardless of
+  quality. Ask in an issue first if you're unsure whether something is in scope.
+- The architectural non-negotiables are binding: no Electron, no WebView2 for the primary
+  UI, no custom rendering engine.
+- Significant design decisions are recorded as ADRs in the maintainers' internal `docs/`
+  directory before or alongside the code.
 
 ## Development setup
 
