@@ -1,0 +1,15 @@
+[package]
+name = "retcon-terminal"
+description = "PTY management and structured command tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+portable-pty = "0.9"
+tracing.workspace = true
+
+[lints]
+workspace = true

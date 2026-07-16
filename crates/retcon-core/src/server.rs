@@ -1,0 +1,152 @@
+//! Loopback-only RPC server for the core lifecycle endpoints.
+
+use std::net::SocketAddr;
+
+use serde_json::json;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
+
+use crate::error::{CoreError, ErrorCode, ErrorSource};
+use crate::rpc::{AuthLine, Request, Response};
+use crate::state::CoreState;
+
+pub struct Server {
+    listener: TcpListener,
+    token: String,
+    state: CoreState,
+}
+
+impl Server {
+    pub async fn bind(state: CoreState, token: String) -> Result<Self, CoreError> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|error| CoreError::io("bind core RPC listener", error))?;
+        Ok(Self {
+            listener,
+            token,
+            state,
+        })
+    }
+
+    pub fn address(&self) -> Result<SocketAddr, CoreError> {
+        self.listener
+            .local_addr()
+            .map_err(|error| CoreError::io("read RPC address", error))
+    }
+
+    pub async fn run(self) {
+        let mut shutdown = self.state.shutdown_receiver();
+        let mut connections = JoinSet::new();
+
+        loop {
+            tokio::select! {
+                result = self.listener.accept() => match result {
+                    Ok((stream, _)) => {
+                        let token = self.token.clone();
+                        let state = self.state.clone();
+                        connections.spawn(async move {
+                            if let Err(error) = serve_connection(stream, &token, state).await {
+                                tracing::warn!(error_id = %error.id, error = %error.technical_message, "RPC connection ended");
+                            }
+                        });
+                    }
+                    Err(error) => tracing::warn!(%error, "failed to accept RPC connection"),
+                },
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+    }
+}
+
+async fn serve_connection(
+    stream: TcpStream,
+    expected_token: &str,
+    state: CoreState,
+) -> Result<(), CoreError> {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let auth_line = lines
+        .next_line()
+        .await
+        .map_err(|error| CoreError::io("read RPC authentication", error))?
+        .ok_or_else(|| invalid_request("Authentication is required."))?;
+    let auth: AuthLine = serde_json::from_str(&auth_line)
+        .map_err(|_| invalid_request("The authentication message is malformed."))?;
+    if auth.auth != expected_token {
+        return Err(CoreError::new(
+            ErrorCode::AuthenticationFailed,
+            ErrorSource::Rpc,
+            "Retcon could not authenticate this local client.",
+            "RPC authentication token mismatch",
+        ));
+    }
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| CoreError::io("read RPC request", error))?
+    {
+        let response = match serde_json::from_str::<Request>(&line) {
+            Ok(request) => dispatch(request, &state),
+            Err(error) => Response::error(0, &invalid_request(error.to_string())),
+        };
+        let mut encoded = serde_json::to_vec(&response).map_err(|error| {
+            CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::Rpc,
+                "Retcon could not encode a response.",
+                error.to_string(),
+            )
+        })?;
+        encoded.push(b'\n');
+        writer
+            .write_all(&encoded)
+            .await
+            .map_err(|error| CoreError::io("write RPC response", error))?;
+    }
+    Ok(())
+}
+
+fn dispatch(request: Request, state: &CoreState) -> Response {
+    let result = match request.method.as_str() {
+        "core.health" => Some(state.health()),
+        "core.version" => Some(json!({"version": env!("CARGO_PKG_VERSION")})),
+        "core.capabilities" => Some(state.capabilities()),
+        "core.diagnostics" => Some(state.diagnostics()),
+        "core.shutdown" => {
+            state.request_shutdown();
+            Some(json!({"accepted": true}))
+        }
+        _ => None,
+    };
+
+    match result {
+        Some(result) => Response::ok(request.id, result),
+        None => Response::error(
+            request.id,
+            &CoreError::new(
+                ErrorCode::NotFound,
+                ErrorSource::Rpc,
+                "The requested core operation is not available.",
+                format!("unknown RPC method: {}", request.method),
+            ),
+        ),
+    }
+}
+
+fn invalid_request(technical_message: impl Into<String>) -> CoreError {
+    CoreError::new(
+        ErrorCode::InvalidRequest,
+        ErrorSource::Rpc,
+        "Retcon received an invalid local request.",
+        technical_message,
+    )
+}
