@@ -10,8 +10,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 use crate::error::{CoreError, ErrorCode, ErrorSource};
-use crate::rpc::{AuthLine, Request, Response};
+use crate::rpc::{Request, Response};
 use crate::state::CoreState;
+use retcon_protocol::AuthLine;
 
 pub struct Server {
     listener: TcpListener,
