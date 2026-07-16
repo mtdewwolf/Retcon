@@ -103,7 +103,11 @@ impl CoreRuntime {
         match self
             .state
             .artifacts()
-            .cleanup_referenced(self.state.storage(), Duration::from_secs(30 * 24 * 60 * 60))
+            .cleanup_referenced_async(
+                self.state.storage(),
+                Duration::from_secs(30 * 24 * 60 * 60),
+            )
+            .await
         {
             Ok(report) if report.removed_files > 0 => tracing::info!(
                 removed_files = report.removed_files,
