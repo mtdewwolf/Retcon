@@ -1,0 +1,17 @@
+name: retcon_design_system
+description: "Retcon's Luna Dark design system: XP-inspired dark tokens, theme, and (in Phase 6) the component library."
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.1
+  flutter: ">=1.17.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

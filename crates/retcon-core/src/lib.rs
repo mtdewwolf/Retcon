@@ -1,0 +1,97 @@
+//! The Retcon core service: a durable local process that supervises agents,
+//! terminals, Git, storage, and the browser service.
+//!
+//! Phase 1 scope: process startup/shutdown skeleton with structured logging and
+//! panic reporting. Lifecycle management, the event bus, and the job supervisor
+//! land in Phase 3; the local protocol lands in Phase 4.
+
+use std::io::IsTerminal;
+
+/// How log output is formatted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogFormat {
+    /// Human-readable output for interactive terminals.
+    Pretty,
+    /// Newline-delimited JSON for ingestion and support bundles.
+    Json,
+}
+
+/// The version of the core service, from the crate manifest.
+#[must_use]
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Initialize the global `tracing` subscriber.
+///
+/// The filter is taken from `RETCON_LOG` (falling back to `RUST_LOG`, then
+/// `info`). Returns an error message if a global subscriber is already set.
+pub fn init_logging(format: LogFormat) -> Result<(), String> {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_env("RETCON_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_writer(std::io::stderr);
+
+    let result = match format {
+        LogFormat::Pretty => builder.try_init(),
+        LogFormat::Json => builder.json().try_init(),
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// Install a panic hook that reports panics through `tracing` before the
+/// default hook runs, so crashes always appear in structured logs.
+pub fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        tracing::error!(panic.message = payload, panic.location = %location, "core service panicked");
+        default_hook(info);
+    }));
+}
+
+/// Run the core service until a shutdown signal (Ctrl-C) is received.
+///
+/// # Errors
+///
+/// Returns an error message if the shutdown signal cannot be installed.
+pub async fn run() -> Result<(), String> {
+    tracing::info!(
+        version = version(),
+        pid = std::process::id(),
+        "retcon-core started"
+    );
+
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| format!("failed to listen for shutdown signal: {e}"))?;
+
+    tracing::info!("shutdown signal received; retcon-core stopping");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_matches_manifest() {
+        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+        assert!(!version().is_empty());
+    }
+}
