@@ -131,6 +131,38 @@ impl Error for CoreError {
     }
 }
 
+impl From<retcon_storage::StorageError> for CoreError {
+    fn from(error: retcon_storage::StorageError) -> Self {
+        let (user_message, suggested_fix, retryable) = match &error {
+            retcon_storage::StorageError::Corrupt { .. } => (
+                "Retcon's local database is damaged.",
+                "Restore a known-good backup or move the damaged database aside and restart Retcon.",
+                false,
+            ),
+            retcon_storage::StorageError::SchemaTooNew { .. } => (
+                "This data was created by a newer version of Retcon.",
+                "Upgrade Retcon before opening this data directory.",
+                false,
+            ),
+            _ => (
+                "Retcon could not initialize its local database.",
+                "Check available disk space and file permissions, then try again.",
+                true,
+            ),
+        };
+        let technical_message = error.to_string();
+        Self::new(
+            ErrorCode::Internal,
+            ErrorSource::Storage,
+            user_message,
+            technical_message,
+        )
+        .suggested_fix(suggested_fix)
+        .retryable(retryable)
+        .with_cause(error)
+    }
+}
+
 /// Keep obvious credentials out of diagnostics until the dedicated redaction system lands.
 fn redact(message: String) -> String {
     message

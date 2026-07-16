@@ -25,6 +25,8 @@ retcon-agents.workspace = true
 retcon-git.workspace = true
 retcon-terminal.workspace = true
 retcon-protocol.workspace = true
+retcon-storage.workspace = true
+rusqlite = "0.37"
 
 [dev-dependencies]
 tempfile = "3"

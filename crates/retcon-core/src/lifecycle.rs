@@ -97,6 +97,22 @@ impl CoreRuntime {
         self.state.request_shutdown();
         self.state.jobs().shutdown();
         self.state.cleanup_children().await;
+        if let Err(error) = self.state.storage().maintain() {
+            tracing::warn!(%error, "database maintenance failed during shutdown");
+        }
+        match self
+            .state
+            .artifacts()
+            .cleanup_referenced(self.state.storage(), Duration::from_secs(30 * 24 * 60 * 60))
+        {
+            Ok(report) if report.removed_files > 0 => tracing::info!(
+                removed_files = report.removed_files,
+                removed_bytes = report.removed_bytes,
+                "expired unreferenced artifacts"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "artifact retention cleanup failed"),
+        }
         if tokio::time::timeout(self.config.shutdown_timeout, &mut self.server_task)
             .await
             .is_err()
@@ -185,9 +201,10 @@ fn write_discovery(data_dir: &Path, address: SocketAddr, token: String) -> Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use retcon_storage::{NewProject, NewSession, NewTask};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
 
@@ -203,6 +220,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(directory.path().join("core.json")).unwrap())
                 .unwrap();
         assert_eq!(discovery.address, runtime.address().to_string());
+        assert!(directory.path().join("retcon.db").is_file());
 
         runtime.shutdown().await.unwrap();
         assert!(!directory.path().join("core.json").exists());
@@ -254,9 +272,83 @@ mod tests {
         let shutdown: serde_json::Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(health["result"]["status"], "healthy");
+        assert_eq!(health["result"]["storage"]["status"], "healthy");
+        assert_eq!(health["result"]["storage"]["schema_version"], 2);
         assert_eq!(shutdown["result"]["accepted"], true);
 
         runtime.wait_for_shutdown_signal().await.unwrap();
         runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_and_task_state_survive_a_core_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = CoreRuntime::start(CoreConfig::new(directory.path().to_owned()))
+            .await
+            .unwrap();
+        let project = first
+            .state
+            .storage()
+            .projects()
+            .create(&NewProject::new("Retcon"))
+            .unwrap();
+        let mut new_session = NewSession::new(project.id, "Durable session");
+        new_session.status = "running".into();
+        let session = first
+            .state
+            .storage()
+            .sessions()
+            .create(&new_session)
+            .unwrap();
+        let mut new_task = NewTask::new("Durable task");
+        new_task.session_id = Some(session.id);
+        let task = first.state.storage().tasks().create(&new_task).unwrap();
+        first.shutdown().await.unwrap();
+
+        let second = CoreRuntime::start(CoreConfig::new(directory.path().to_owned()))
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .state
+                .storage()
+                .sessions()
+                .get(session.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "interrupted"
+        );
+        assert_eq!(
+            second
+                .state
+                .storage()
+                .tasks()
+                .get(task.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+        assert_eq!(second.state.recovery().interrupted_sessions, 1);
+        assert_eq!(second.state.recovery().active_tasks, 1);
+        second.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupted_storage_surfaces_an_actionable_core_error() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("retcon.db"), b"not sqlite").unwrap();
+        let result = CoreRuntime::start(CoreConfig::new(directory.path().to_owned())).await;
+        let error = match result {
+            Ok(runtime) => {
+                runtime.shutdown().await.unwrap();
+                panic!("corrupt database opened")
+            }
+            Err(error) => error,
+        };
+        assert_eq!(error.source, ErrorSource::Storage);
+        assert!(error.user_message.contains("damaged"));
+        assert!(error.suggested_fix.as_deref().unwrap().contains("backup"));
     }
 }

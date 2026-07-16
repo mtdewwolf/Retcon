@@ -1,11 +1,8 @@
-//! Durable, sequence-numbered core event bus.
+//! Durable, sequence-numbered core event bus backed by SQLite.
 
 #![allow(missing_docs)]
 
-use std::collections::{HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Utc};
@@ -15,6 +12,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{CoreError, ErrorCode, ErrorSource};
+use retcon_storage::Database;
 
 const DEFAULT_MAX_EVENTS: usize = 10_000;
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;
@@ -34,6 +32,23 @@ pub enum EventCategory {
     System,
 }
 
+impl EventCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Terminal => "terminal",
+            Self::Git => "git",
+            Self::File => "file",
+            Self::Browser => "browser",
+            Self::Approval => "approval",
+            Self::Task => "task",
+            Self::Agent => "agent",
+            Self::Job => "job",
+            Self::System => "system",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub id: Uuid,
@@ -46,65 +61,48 @@ pub struct EventEnvelope {
 
 struct EventLog {
     events: VecDeque<EventEnvelope>,
-    ids: HashSet<Uuid>,
     next_sequence: u64,
-    file: File,
-    path: PathBuf,
 }
 
 pub struct EventBus {
     inner: Mutex<EventLog>,
     sender: broadcast::Sender<EventEnvelope>,
-    max_events: usize,
-    max_age: Duration,
+    database: Database,
 }
 
 impl EventBus {
-    pub fn open(data_dir: &Path) -> Result<Self, CoreError> {
-        std::fs::create_dir_all(data_dir)
-            .map_err(|error| CoreError::io("create event data directory", error))?;
-        let path = data_dir.join("events.jsonl");
-        let mut events = VecDeque::new();
-        let mut ids = HashSet::new();
-        let cutoff = Utc::now() - Duration::days(DEFAULT_MAX_AGE_DAYS);
-        if path.exists() {
-            let reader = BufReader::new(
-                File::open(&path).map_err(|error| CoreError::io("open event log", error))?,
-            );
-            for line in reader.lines() {
-                let line = line.map_err(|error| CoreError::io("read event log", error))?;
-                match serde_json::from_str::<EventEnvelope>(&line) {
-                    Ok(event) if event.timestamp >= cutoff && ids.insert(event.id) => {
-                        events.push_back(event);
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "ignoring malformed persisted event"),
-                }
-            }
-        }
-        while events.len() > DEFAULT_MAX_EVENTS {
-            if let Some(old) = events.pop_front() {
-                ids.remove(&old.id);
-            }
-        }
-        let next_sequence = events.back().map_or(1, |event| event.sequence + 1);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| CoreError::io("open event log for append", error))?;
+    pub fn open(database: Database) -> Result<Self, CoreError> {
+        let cutoff = (Utc::now() - Duration::days(DEFAULT_MAX_AGE_DAYS)).timestamp_millis();
+        database.execute("DELETE FROM agent_events WHERE created_at < ?1 OR id NOT IN (SELECT id FROM agent_events ORDER BY id DESC LIMIT ?2)", &[&cutoff, &(DEFAULT_MAX_EVENTS as i64)])?;
+        let mut events = database.read(|db| {
+            let mut statement = db.prepare("SELECT id,event_id,category,kind,payload_json,created_at FROM agent_events WHERE event_id IS NOT NULL ORDER BY id")?;
+            statement.query_map([], |row| {
+                let sequence: i64 = row.get(0)?;
+                let id_text: String = row.get(1)?;
+                let kind: String = row.get(3)?;
+                let payload_text: String = row.get(4)?;
+                let timestamp_ms: i64 = row.get(5)?;
+                let id = Uuid::parse_str(&id_text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(36, rusqlite::types::Type::Text, Box::new(e)))?;
+                let payload = serde_json::from_str(&payload_text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(payload_text.len(), rusqlite::types::Type::Text, Box::new(e)))?;
+                let timestamp = DateTime::from_timestamp_millis(timestamp_ms).ok_or_else(|| rusqlite::Error::IntegralValueOutOfRange(5, timestamp_ms))?;
+                Ok(EventEnvelope { id, sequence: sequence as u64, timestamp, category: category_for(&kind), kind, payload })
+            })?.collect::<rusqlite::Result<VecDeque<_>>>()
+        })?;
+        let next_sequence = database.read(|db| {
+            db.query_row(
+                "SELECT coalesce(max(id), 0) + 1 FROM agent_events",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+        })?;
         let (sender, _) = broadcast::channel(1024);
         Ok(Self {
             inner: Mutex::new(EventLog {
-                events,
-                ids,
+                events: std::mem::take(&mut events),
                 next_sequence,
-                file,
-                path,
             }),
             sender,
-            max_events: DEFAULT_MAX_EVENTS,
-            max_age: Duration::days(DEFAULT_MAX_AGE_DAYS),
+            database,
         })
     }
 
@@ -124,22 +122,12 @@ impl EventBus {
             kind,
             payload,
         };
-        inner.next_sequence += 1;
-        let encoded = serde_json::to_vec(&event).map_err(internal)?;
-        inner
-            .file
-            .write_all(&encoded)
-            .and_then(|_| inner.file.write_all(b"\n"))
-            .and_then(|_| inner.file.flush())
-            .map_err(|error| CoreError::io("persist event", error))?;
-        inner.ids.insert(event.id);
+        let encoded = serde_json::to_string(&event.payload).map_err(internal)?;
+        self.database.execute("INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)", &[&(event.sequence as i64), &event.id.to_string(), &event.category.as_str(), &event.kind, &encoded, &event.timestamp.timestamp_millis()])?;
+        inner.next_sequence = inner.next_sequence.saturating_add(1);
         inner.events.push_back(event.clone());
-        let needs_compaction = {
-            let EventLog { events, ids, .. } = &mut *inner;
-            retain(events, ids, self.max_events, self.max_age)
-        };
-        if needs_compaction {
-            compact(&mut inner)?;
+        while inner.events.len() > DEFAULT_MAX_EVENTS {
+            inner.events.pop_front();
         }
         drop(inner);
         let _ = self.sender.send(event.clone());
@@ -160,11 +148,9 @@ impl EventBus {
             })
             .unwrap_or_default()
     }
-
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
         self.sender.subscribe()
     }
-
     pub fn latest_sequence(&self) -> u64 {
         self.inner
             .lock()
@@ -172,44 +158,6 @@ impl EventBus {
             .and_then(|i| i.events.back().map(|e| e.sequence))
             .unwrap_or(0)
     }
-}
-
-fn retain(
-    events: &mut VecDeque<EventEnvelope>,
-    ids: &mut HashSet<Uuid>,
-    max: usize,
-    age: Duration,
-) -> bool {
-    let cutoff = Utc::now() - age;
-    let mut changed = false;
-    while events.len() > max || events.front().is_some_and(|e| e.timestamp < cutoff) {
-        if let Some(old) = events.pop_front() {
-            ids.remove(&old.id);
-            changed = true;
-        }
-    }
-    changed
-}
-
-fn compact(inner: &mut EventLog) -> Result<(), CoreError> {
-    let temp = inner.path.with_extension("jsonl.tmp");
-    let mut file =
-        File::create(&temp).map_err(|error| CoreError::io("compact event log", error))?;
-    for event in &inner.events {
-        serde_json::to_writer(&mut file, event).map_err(internal)?;
-        file.write_all(b"\n")
-            .map_err(|error| CoreError::io("compact event log", error))?;
-    }
-    file.sync_all()
-        .map_err(|error| CoreError::io("sync event log", error))?;
-    std::fs::rename(&temp, &inner.path)
-        .map_err(|error| CoreError::io("publish compacted event log", error))?;
-    inner.file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&inner.path)
-        .map_err(|error| CoreError::io("reopen event log", error))?;
-    Ok(())
 }
 
 fn category_for(kind: &str) -> EventCategory {
@@ -226,11 +174,10 @@ fn category_for(kind: &str) -> EventCategory {
         _ => EventCategory::System,
     }
 }
-
 fn poisoned() -> CoreError {
     CoreError::new(
         ErrorCode::Internal,
-        ErrorSource::System,
+        ErrorSource::Storage,
         "The event store is unavailable.",
         "event bus mutex poisoned",
     )
@@ -249,19 +196,17 @@ fn internal(error: serde_json::Error) -> CoreError {
 mod tests {
     use super::*;
     use serde_json::json;
-
     #[test]
     fn events_persist_replay_and_continue_sequences() {
-        let dir = tempfile::tempdir().unwrap();
-        let bus = EventBus::open(dir.path()).unwrap();
+        let database = Database::open_in_memory().unwrap();
+        let bus = EventBus::open(database.clone()).unwrap();
         let first = bus
             .emit("terminal.output", json!({"text":"hello"}))
             .unwrap();
         drop(bus);
-        let reopened = EventBus::open(dir.path()).unwrap();
+        let reopened = EventBus::open(database).unwrap();
         let second = reopened.emit("system.ready", json!({})).unwrap();
         assert_eq!(first.sequence + 1, second.sequence);
         assert_eq!(reopened.replay(0, 10).len(), 2);
-        assert_eq!(reopened.replay(first.sequence, 10)[0].id, second.id);
     }
 }

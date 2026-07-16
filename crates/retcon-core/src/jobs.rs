@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::{CoreError, ErrorCode};
+use retcon_storage::Database;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,12 +63,28 @@ struct JobEntry {
     handle: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct JobSupervisor {
     inner: Arc<Mutex<HashMap<Uuid, JobEntry>>>,
+    storage: Option<Database>,
+}
+
+impl Default for JobSupervisor {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            storage: None,
+        }
+    }
 }
 
 impl JobSupervisor {
+    pub fn with_storage(storage: Database) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            storage: Some(storage),
+        }
+    }
     pub fn spawn<F, Fut>(
         &self,
         owner: impl Into<String>,
@@ -108,6 +125,7 @@ impl JobSupervisor {
                 },
             );
         }
+        self.persist(id);
         let supervisor = self.clone();
         let operation = Arc::new(operation);
         let handle = tokio::spawn(async move {
@@ -264,6 +282,7 @@ impl JobSupervisor {
         {
             action(&mut job.snapshot);
         }
+        self.persist(id);
     }
     fn finish(
         &self,
@@ -278,6 +297,35 @@ impl JobSupervisor {
             job.failure = failure;
             job.finished_at = Some(Utc::now());
         });
+    }
+    fn persist(&self, id: Uuid) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let snapshot = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|jobs| jobs.get(&id).map(|job| job.snapshot.clone()));
+        let Some(job) = snapshot else {
+            return;
+        };
+        let status = format!("{:?}", job.status).to_ascii_lowercase();
+        let failure_class = job
+            .failure_class
+            .map(|value| format!("{value:?}").to_ascii_lowercase());
+        let children =
+            serde_json::to_string(&job.child_process_ids).unwrap_or_else(|_| "[]".into());
+        let created = job.created_at.timestamp_millis();
+        let started = job.started_at.map(|value| value.timestamp_millis());
+        let finished = job.finished_at.map(|value| value.timestamp_millis());
+        let attempts = i64::from(job.attempts);
+        let max_attempts = i64::from(job.max_attempts);
+        let timeout = i64::try_from(job.timeout_ms).unwrap_or(i64::MAX);
+        if let Err(error) = storage.execute(
+            "INSERT INTO background_jobs (id,owner,name,status,created_at,started_at,finished_at,attempts,max_attempts,timeout_ms,failure_class,failure,child_process_ids_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET status=excluded.status,started_at=excluded.started_at,finished_at=excluded.finished_at,attempts=excluded.attempts,failure_class=excluded.failure_class,failure=excluded.failure,child_process_ids_json=excluded.child_process_ids_json",
+            &[&job.id.to_string(), &job.owner, &job.name, &status, &created, &started, &finished, &attempts, &max_attempts, &timeout, &failure_class, &job.failure, &children],
+        ) { tracing::error!(%error, job.id=%id, "failed to persist supervised job"); }
     }
 }
 
@@ -321,5 +369,25 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(jobs.get(completed).unwrap().status, JobStatus::Succeeded);
         assert_eq!(jobs.get(cancelled).unwrap().status, JobStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn job_transitions_are_persisted() {
+        let database = Database::open_in_memory().unwrap();
+        let jobs = JobSupervisor::with_storage(database.clone());
+        let id = jobs.spawn("test", "durable", Duration::from_secs(1), 1, || async {
+            Ok(())
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let status: String = database
+            .read(|db| {
+                db.query_row(
+                    "SELECT status FROM background_jobs WHERE id=?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "succeeded");
     }
 }
