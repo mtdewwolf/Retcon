@@ -49,40 +49,53 @@ export class ManagedBrowser {
 
   async launch(): Promise<Record<string, unknown>> {
     if (this.context) return { alreadyRunning: true };
+    this.consoleEntries.length = 0;
+    this.networkEntries.length = 0;
     this.profile = await mkdtemp(join(tmpdir(), "retcon-browser-"));
-    const executablePath = process.env.RETCON_CHROMIUM_PATH;
-    this.context = await chromium.launchPersistentContext(this.profile, {
-      headless: true,
-      viewport: { width: 1280, height: 720 },
-      ...(executablePath ? { executablePath } : {}),
-    });
-    this.browser = this.context.browser() ?? undefined;
-    this.context.on("close", () => this.emit({ type: "browser.crashed", payload: {} }));
-    this.page = this.context.pages()[0] ?? (await this.context.newPage());
-    this.page.on("console", (message) => {
-      const entry = {
-        type: message.type(),
-        text: message.text(),
-        timestamp: new Date().toISOString(),
-      };
-      pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.console", payload: entry });
-    });
-    this.page.on("request", (request) => {
-      const entry = {
-        method: request.method(),
-        url: request.url(),
-        resourceType: request.resourceType(),
-      };
-      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.request", payload: entry });
-    });
-    this.page.on("response", (response) => {
-      const entry = { status: response.status(), url: response.url() };
-      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.response", payload: entry });
-    });
-    return { launched: true, profile: this.profile };
+    try {
+      const executablePath = process.env.RETCON_CHROMIUM_PATH;
+      this.context = await chromium.launchPersistentContext(this.profile, {
+        headless: true,
+        viewport: { width: 1280, height: 720 },
+        ...(executablePath ? { executablePath } : {}),
+      });
+      this.browser = this.context.browser() ?? undefined;
+      this.context.on("close", () => this.emit({ type: "browser.crashed", payload: {} }));
+      this.page = this.context.pages()[0] ?? (await this.context.newPage());
+      this.page.on("console", (message) => {
+        const entry = {
+          type: message.type(),
+          text: message.text(),
+          timestamp: new Date().toISOString(),
+        };
+        pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
+        this.emit({ type: "browser.console", payload: entry });
+      });
+      this.page.on("request", (request) => {
+        const entry = {
+          method: request.method(),
+          url: request.url(),
+          resourceType: request.resourceType(),
+        };
+        pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
+        this.emit({ type: "browser.request", payload: entry });
+      });
+      this.page.on("response", (response) => {
+        const entry = { status: response.status(), url: response.url() };
+        pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
+        this.emit({ type: "browser.response", payload: entry });
+      });
+      return { launched: true, profile: this.profile };
+    } catch (error) {
+      const context = this.context;
+      this.browser = undefined;
+      this.context = undefined;
+      this.page = undefined;
+      if (context) await context.close().catch(() => undefined);
+      if (this.profile) await rm(this.profile, { recursive: true, force: true });
+      this.profile = undefined;
+      throw error;
+    }
   }
 
   async navigate(url: string): Promise<Record<string, unknown>> {
@@ -154,6 +167,8 @@ export class ManagedBrowser {
     this.browser = undefined;
     this.context = undefined;
     this.page = undefined;
+    this.consoleEntries.length = 0;
+    this.networkEntries.length = 0;
     if (context) await context.close();
     if (this.profile) await rm(this.profile, { recursive: true, force: true });
     this.profile = undefined;
