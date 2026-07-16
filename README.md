@@ -5,8 +5,8 @@ AI coding agents** — a control room for delegating real coding tasks to an age
 everything it does, verifying the result in a managed browser, and recovering cleanly when
 something breaks.
 
-> Status: **pre-alpha** — Phase 1 (repository & engineering foundation). Nothing here is
-> usable yet.
+> Status: **pre-alpha** — Phases 0–1 complete; the Phase 2 architecture spike and Phase 3
+> core foundation are implemented and undergoing platform-matrix validation.
 
 ## What Retcon will do
 

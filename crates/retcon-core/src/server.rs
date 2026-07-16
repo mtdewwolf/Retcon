@@ -40,9 +40,12 @@ impl Server {
     pub async fn run(self) {
         let mut shutdown = self.state.shutdown_receiver();
         let mut connections = JoinSet::new();
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
+                _ = heartbeat.tick() => self.state.emit("system.heartbeat", json!({"uptime_ms": self.state.uptime().as_millis()})),
                 result = self.listener.accept() => match result {
                     Ok((stream, _)) => {
                         let token = self.token.clone();
@@ -91,16 +94,25 @@ async fn serve_connection(
         ));
     }
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|error| CoreError::io("read RPC request", error))?
-    {
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => dispatch(request, &state),
-            Err(error) => Response::error(0, &invalid_request(error.to_string())),
-        };
-        let mut encoded = serde_json::to_vec(&response).map_err(|error| {
+    let mut events = state.events().subscribe();
+
+    loop {
+        let message = tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line.map_err(|error| CoreError::io("read RPC request", error))? else { break };
+                let response = match serde_json::from_str::<Request>(&line) {
+                    Ok(request) => dispatch(request, &state).await,
+                    Err(error) => Response::error(0, &invalid_request(error.to_string())),
+                };
+                serde_json::to_value(response)
+            }
+            event = events.recv() => match event {
+                Ok(event) => Ok(json!({"event": event})),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => Ok(json!({"event": {"kind":"system.eventsLagged", "payload":{"skipped":skipped}}})),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }.map_err(|error| CoreError::new(ErrorCode::Internal, ErrorSource::Rpc, "Retcon could not encode a response.", error.to_string()))?;
+        let mut encoded = serde_json::to_vec(&message).map_err(|error| {
             CoreError::new(
                 ErrorCode::Internal,
                 ErrorSource::Rpc,
@@ -117,30 +129,81 @@ async fn serve_connection(
     Ok(())
 }
 
-fn dispatch(request: Request, state: &CoreState) -> Response {
+async fn dispatch(request: Request, state: &CoreState) -> Response {
     let result = match request.method.as_str() {
         "core.health" => Some(state.health()),
-        "core.version" => Some(json!({"version": env!("CARGO_PKG_VERSION")})),
+        "core.version" => Some(json!({"version": env!("CARGO_PKG_VERSION"), "protocolVersion": 1})),
         "core.capabilities" => Some(state.capabilities()),
         "core.diagnostics" => Some(state.diagnostics()),
         "core.shutdown" => {
             state.request_shutdown();
             Some(json!({"accepted": true}))
         }
+        "events.replay" => {
+            let after = request
+                .params
+                .get("afterSequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let limit = request
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
+            Some(
+                json!({"events": state.events().replay(after, limit), "latestSequence": state.events().latest_sequence()}),
+            )
+        }
+        "events.emit" => {
+            let kind = request
+                .params
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("system.test");
+            let payload = request
+                .params
+                .get("payload")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            match state.events().emit(kind, payload) {
+                Ok(event) => Some(json!(event)),
+                Err(error) => return Response::error(request.id, &error),
+            }
+        }
+        "jobs.list" => Some(json!({"jobs": state.jobs().list()})),
+        "jobs.get" | "jobs.cancel" | "jobs.forceStop" => {
+            let Some(raw) = request.params.get("id").and_then(|v| v.as_str()) else {
+                return Response::error(request.id, &invalid_request("missing job id"));
+            };
+            let Ok(id) = uuid::Uuid::parse_str(raw) else {
+                return Response::error(request.id, &invalid_request("invalid job id"));
+            };
+            match request.method.as_str() {
+                "jobs.get" => Some(json!({"job": state.jobs().get(id)})),
+                "jobs.cancel" => Some(json!({"accepted": state.jobs().cancel(id)})),
+                _ => Some(json!({"accepted": state.jobs().force_stop(id)})),
+            }
+        }
         _ => None,
     };
 
     match result {
         Some(result) => Response::ok(request.id, result),
-        None => Response::error(
-            request.id,
-            &CoreError::new(
-                ErrorCode::NotFound,
-                ErrorSource::Rpc,
-                "The requested core operation is not available.",
-                format!("unknown RPC method: {}", request.method),
+        None => match request.method.split('.').next() {
+            Some("terminal") => crate::spikes::terminal::handle(state.clone(), request).await,
+            Some("git") => crate::spikes::git::handle(request).await,
+            Some("agent") => crate::spikes::agent::handle(state.clone(), request).await,
+            Some("browser") => crate::spikes::browser::handle(state.clone(), request).await,
+            _ => Response::error(
+                request.id,
+                &CoreError::new(
+                    ErrorCode::NotFound,
+                    ErrorSource::Rpc,
+                    "The requested core operation is not available.",
+                    format!("unknown RPC method: {}", request.method),
+                ),
             ),
-        ),
+        },
     }
 }
 

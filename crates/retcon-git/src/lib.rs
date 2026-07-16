@@ -169,3 +169,69 @@ pub async fn diff(repo: &Path, path: Option<&str>) -> Result<String, GitError> {
     }
     run_git(repo, &args).await
 }
+
+/// Create a branch without checking it out.
+pub async fn branch_create(repo: &Path, branch: &str) -> Result<(), GitError> {
+    run_git(repo, &["branch", branch]).await.map(|_| ())
+}
+
+/// Return paths currently reported as unmerged conflicts.
+pub async fn conflicts(repo: &Path) -> Result<Vec<String>, GitError> {
+    let raw = run_git(repo, &["diff", "--name-only", "--diff-filter=U"]).await?;
+    Ok(raw.lines().map(str::to_owned).collect())
+}
+
+/// Return configured submodule paths, without recursively executing their config.
+pub async fn submodules(repo: &Path) -> Result<Vec<String>, GitError> {
+    let file = repo.join(".gitmodules");
+    if !file.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = run_git(
+        repo,
+        &["config", "--file", ".gitmodules", "--get-regexp", "path"],
+    )
+    .await?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| line.split_once(' ').map(|(_, path)| path.to_owned()))
+        .collect())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn status_branch_diff_and_worktree_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]).await.unwrap();
+        run_git(
+            dir.path(),
+            &["config", "user.email", "retcon@example.invalid"],
+        )
+        .await
+        .unwrap();
+        run_git(dir.path(), &["config", "user.name", "Retcon Test"])
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "one\n").unwrap();
+        run_git(dir.path(), &["add", "."]).await.unwrap();
+        run_git(dir.path(), &["commit", "-m", "initial"])
+            .await
+            .unwrap();
+        branch_create(dir.path(), "review").await.unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "two\n").unwrap();
+        assert_eq!(status(dir.path()).await.unwrap().branch, "main");
+        assert!(diff(dir.path(), None).await.unwrap().contains("+two"));
+        let worktree = dir.path().join("worktree");
+        worktree_add(dir.path(), worktree.to_str().unwrap(), "spike")
+            .await
+            .unwrap();
+        assert!(worktree_list(dir.path()).await.unwrap().len() >= 2);
+        worktree_remove(dir.path(), worktree.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(conflicts(dir.path()).await.unwrap().is_empty());
+    }
+}

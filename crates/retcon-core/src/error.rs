@@ -76,8 +76,26 @@ impl CoreError {
     }
 
     pub fn diagnostic(mut self, diagnostic: Value) -> Self {
-        self.diagnostic = Some(Box::new(diagnostic));
+        self.diagnostic = Some(Box::new(redact_value(diagnostic)));
         self
+    }
+
+    /// Produce a copyable, redacted support record including the cause chain.
+    pub fn support_bundle(&self) -> Value {
+        let mut causes = Vec::new();
+        let mut current = self.source();
+        while let Some(cause) = current {
+            causes.push(redact(cause.to_string()));
+            current = cause.source();
+        }
+        serde_json::json!({
+            "crash_id": self.id,
+            "error": self,
+            "causes": causes,
+            "version": env!("CARGO_PKG_VERSION"),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        })
     }
 
     pub fn with_cause(mut self, cause: impl Error + Send + Sync + 'static) -> Self {
@@ -132,6 +150,32 @@ fn redact(message: String) -> String {
         .join(" ")
 }
 
+fn redact_value(value: Value) -> Value {
+    match value {
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    let secret = matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "token" | "password" | "secret" | "authorization" | "api_key"
+                    );
+                    (
+                        key,
+                        if secret {
+                            Value::String("[REDACTED]".into())
+                        } else {
+                            redact_value(value)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_value).collect()),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +192,16 @@ mod tests {
         assert_eq!(
             error.technical_message.as_ref(),
             "request [REDACTED] [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn support_bundles_redact_nested_diagnostics() {
+        let error = CoreError::new(ErrorCode::Internal, ErrorSource::System, "failed", "safe")
+            .diagnostic(serde_json::json!({"request":{"token":"abc"}}));
+        assert_eq!(
+            error.support_bundle()["error"]["diagnostic"]["request"]["token"],
+            "[REDACTED]"
         );
     }
 }

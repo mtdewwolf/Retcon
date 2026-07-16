@@ -20,6 +20,20 @@ pub struct AgentRegistry {
     map: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<AgentTurn>>>>,
 }
 
+impl AgentRegistry {
+    /// Stop all provider turns owned by the spike.
+    pub async fn shutdown(&self) {
+        let turns = self
+            .map
+            .lock()
+            .map(|mut map| map.drain().map(|(_, turn)| turn).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for turn in turns {
+            turn.lock().await.cancel().await;
+        }
+    }
+}
+
 /// Handle an `agent.*` request.
 pub async fn handle(state: CoreState, request: Request) -> Response {
     let Request { id, method, params } = request;
@@ -43,7 +57,12 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                     "missing 'id' parameter",
                 );
             };
-            let turn = state.agents().map.lock().ok().and_then(|m| m.get(&turn_id).cloned());
+            let turn = state
+                .agents()
+                .map
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&turn_id).cloned());
             match turn {
                 Some(turn) => {
                     turn.lock().await.cancel().await;
@@ -87,28 +106,41 @@ fn start(state: CoreState, id: u64, params: &Value) -> Response {
     let turn_id = state.agents().next.fetch_add(1, Ordering::Relaxed) + 1;
     let line_state = state.clone();
     let exit_state = state.clone();
-    let turn = AgentTurn::start(
-        &cwd,
-        prompt,
-        move |line| {
-            // Forward parsed provider JSON when possible, raw text otherwise.
-            let payload = serde_json::from_str::<Value>(&line)
-                .unwrap_or_else(|_| Value::String(line.clone()));
-            line_state.emit("agent.line", json!({ "id": turn_id, "message": payload }));
-        },
-        move |code| {
-            exit_state.emit("agent.exit", json!({ "id": turn_id, "exitCode": code }));
-        },
-    );
+    let resume = param_str(params, "sessionId");
+    let turn = AgentTurn::start_with_session(&cwd, prompt, resume, move |line| {
+        // Forward parsed provider JSON when possible, raw text otherwise.
+        let payload =
+            serde_json::from_str::<Value>(&line).unwrap_or_else(|_| Value::String(line.clone()));
+        line_state.emit("agent.line", json!({ "id": turn_id, "message": payload }));
+    });
 
     match turn {
         Ok(turn) => {
+            let turn = Arc::new(tokio::sync::Mutex::new(turn));
             if let Ok(mut map) = state.agents().map.lock() {
-                map.insert(turn_id, Arc::new(tokio::sync::Mutex::new(turn)));
+                map.insert(turn_id, Arc::clone(&turn));
             }
+            let watch_state = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if let Some(code) = turn.lock().await.try_exit_code() {
+                        exit_state.emit("agent.exit", json!({ "id": turn_id, "exitCode": code }));
+                        if let Ok(mut map) = watch_state.agents().map.lock() {
+                            map.remove(&turn_id);
+                        }
+                        break;
+                    }
+                }
+            });
             tracing::info!(turn_id, "agent turn started");
             Response::ok(id, json!({ "turnId": turn_id }))
         }
-        Err(e) => fail(id, ErrorCode::Internal, "Retcon could not start the coding agent.", e),
+        Err(e) => fail(
+            id,
+            ErrorCode::Internal,
+            "Retcon could not start the coding agent.",
+            e,
+        ),
     }
 }

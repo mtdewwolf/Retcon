@@ -59,6 +59,8 @@ jobs:
     defaults:
       run:
         working-directory: apps/browser-service
+    env:
+      RETCON_BROWSER_E2E: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -66,6 +68,8 @@ jobs:
           bun-version: latest
       - name: Install
         run: bun install --frozen-lockfile
+      - name: Install managed Chromium
+        run: bunx playwright install --with-deps chromium
       - name: Lint
         run: bunx @biomejs/biome check src
       - name: Typecheck

@@ -19,6 +19,10 @@ pub struct ProviderInfo {
     pub id: String,
     /// Version string reported by the CLI.
     pub version: String,
+    /// Whether the CLI reports an authenticated account.
+    pub authenticated: bool,
+    /// The spike's conservative outdated check (major version zero).
+    pub outdated: bool,
 }
 
 /// Detect the Claude Code CLI and read its version.
@@ -45,9 +49,20 @@ pub async fn detect_claude() -> Result<ProviderInfo, String> {
     if version.is_empty() {
         return Err("claude --version produced no output".to_owned());
     }
+    let auth = Command::new("cmd")
+        .args(["/C", "claude", "auth", "status"])
+        .stdin(Stdio::null())
+        .output()
+        .await;
+    let authenticated = auth.is_ok_and(|result| result.status.success());
+    let outdated = version
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .starts_with("0.");
     Ok(ProviderInfo {
         id: "claude-code".to_owned(),
         version,
+        authenticated,
+        outdated,
     })
 }
 
@@ -69,19 +84,34 @@ impl AgentTurn {
     pub fn start(
         cwd: &Path,
         prompt: &str,
-        mut on_line: impl FnMut(String) + Send + 'static,
-        on_exit: impl FnOnce(Option<i32>) + Send + 'static,
+        on_line: impl FnMut(String) + Send + 'static,
+        _on_exit: impl FnOnce(Option<i32>) + Send + 'static,
     ) -> Result<Self, String> {
+        Self::start_with_session(cwd, prompt, None, on_line)
+    }
+
+    /// Start a new turn or resume a provider session by its native ID.
+    pub fn start_with_session(
+        cwd: &Path,
+        prompt: &str,
+        resume_session: Option<&str>,
+        mut on_line: impl FnMut(String) + Send + 'static,
+    ) -> Result<Self, String> {
+        let mut args = vec![
+            "/C",
+            "claude",
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ];
+        if let Some(session) = resume_session {
+            args.push("--resume");
+            args.push(session);
+        }
         let mut child = Command::new("cmd")
-            .args([
-                "/C",
-                "claude",
-                "-p",
-                prompt,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ])
+            .args(args)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -113,7 +143,6 @@ impl AgentTurn {
             while let Ok(Some(line)) = lines.next_line().await {
                 on_line(line);
             }
-            on_exit(None);
         });
 
         Ok(Self { child })

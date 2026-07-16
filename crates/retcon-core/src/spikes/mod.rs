@@ -20,7 +20,10 @@ pub(crate) fn fail(
     user_message: &str,
     technical_message: impl Into<String>,
 ) -> Response {
-    Response::error(id, &CoreError::new(code, ErrorSource::System, user_message, technical_message))
+    Response::error(
+        id,
+        &CoreError::new(code, ErrorSource::System, user_message, technical_message),
+    )
 }
 
 /// Read a string parameter.

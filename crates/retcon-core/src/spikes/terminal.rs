@@ -19,10 +19,44 @@ pub struct TerminalRegistry {
     map: Mutex<HashMap<u64, Arc<PtySession>>>,
 }
 
+impl TerminalRegistry {
+    /// Kill all terminal process trees owned by the spike.
+    pub fn shutdown(&self) {
+        if let Ok(mut sessions) = self.map.lock() {
+            for (_, session) in sessions.drain() {
+                session.kill();
+            }
+        }
+    }
+}
+
 /// Handle a `terminal.*` request.
 pub async fn handle(state: CoreState, request: Request) -> Response {
     let Request { id, method, params } = request;
     match method.as_str() {
+        "terminal.detectShells" => {
+            let mut available = Vec::new();
+            for (id, executable) in [("powershell", "powershell.exe"), ("cmd", "cmd.exe")] {
+                if let Ok(output) = std::process::Command::new("where.exe")
+                    .arg(executable)
+                    .output()
+                    && output.status.success()
+                    && let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next()
+                {
+                    available.push(json!({"id": id, "path": path}));
+                }
+            }
+            if let Some(program_files) = std::env::var_os("ProgramFiles") {
+                let path = std::path::PathBuf::from(program_files)
+                    .join("Git")
+                    .join("bin")
+                    .join("bash.exe");
+                if path.exists() {
+                    available.push(json!({"id":"git-bash", "path": path}));
+                }
+            }
+            Response::ok(id, json!({"shells": available}))
+        }
         "terminal.start" => start(state, id, &params),
         "terminal.input" => with_session(&state, id, &params, |s| {
             let data = param_str(&params, "data").unwrap_or_default();
@@ -47,7 +81,9 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
 }
 
 fn start(state: CoreState, id: u64, params: &Value) -> Response {
-    let shell = param_str(params, "shell").unwrap_or("powershell.exe").to_owned();
+    let shell = param_str(params, "shell")
+        .unwrap_or("powershell.exe")
+        .to_owned();
     let cwd = param_str(params, "cwd").map(std::path::PathBuf::from);
     let cols = param_u64(params, "cols").unwrap_or(120) as u16;
     let rows = param_u64(params, "rows").unwrap_or(30) as u16;
@@ -62,7 +98,12 @@ fn start(state: CoreState, id: u64, params: &Value) -> Response {
     }) {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            return fail(id, ErrorCode::Internal, "Retcon could not start the shell.", e);
+            return fail(
+                id,
+                ErrorCode::Internal,
+                "Retcon could not start the shell.",
+                e,
+            );
         }
     };
 
@@ -76,7 +117,10 @@ fn start(state: CoreState, id: u64, params: &Value) -> Response {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if let Some(code) = session.try_exit_code() {
-                watch_state.emit("terminal.exit", json!({ "id": terminal_id, "exitCode": code }));
+                watch_state.emit(
+                    "terminal.exit",
+                    json!({ "id": terminal_id, "exitCode": code }),
+                );
                 if let Ok(mut map) = watch_state.terminals().map.lock() {
                     map.remove(&terminal_id);
                 }
@@ -103,12 +147,21 @@ fn with_session(
             "missing 'id' parameter",
         );
     };
-    let session =
-        state.terminals().map.lock().ok().and_then(|m| m.get(&terminal_id).cloned());
+    let session = state
+        .terminals()
+        .map
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&terminal_id).cloned());
     match session {
         Some(s) => match f(&s) {
             Ok(()) => Response::ok(id, json!({})),
-            Err(e) => fail(id, ErrorCode::Io, "The terminal did not accept the operation.", e),
+            Err(e) => fail(
+                id,
+                ErrorCode::Io,
+                "The terminal did not accept the operation.",
+                e,
+            ),
         },
         None => fail(
             id,

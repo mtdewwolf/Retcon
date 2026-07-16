@@ -55,4 +55,5 @@ pub struct Discovery {
     pub token: String,
     pub pid: u32,
     pub version: String,
+    pub protocol_version: u32,
 }

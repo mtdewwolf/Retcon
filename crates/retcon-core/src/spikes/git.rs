@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{fail, param_str};
 use crate::error::ErrorCode;
@@ -31,6 +31,29 @@ pub async fn handle(request: Request) -> Response {
     match method.as_str() {
         "git.status" => match retcon_git::status(&repo).await {
             Ok(s) => Response::ok(id, json!(s)),
+            Err(e) => git_fail(id, e),
+        },
+        "git.branchCreate" => {
+            let branch = param_str(&params, "branch").unwrap_or_default();
+            if branch.is_empty() {
+                return fail(
+                    id,
+                    ErrorCode::InvalidRequest,
+                    "Creating a branch needs a name.",
+                    "missing 'branch' parameter",
+                );
+            }
+            match retcon_git::branch_create(&repo, branch).await {
+                Ok(()) => Response::ok(id, json!({})),
+                Err(e) => git_fail(id, e),
+            }
+        }
+        "git.conflicts" => match retcon_git::conflicts(&repo).await {
+            Ok(paths) => Response::ok(id, json!({"paths": paths})),
+            Err(e) => git_fail(id, e),
+        },
+        "git.submodules" => match retcon_git::submodules(&repo).await {
+            Ok(paths) => Response::ok(id, json!({"paths": paths})),
             Err(e) => git_fail(id, e),
         },
         "git.worktreeList" => match retcon_git::worktree_list(&repo).await {

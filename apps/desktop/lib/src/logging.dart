@@ -21,8 +21,10 @@ void initLogging() {
     );
     if (kDebugMode) {
       // ignore: avoid_print — deliberate console mirror for debug runs.
-      print('${record.time.toIso8601String()} ${record.level.name} '
-          '[${record.loggerName}] ${record.message}');
+      print(
+        '${record.time.toIso8601String()} ${record.level.name} '
+        '[${record.loggerName}] ${record.message}',
+      );
     }
   });
 }

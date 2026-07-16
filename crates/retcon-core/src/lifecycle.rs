@@ -46,12 +46,16 @@ impl CoreRuntime {
         let instance_lock = InstanceLock::acquire(&config.data_dir.join("core.lock"))?;
         remove_stale_discovery(&config.data_dir)?;
 
-        let state = CoreState::new();
+        let state = CoreState::new(&config.data_dir)?;
         let token = Uuid::new_v4().to_string();
         let server = Server::bind(state.clone(), token.clone()).await?;
         let address = server.address()?;
         write_discovery(&config.data_dir, address, token)?;
         let server_task = tokio::spawn(server.run());
+        state.emit(
+            "system.ready",
+            serde_json::json!({"address": address, "version": env!("CARGO_PKG_VERSION")}),
+        );
 
         Ok(Self {
             config,
@@ -88,7 +92,11 @@ impl CoreRuntime {
     }
 
     pub async fn shutdown(mut self) -> Result<(), CoreError> {
+        self.state
+            .emit("system.shutdown", serde_json::json!({"reason":"requested"}));
         self.state.request_shutdown();
+        self.state.jobs().shutdown();
+        self.state.cleanup_children().await;
         if tokio::time::timeout(self.config.shutdown_timeout, &mut self.server_task)
             .await
             .is_err()
@@ -155,6 +163,7 @@ fn write_discovery(data_dir: &Path, address: SocketAddr, token: String) -> Resul
         token,
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        protocol_version: 1,
     };
     let bytes = serde_json::to_vec_pretty(&discovery).map_err(|error| {
         CoreError::new(

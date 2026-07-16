@@ -20,6 +20,10 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+chrono.workspace = true
+retcon-agents.workspace = true
+retcon-git.workspace = true
+retcon-terminal.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

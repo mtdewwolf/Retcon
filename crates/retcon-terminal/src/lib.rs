@@ -16,7 +16,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 /// Exit detection is by polling [`PtySession::try_exit_code`] — the caller
 /// owns the cadence.
 pub struct PtySession {
-    master: Box<dyn MasterPty + Send>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
 }
@@ -47,6 +47,15 @@ impl PtySession {
             })
             .map_err(|e| format!("failed to open pty: {e}"))?;
 
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| format!("failed to clone pty reader: {e}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| format!("failed to take pty writer: {e}"))?;
+
         let mut cmd = CommandBuilder::new(shell);
         if let Some(dir) = cwd {
             cmd.cwd(dir);
@@ -56,15 +65,6 @@ impl PtySession {
             .spawn_command(cmd)
             .map_err(|e| format!("failed to spawn shell '{shell}': {e}"))?;
         drop(pair.slave);
-
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("failed to clone pty reader: {e}"))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| format!("failed to take pty writer: {e}"))?;
 
         // portable-pty reads are synchronous; stream from a blocking thread.
         std::thread::Builder::new()
@@ -81,7 +81,7 @@ impl PtySession {
             .map_err(|e| format!("failed to start pty reader thread: {e}"))?;
 
         Ok(Self {
-            master: pair.master,
+            master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
         })
@@ -110,6 +110,8 @@ impl PtySession {
     /// Returns a message if the resize is rejected.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
         self.master
+            .lock()
+            .map_err(|_| "pty master lock poisoned".to_owned())?
             .resize(PtySize {
                 rows,
                 cols,
@@ -131,7 +133,65 @@ impl PtySession {
     /// Kill the shell process; ConPTY teardown takes the process tree with it.
     pub fn kill(&self) {
         if let Ok(mut child) = self.child.lock() {
+            #[cfg(windows)]
+            if let Some(process_id) = child.process_id() {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &process_id.to_string(), "/T", "/F"])
+                    .output();
+            }
             let _ = child.kill();
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "requires an interactive Windows ConPTY host; run manually on the desktop validation matrix"]
+    fn powershell_is_interactive_resizable_unicode_and_reports_exit() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&output);
+        let session = PtySession::spawn("powershell.exe", None, 80, 24, move |chunk| {
+            if let Ok(mut bytes) = captured.lock() {
+                bytes.extend_from_slice(chunk);
+            }
+        })
+        .unwrap();
+        session.resize(120, 40).unwrap();
+        session
+            .write("Write-Output 'RETCON_UNICODE_✓'\r\n".as_bytes())
+            .unwrap();
+        let output_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let seen = output
+                .lock()
+                .map(|bytes| String::from_utf8_lossy(&bytes).contains("RETCON_UNICODE"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+            assert!(
+                Instant::now() < output_deadline,
+                "terminal produced no interactive output"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session.kill();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let code = loop {
+            if let Some(code) = session.try_exit_code() {
+                break code;
+            }
+            assert!(Instant::now() < deadline, "shell did not exit");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_ne!(code, u32::MAX);
+        let text = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
+        assert!(text.contains("RETCON_UNICODE"));
     }
 }

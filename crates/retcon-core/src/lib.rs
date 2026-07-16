@@ -9,9 +9,12 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 pub mod error;
+pub mod event;
+pub mod jobs;
 pub mod lifecycle;
 pub mod rpc;
 pub mod server;
+pub mod spikes;
 pub mod state;
 
 pub use error::{CoreError, ErrorCode, ErrorSource};

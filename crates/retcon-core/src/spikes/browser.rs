@@ -31,6 +31,15 @@ pub struct BrowserHandle {
     proc: Mutex<Option<BrowserProc>>,
 }
 
+impl BrowserHandle {
+    /// Stop the browser-service child if it is running.
+    pub async fn shutdown(&self) {
+        if let Some(mut proc) = self.proc.lock().await.take() {
+            let _ = proc.child.kill().await;
+        }
+    }
+}
+
 /// Handle a `browser.*` request.
 pub async fn handle(state: CoreState, request: Request) -> Response {
     let Request { id, method, params } = request;
@@ -89,10 +98,20 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     };
 
     let Some(stdin) = child.stdin.take() else {
-        return fail(id, ErrorCode::Internal, "The browser service has no input.", "no stdin");
+        return fail(
+            id,
+            ErrorCode::Internal,
+            "The browser service has no input.",
+            "no stdin",
+        );
     };
     let Some(stdout) = child.stdout.take() else {
-        return fail(id, ErrorCode::Internal, "The browser service has no output.", "no stdout");
+        return fail(
+            id,
+            ErrorCode::Internal,
+            "The browser service has no output.",
+            "no stdout",
+        );
     };
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
@@ -109,7 +128,9 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
             if let Some(reply_id) = value.get("id").and_then(Value::as_u64) {
                 if let Some(sender) = reader_pending.lock().await.remove(&reply_id) {
                     let _ = sender.send(value);
@@ -121,7 +142,12 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
         event_state.emit("browser.serviceExited", json!({}));
     });
 
-    *guard = Some(BrowserProc { child, stdin, pending, next: AtomicU64::new(0) });
+    *guard = Some(BrowserProc {
+        child,
+        stdin,
+        pending,
+        next: AtomicU64::new(0),
+    });
     tracing::info!(dir, "browser service started");
     Response::ok(id, json!({}))
 }
@@ -175,7 +201,10 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
                     error.to_string(),
                 )
             } else {
-                Response::ok(id, value.get("result").cloned().unwrap_or_else(|| json!({})))
+                Response::ok(
+                    id,
+                    value.get("result").cloned().unwrap_or_else(|| json!({})),
+                )
             }
         }
         Ok(Err(_)) => fail(
