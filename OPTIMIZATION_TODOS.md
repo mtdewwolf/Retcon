@@ -1,6 +1,6 @@
 # Optimization TODO list
 
-Full codebase review after the SQLite event-bus migration (`7915613`).
+Full codebase review after `1c81051` (app-flow refactor + prior growth fixes).
 Priorities: **P0** = correctness / unbounded growth; **P1** = hot-path performance;
 **P2** = medium impact; **P3** = polish / future.
 
@@ -13,66 +13,78 @@ meaningful optimization surface yet.
 
 ## Done in this PR
 
-- [x] **P0** Cap browser-service console/network buffers with a ring buffer
-  (`apps/browser-service/src/browser.ts`)
-- [x] **P0** Remove timed-out / closed browser RPC entries from `pending`
-  (`crates/retcon-core/src/spikes/browser.rs`)
-- [x] **P0** Cap RPC frame size on read (`crates/retcon-core/src/frame.rs`,
-  `server.rs`, `spikes/browser.rs`)
-- [x] **P0** Periodic SQLite event retention (`crates/retcon-core/src/event.rs`)
-- [x] **P0** Evict finished jobs from memory + DB (`crates/retcon-core/src/jobs.rs`)
-- [x] **P0** Graceful browser-service shutdown before kill (`spikes/browser.rs`)
-- [x] **P0** Bound Git command output (`crates/retcon-git/src/lib.rs`)
-- [x] **P1** Don't hold event-bus mutex across SQLite insert (`event.rs` writer thread)
-- [x] **P1** Batch / coalesce terminal output events (`spikes/terminal.rs`)
-- [x] **P1** Move SQLite work off Tokio worker threads (`database.rs` `read_async`,
-  `artifacts.rs` async helpers)
-- [x] **P1** Add status indexes for recovery queries (migration `0003`)
-- [x] **P1** Enforce log pagination / tail in `browser.logs` (`browser.ts`)
-- [x] **P1** Default screenshot to viewport (`browser.ts`)
-- [x] **P1** Combine Git status into one process (`retcon-git/src/lib.rs`)
-- [x] **P2** Browser proc lock held across stdin writes — writer actor split (`browser.rs`)
-- [x] **P2** Clear stale `BrowserHandle.proc` + drain pending on reader exit (`browser.rs`)
-- [x] **P2** Artifact retention hash indexes (migration `0003`)
-- [x] **P2** Run artifact disk walks in `spawn_blocking` (`artifacts.rs`)
-- [x] **P2** Skip full rehash on duplicate artifact store (`artifacts.rs`)
-- [x] **P2** Binary-search event replay (`event.rs`)
-- [x] **P2** `Arc<EventEnvelope>` to cut clone cost on emit (`event.rs`)
-- [x] **P2** `prepare_cached` for hot statements (`event.rs`, `jobs.rs`)
-- [x] **P2** `PRAGMA quick_check` on normal open; full check for diagnostics (`database.rs`)
-- [x] **P2** `SQLITE_OPEN_NO_MUTEX` when Rust serializes the connection (`database.rs`)
-- [x] **P2** Tune `cache_size` / `mmap_size` / `wal_autocheckpoint` (`database.rs`)
-- [x] **P2** Debounce job persistence; avoid Debug-format enum names (`jobs.rs`)
-- [x] **P2** Don't hold terminal registry lock while killing (`spikes/terminal.rs`)
-- [x] **P2** Cache / async shell detection (`spikes/terminal.rs`)
-- [x] **P2** Cache agent/provider detection (`retcon-agents`)
-- [x] **P2** Await `child.wait()` instead of 250ms poll (`spikes/agent.rs`)
-- [x] **P2** Cache schema version after open (`state.rs`)
-- [x] **P2** Lazy-load event replay pages from DB at startup (`event.rs`)
-- [x] **P2** Pass browser temp profile dir via `launchPersistentContext` (`browser.ts`)
-- [x] **P2** Stdout backpressure on browser-service event emits (`main.ts`)
-- [x] **P2** Spawn `bun` directly (no `cmd /C` shell) on Windows (`spikes/browser.rs`)
-- [x] **P3** Deduplicate console/network stream vs buffer shipping (`browser.ts` — network
-  responses now land in the ring buffer)
-- [x] **P3** Method-aware concurrency for browser-service stdio RPC (`main.ts`)
-- [x] **P3** Cache log level at module load (`logging.ts`)
-- [x] **P3** Website asset generation: single Sharp pipeline + `Promise.all` for icons
-- [x] **P3** Website CLS: explicit image dimensions; defer Tally iframe (`index.astro`)
-- [x] **P3** CI-generate PWA icons referenced by `site.webmanifest` (`package.json` build)
+- [x] **P0** Bound durable event persist queue (`sync_channel` + `try_send`)
+  (`crates/retcon-core/src/event.rs`)
+- [x] **P0** Bound terminal PTY output queue with drop counters
+  (`crates/retcon-core/src/spikes/terminal.rs`)
+- [x] **P1** Move event retention prune onto the writer thread (`event.rs`)
+- [x] **P1** Drop event-bus mutex before cloning replay payloads (`event.rs`)
+- [x] **P1** Job SQLite persistence via `block_in_place` on Tokio (`jobs.rs`)
+- [x] **P1** Shutdown artifact cleanup uses `cleanup_referenced_async`
+  (`lifecycle.rs`)
+- [x] **P1** Browser launch failure cleans up temp profile (`browser.ts`)
+- [x] **P1** Desktop `CoreClient` tears down socket/heartbeat on failure/disconnect
+  (`apps/desktop/lib/src/core_client.dart`)
+- [x] **P2** Cap Git stderr the same way as stdout (`retcon-git`)
+- [x] **P2** Cap agent provider line length (`retcon-agents`)
+- [x] **P2** Artifact reference scan uses `UNION ALL` + Rust `HashSet`
+  (`artifacts.rs`)
+- [x] **P3** Clear browser console/network buffers on close/relaunch (`browser.ts`)
 
 ---
 
-## Deferred (future schema work)
+## Remaining TODOs
 
-- [ ] **P3** UUID-as-BLOB schema migration to shrink indexes (`repositories.rs`)
-  - Requires a coordinated schema v4 migration across every TEXT UUID column and all
-    client bindings; deferred until a dedicated migration sprint.
+### P1 — Hot path
+
+- [ ] **P1** Dedicated job-persistence writer (or async flush) instead of
+  `block_in_place` per transition
+  - Files: `crates/retcon-core/src/jobs.rs`
+  - Why: `block_in_place` avoids starving the runtime but still couples job
+    lifecycle latency to SQLite; a writer actor would match the event-bus pattern
+    and allow batching.
+
+- [ ] **P1** Batch durable event inserts on the writer thread
+  - Files: `crates/retcon-core/src/event.rs` (`event_writer_loop`)
+  - Why: one INSERT + prepare per event; draining a small batch inside a
+    transaction would raise SQLite throughput under terminal/agent floods.
+
+### P2 — Medium
+
+- [ ] **P2** Order-preserving / SQL-backed `jobs.list` pagination
+  - Files: `crates/retcon-core/src/jobs.rs`, `server.rs`
+  - Why: still clones + sorts the entire in-memory map before `skip/take`.
+
+- [ ] **P2** Batch SQLite event prune with inserts (single writer transaction)
+  - Files: `crates/retcon-core/src/event.rs`
+  - Why: prune already runs on the writer; folding it into periodic batched
+    write transactions reduces connection churn further.
+
+### P3 — Polish
+
+- [ ] **P3** Make `RetconApp` own `CoreClient`/`GoRouter` in `initState`
+  - Files: `apps/desktop/lib/main.dart`
+  - Why: `build()` + `ChangeNotifierProvider.value` recreates/owns incorrectly
+    when `core` is null (tests today; production risk later).
+
+- [ ] **P3** Idempotent `initLogging()` (guard / dispose subscription)
+  - Files: `apps/desktop/lib/src/logging.dart`
+  - Why: repeated init stacks root listeners for process lifetime.
+
+- [ ] **P3** Website build: parallel Sharp metadata + precomputed proof manifest
+  - Files: `apps/website/src/pages/index.astro`,
+    `apps/website/scripts/check-launch-assets.mjs`
+  - Why: build-time only; serial `existsSync` / Sharp probes.
+
+- [ ] **P3** UUID-as-BLOB schema migration to shrink indexes
+  - Files: `crates/retcon-storage/src/repositories.rs` (+ coordinated migration)
+  - Why: deferred until a dedicated schema sprint; touches every TEXT UUID column.
 
 ---
 
-## Suggested order of attack (completed)
+## Suggested order of attack
 
-1. Frame-size caps + event retention + job eviction (bounds) ✅
-2. Event writer off async path + terminal coalesce (throughput) ✅
-3. Recovery indexes + Git/browser evidence polish (latency) ✅
-4. Storage pragma / statement-cache tuning (incremental) ✅
+1. Job writer actor + batched event inserts (throughput under load)
+2. `jobs.list` ordered pagination (RPC polling cost)
+3. Desktop ownership / logging polish (leak hygiene)
+4. Schema UUID-as-BLOB when doing the next storage migration

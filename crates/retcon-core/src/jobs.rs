@@ -401,14 +401,18 @@ impl JobSupervisor {
         let attempts = i64::from(job.attempts);
         let max_attempts = i64::from(job.max_attempts);
         let timeout = i64::try_from(job.timeout_ms).unwrap_or(i64::MAX);
-        if let Err(error) = storage.read(|db| {
+        let job_id = job.id.to_string();
+        let owner = job.owner.clone();
+        let name = job.name.clone();
+        let failure = job.failure.clone();
+        let write = move |db: &rusqlite::Connection| {
             let mut statement = db.prepare_cached(
                 "INSERT INTO background_jobs (id,owner,name,status,created_at,started_at,finished_at,attempts,max_attempts,timeout_ms,failure_class,failure,child_process_ids_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET status=excluded.status,started_at=excluded.started_at,finished_at=excluded.finished_at,attempts=excluded.attempts,failure_class=excluded.failure_class,failure=excluded.failure,child_process_ids_json=excluded.child_process_ids_json",
             )?;
             statement.execute(rusqlite::params![
-                job.id.to_string(),
-                job.owner,
-                job.name,
+                job_id,
+                owner,
+                name,
                 status,
                 created,
                 started,
@@ -417,10 +421,19 @@ impl JobSupervisor {
                 max_attempts,
                 timeout,
                 failure_class,
-                job.failure,
+                failure,
                 children,
             ])
-        }) {
+        };
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle)
+                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                tokio::task::block_in_place(|| storage.read(write))
+            }
+            _ => storage.read(write),
+        };
+        if let Err(error) = result {
             tracing::error!(%error, job.id = %job.id, "failed to persist supervised job");
         }
     }

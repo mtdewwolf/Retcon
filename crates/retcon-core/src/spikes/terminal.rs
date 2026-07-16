@@ -16,6 +16,8 @@ use crate::state::CoreState;
 
 const OUTPUT_COALESCE_MS: u64 = 50;
 const OUTPUT_COALESCE_BYTES: usize = 4_096;
+/// Cap queued PTY chunks so a stalled coalescer cannot grow unbounded.
+const OUTPUT_QUEUE_CAP: usize = 256;
 
 /// Live PTY sessions owned by the core.
 #[derive(Default)]
@@ -110,7 +112,9 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     let rows = param_u64(params, "rows").unwrap_or(30) as u16;
 
     let terminal_id = state.terminals().next.fetch_add(1, Ordering::Relaxed) + 1;
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(OUTPUT_QUEUE_CAP);
+    let dropped_chunks = Arc::new(AtomicU64::new(0));
+    let drop_counter = Arc::clone(&dropped_chunks);
     let output_state = state.clone();
     tokio::spawn(async move {
         let mut buffer = String::new();
@@ -122,6 +126,14 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
                     let Some(chunk) = chunk else {
                         if !buffer.is_empty() {
                             output_state.emit("terminal.output", json!({ "id": terminal_id, "data": buffer }));
+                        }
+                        let dropped = drop_counter.load(Ordering::Relaxed);
+                        if dropped > 0 {
+                            tracing::warn!(
+                                terminal_id,
+                                dropped_chunks = dropped,
+                                "terminal output queue overflowed; chunks were dropped"
+                            );
                         }
                         break;
                     };
@@ -142,7 +154,10 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     });
 
     let session = match PtySession::spawn(&shell, cwd.as_deref(), cols, rows, move |chunk| {
-        let _ = tx.send(String::from_utf8_lossy(chunk).into_owned());
+        let text = String::from_utf8_lossy(chunk).into_owned();
+        if tx.try_send(text).is_err() {
+            dropped_chunks.fetch_add(1, Ordering::Relaxed);
+        }
     }) {
         Ok(s) => Arc::new(s),
         Err(e) => {
