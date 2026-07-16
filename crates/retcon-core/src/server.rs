@@ -207,6 +207,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
     match result {
         Some(result) => Response::ok(request.id, result),
         None => match request.method.split('.').next() {
+            Some("project") => crate::projects_rpc::handle(state.clone(), request).await,
             Some("terminal") => crate::spikes::terminal::handle(state.clone(), request).await,
             Some("git") => crate::spikes::git::handle(request).await,
             Some("agent") => crate::spikes::agent::handle(state.clone(), request).await,

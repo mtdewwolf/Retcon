@@ -13,6 +13,8 @@ pub mod event;
 pub mod frame;
 pub mod jobs;
 pub mod lifecycle;
+pub mod projects;
+mod projects_rpc;
 pub mod rpc;
 pub mod server;
 pub mod spikes;

@@ -64,7 +64,8 @@ mod tests {
         let mut task = NewTask::new("Keep me");
         task.session_id = Some(session.id);
         let task = db.tasks().create(&task).unwrap();
-        db.execute("INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES ('job','test','stale','running',1,1,1,1000)", &[]).unwrap();
+        let job_id = uuid::Uuid::new_v4();
+        db.execute("INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES (?1,'test','stale','running',1,1,1,1000)", &[&job_id.as_bytes()]).unwrap();
 
         let report = db.recover_interrupted().unwrap();
         assert_eq!(report.interrupted_sessions, 1);

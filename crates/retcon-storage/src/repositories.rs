@@ -197,6 +197,51 @@ impl ProjectRepository<'_> {
             .optional()
         })
     }
+    /// List active projects, most recently updated first.
+    pub fn list(&self) -> Result<Vec<Project>> {
+        self.0.read(|db| {
+            let mut statement = db.prepare(
+                "SELECT id,name,created_at,updated_at FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC",
+            )?;
+            statement.query_map([], row_project)?.collect()
+        })
+    }
+
+    /// Find the project owning an exact repository root path.
+    pub fn find_by_path(&self, path: &str) -> Result<Option<Project>> {
+        self.0.read(|db| db.query_row(
+            "SELECT p.id,p.name,p.created_at,p.updated_at FROM projects p JOIN repository_locations r ON r.project_id=p.id WHERE r.path=?1 AND p.archived_at IS NULL",
+            [path], row_project).optional())
+    }
+
+    /// Associate a repository location with a project. Reopening an existing path is idempotent.
+    pub fn add_location(
+        &self,
+        project_id: Uuid,
+        path: &str,
+        remote_url: Option<&str>,
+    ) -> Result<()> {
+        let now = now_ms();
+        let location_id = Uuid::new_v4();
+        self.0.execute(
+            "INSERT INTO repository_locations (id,project_id,path,remote_url,created_at,last_seen_at) VALUES (?1,?2,?3,?4,?5,?5) ON CONFLICT(path) DO UPDATE SET last_seen_at=excluded.last_seen_at,remote_url=COALESCE(excluded.remote_url,repository_locations.remote_url)",
+            &[&location_id.as_bytes(), &project_id.as_bytes(), &path, &remote_url, &now],
+        )?;
+        self.0.execute(
+            "UPDATE projects SET updated_at=?2 WHERE id=?1",
+            &[&project_id.as_bytes(), &now],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a project as no longer shown in the recent-project list.
+    pub fn archive(&self, id: Uuid) -> Result<bool> {
+        let now = now_ms();
+        Ok(self.0.execute(
+            "UPDATE projects SET archived_at=?2,updated_at=?2 WHERE id=?1",
+            &[&id.as_bytes(), &now],
+        )? > 0)
+    }
 }
 
 impl SessionRepository<'_> {
