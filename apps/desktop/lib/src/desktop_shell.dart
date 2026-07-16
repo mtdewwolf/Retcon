@@ -7,6 +7,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'core_client.dart';
 import 'window_controller.dart';
+import 'workspace.dart';
 
 enum ShellCommand {
   newProject('New project', Icons.create_new_folder),
@@ -58,11 +59,22 @@ class DesktopShell extends StatefulWidget {
 
 class _DesktopShellState extends State<DesktopShell> {
   bool _startMenuOpen = false;
+  late final WorkspaceController _workspace = WorkspaceController();
+
+  @override
+  void dispose() {
+    _workspace.dispose();
+    super.dispose();
+  }
 
   Future<void> _run(ShellCommand command) async {
     widget.onCommand?.call(command);
     setState(() => _startMenuOpen = false);
     switch (command) {
+      case ShellCommand.terminal:
+        await _workspace.float(PanelDefinition.terminal, const Size(900, 600));
+      case ShellCommand.browser:
+        await _workspace.float(PanelDefinition.browser, const Size(900, 600));
       case ShellCommand.commandPalette:
         await _showCommandPalette();
       case ShellCommand.fullScreen:
@@ -117,7 +129,7 @@ class _DesktopShellState extends State<DesktopShell> {
                       windowController: widget.windowController,
                     ),
                     _ApplicationMenu(onCommand: _run),
-                    const Expanded(child: _Workspace()),
+                    Expanded(child: _Workspace(controller: _workspace)),
                     _Taskbar(
                       core: widget.core,
                       startMenuOpen: _startMenuOpen,
@@ -304,48 +316,34 @@ class _ApplicationMenu extends StatelessWidget {
 }
 
 class _Workspace extends StatelessWidget {
-  const _Workspace();
+  const _Workspace({required this.controller});
+  final WorkspaceController controller;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.all(RetconSpacing.sm),
-    child: Row(
+    child: Column(
       children: [
-        const SizedBox(
-          width: 220,
-          child: RetconPanel(
-            label: 'Project explorer',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('PROJECT EXPLORER'),
-                SizedBox(height: RetconSpacing.sm),
-                Text('Open a project to begin.'),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: RetconSpacing.sm),
-        Expanded(
-          child: RetconPanel(
-            label: 'Workspace',
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.dashboard_customize, size: 48),
-                  const SizedBox(height: RetconSpacing.md),
-                  Text(
-                    'Retcon workspace',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: RetconSpacing.sm),
-                  const Text('Press Ctrl+Shift+P to open the command palette.'),
-                ],
+        Align(
+          alignment: Alignment.centerRight,
+          child: Wrap(
+            spacing: RetconSpacing.xs,
+            children: [
+              TextButton.icon(
+                onPressed: () => controller.reopenLast(),
+                icon: const Icon(Icons.undo),
+                label: const Text('Reopen panel'),
               ),
-            ),
+              TextButton.icon(
+                onPressed: () => controller.reset(),
+                icon: const Icon(Icons.restart_alt),
+                label: const Text('Reset layout'),
+              ),
+            ],
           ),
         ),
+        const SizedBox(height: RetconSpacing.xs),
+        Expanded(child: DockingWorkspace(controller: controller)),
       ],
     ),
   );
