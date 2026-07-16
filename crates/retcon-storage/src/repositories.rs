@@ -277,8 +277,18 @@ impl TurnRepository<'_> {
 impl TaskRepository<'_> {
     pub fn create(&self, task: &NewTask) -> Result<Task> {
         let now = now_ms();
-        let session_id = task.session_id.map(|id| id.as_bytes().to_vec());
-        self.0.execute("INSERT INTO tasks (id,session_id,title,description,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6)", &[&task.id.as_bytes(), &session_id, &task.title, &task.description, &task.status, &now])?;
+        let session_id = task.session_id.map(|id| *id.as_bytes());
+        self.0.execute(
+            "INSERT INTO tasks (id,session_id,title,description,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6)",
+            &[
+                &task.id.as_bytes() as &dyn rusqlite::ToSql,
+                &session_id,
+                &task.title,
+                &task.description,
+                &task.status,
+                &now,
+            ],
+        )?;
         Ok(Task {
             id: task.id,
             session_id: task.session_id,
@@ -377,13 +387,10 @@ fn row_turn(row: &Row<'_>) -> rusqlite::Result<Turn> {
     })
 }
 fn row_task(row: &Row<'_>) -> rusqlite::Result<Task> {
-    let session: Option<Vec<u8>> = row.get(1)?;
+    let session: Option<[u8; 16]> = row.get(1)?;
     Ok(Task {
         id: uuid(row, 0)?,
-        session_id: session
-            .map(|bytes| Uuid::from_slice(&bytes))
-            .transpose()
-            .map_err(from_uuid)?,
+        session_id: session.map(Uuid::from_bytes),
         title: row.get(2)?,
         description: row.get(3)?,
         status: row.get(4)?,
@@ -392,10 +399,7 @@ fn row_task(row: &Row<'_>) -> rusqlite::Result<Task> {
     })
 }
 fn uuid(row: &Row<'_>, index: usize) -> rusqlite::Result<Uuid> {
-    Uuid::from_slice(&row.get::<_, Vec<u8>>(index)?).map_err(from_uuid)
-}
-fn from_uuid(error: uuid::Error) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(16, rusqlite::types::Type::Blob, Box::new(error))
+    Ok(Uuid::from_bytes(row.get::<_, [u8; 16]>(index)?))
 }
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()

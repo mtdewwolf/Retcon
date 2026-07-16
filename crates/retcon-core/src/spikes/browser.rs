@@ -154,7 +154,7 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
                     let _ = sender.send(value);
                 }
             } else {
-                event_state.emit("browser.event", value);
+                event_state.emit_volatile("browser.event", value);
             }
         }
         drain_pending(

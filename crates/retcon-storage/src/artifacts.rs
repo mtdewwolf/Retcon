@@ -253,13 +253,13 @@ fn referenced_hashes(database: &Database) -> Result<HashSet<String>> {
     database.read(|db| {
         let mut statement = db.prepare(
             "SELECT log_artifact_hash FROM terminal_sessions WHERE log_artifact_hash IS NOT NULL
-             UNION SELECT output_artifact_hash FROM commands WHERE output_artifact_hash IS NOT NULL
-             UNION SELECT patch_artifact_hash FROM git_checkpoints WHERE patch_artifact_hash IS NOT NULL
-             UNION SELECT before_artifact_hash FROM file_changes WHERE before_artifact_hash IS NOT NULL
-             UNION SELECT after_artifact_hash FROM file_changes WHERE after_artifact_hash IS NOT NULL
-             UNION SELECT artifact_hash FROM screenshots
-             UNION SELECT report_artifact_hash FROM test_runs WHERE report_artifact_hash IS NOT NULL
-             UNION SELECT artifact_hash FROM diagnostics WHERE artifact_hash IS NOT NULL",
+             UNION ALL SELECT output_artifact_hash FROM commands WHERE output_artifact_hash IS NOT NULL
+             UNION ALL SELECT patch_artifact_hash FROM git_checkpoints WHERE patch_artifact_hash IS NOT NULL
+             UNION ALL SELECT before_artifact_hash FROM file_changes WHERE before_artifact_hash IS NOT NULL
+             UNION ALL SELECT after_artifact_hash FROM file_changes WHERE after_artifact_hash IS NOT NULL
+             UNION ALL SELECT artifact_hash FROM screenshots
+             UNION ALL SELECT report_artifact_hash FROM test_runs WHERE report_artifact_hash IS NOT NULL
+             UNION ALL SELECT artifact_hash FROM diagnostics WHERE artifact_hash IS NOT NULL",
         )?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -316,7 +316,12 @@ mod tests {
         let store = ArtifactStore::open(dir.path()).unwrap();
         let db = Database::open_in_memory().unwrap();
         let artifact = store.store_bytes(b"terminal log").unwrap();
-        db.execute("INSERT INTO terminal_sessions (id,status,shell,cwd,started_at,ended_at,log_artifact_hash) VALUES ('terminal','ended','pwsh','.',1,2,?1)", &[&artifact.hash]).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        db.execute(
+            "INSERT INTO terminal_sessions (id,status,shell,cwd,started_at,ended_at,log_artifact_hash) VALUES (?1,'ended','pwsh','.',1,2,?2)",
+            &[&session_id.as_bytes() as &dyn rusqlite::ToSql, &artifact.hash],
+        )
+        .unwrap();
         let report = store.cleanup_referenced(&db, Duration::ZERO).unwrap();
         assert_eq!(report.retained_files, 1);
         assert!(store.verify(&artifact.hash).is_ok());

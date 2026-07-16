@@ -518,10 +518,11 @@ mod tests {
         {
             let database = Database::open(&path).unwrap();
             assert_eq!(database.schema_version().unwrap(), LATEST_VERSION);
+            let project_id = Uuid::new_v4();
             database
                 .execute(
                     "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                    &[&"project-1", &"Retcon", &1_i64, &1_i64],
+                    &[&project_id.as_bytes() as &dyn rusqlite::ToSql, &"Retcon", &1_i64, &1_i64],
                 )
                 .unwrap();
         }
@@ -629,11 +630,12 @@ mod tests {
         drop(connection);
 
         let upgraded = Database::open(path).unwrap();
-        assert_eq!(upgraded.schema_version().unwrap(), 3);
+        assert_eq!(upgraded.schema_version().unwrap(), LATEST_VERSION);
+        let job_id = Uuid::new_v4();
         upgraded
             .execute(
-                "INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES ('job','test','migrated','queued',1,0,1,1000)",
-                &[],
+                "INSERT INTO background_jobs (id,owner,name,status,created_at,attempts,max_attempts,timeout_ms) VALUES (?1,'test','migrated','queued',1,0,1,1000)",
+                &[&job_id.as_bytes() as &dyn rusqlite::ToSql],
             )
             .unwrap();
     }
