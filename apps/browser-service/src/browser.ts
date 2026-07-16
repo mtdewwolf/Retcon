@@ -3,9 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, chromium } from "playwright";
 
+/** Retained console/network evidence per session (ring buffer). */
+export const MAX_LOG_ENTRIES = 1_000;
+
 export interface BrowserEvent {
   type: string;
   payload: Record<string, unknown>;
+}
+
+/** Append to a ring buffer, dropping oldest entries when over capacity. */
+export function pushCapped<T>(buffer: T[], entry: T, max: number): void {
+  buffer.push(entry);
+  if (buffer.length > max) {
+    buffer.splice(0, buffer.length - max);
+  }
 }
 
 export class ManagedBrowser {
@@ -35,7 +46,7 @@ export class ManagedBrowser {
         text: message.text(),
         timestamp: new Date().toISOString(),
       };
-      this.consoleEntries.push(entry);
+      pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
       this.emit({ type: "browser.console", payload: entry });
     });
     this.page.on("request", (request) => {
@@ -44,7 +55,7 @@ export class ManagedBrowser {
         url: request.url(),
         resourceType: request.resourceType(),
       };
-      this.networkEntries.push(entry);
+      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
       this.emit({ type: "browser.request", payload: entry });
     });
     this.page.on("response", (response) =>

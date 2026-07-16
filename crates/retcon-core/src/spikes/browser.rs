@@ -207,17 +207,29 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
                 )
             }
         }
-        Ok(Err(_)) => fail(
-            id,
-            ErrorCode::Internal,
-            "The browser service stopped before replying.",
-            "response channel closed",
-        ),
-        Err(_) => fail(
-            id,
-            ErrorCode::Io,
-            "The browser action timed out.",
-            format!("no reply to '{method}' within 60s"),
-        ),
+        Ok(Err(_)) => {
+            // Reader task already removed the sender; drop any orphan defensively.
+            if let Some(proc) = state.browser().proc.lock().await.as_mut() {
+                proc.pending.lock().await.remove(&call_id);
+            }
+            fail(
+                id,
+                ErrorCode::Internal,
+                "The browser service stopped before replying.",
+                "response channel closed",
+            )
+        }
+        Err(_) => {
+            // Timeout path must clear pending or timed-out call_ids leak forever.
+            if let Some(proc) = state.browser().proc.lock().await.as_mut() {
+                proc.pending.lock().await.remove(&call_id);
+            }
+            fail(
+                id,
+                ErrorCode::Io,
+                "The browser action timed out.",
+                format!("no reply to '{method}' within 60s"),
+            )
+        }
     }
 }
