@@ -15,6 +15,8 @@ use crate::rpc::{Request, Response};
 use crate::state::CoreState;
 use retcon_protocol::AuthLine;
 
+const MAX_RPC_CONNECTIONS: usize = 64;
+
 pub struct Server {
     listener: TcpListener,
     token: String,
@@ -46,6 +48,7 @@ impl Server {
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            let at_capacity = connections.len() >= MAX_RPC_CONNECTIONS;
             tokio::select! {
                 _ = heartbeat.tick() => {
                     let _ = self.state.events().emit_volatile(
@@ -53,7 +56,8 @@ impl Server {
                         json!({"uptime_ms": self.state.uptime().as_millis()}),
                     );
                 },
-                result = self.listener.accept() => match result {
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                result = self.listener.accept(), if !at_capacity => match result {
                     Ok((stream, _)) => {
                         let token = self.token.clone();
                         let state = self.state.clone();
@@ -126,6 +130,17 @@ async fn serve_connection(
             )
         })?;
         encoded.push(b'\n');
+        if encoded.len() > retcon_protocol::MAX_FRAME_BYTES + 1 {
+            return Err(CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::Rpc,
+                "Retcon could not send an oversized local response.",
+                format!(
+                    "outbound frame exceeds {} bytes",
+                    retcon_protocol::MAX_FRAME_BYTES
+                ),
+            ));
+        }
         writer
             .write_all(&encoded)
             .await

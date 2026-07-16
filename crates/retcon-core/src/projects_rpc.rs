@@ -68,12 +68,19 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 .unwrap_or_else(|e| failed(id, e)),
             _ => missing(id, "remoteUrl or destination"),
         },
-        "project.list" => projects::list(
-            &state,
-            params.get("query").and_then(serde_json::Value::as_str),
-        )
-        .map(|v| Response::ok(id, v))
-        .unwrap_or_else(|e| failed(id, e)),
+        "project.list" => {
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize);
+            projects::list(
+                &state,
+                params.get("query").and_then(serde_json::Value::as_str),
+                limit,
+            )
+            .map(|v| Response::ok(id, v))
+            .unwrap_or_else(|e| failed(id, e))
+        }
         "project.inspect" => match params.get("path").and_then(serde_json::Value::as_str) {
             Some(path) => projects::inspect(path)
                 .await

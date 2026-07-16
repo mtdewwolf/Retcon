@@ -6,7 +6,7 @@ pub(crate) struct Migration {
     pub sql: &'static str,
 }
 
-pub(crate) const LATEST_VERSION: u32 = 4;
+pub(crate) const LATEST_VERSION: u32 = 5;
 
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -28,5 +28,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "compact UUID storage",
         sql: include_str!("migrations/0004_uuid_blobs.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "project list and settings indexes",
+        sql: include_str!("migrations/0005_project_list_indexes.sql"),
     },
 ];

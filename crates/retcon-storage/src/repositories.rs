@@ -198,12 +198,14 @@ impl ProjectRepository<'_> {
         })
     }
     /// List active projects, most recently updated first.
-    pub fn list(&self) -> Result<Vec<Project>> {
+    pub fn list(&self, limit: usize) -> Result<Vec<Project>> {
         self.0.read(|db| {
             let mut statement = db.prepare(
-                "SELECT id,name,created_at,updated_at FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC",
+                "SELECT id,name,created_at,updated_at FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT ?1",
             )?;
-            statement.query_map([], row_project)?.collect()
+            statement
+                .query_map([limit as i64], row_project)?
+                .collect()
         })
     }
 
@@ -383,6 +385,33 @@ impl SettingsRepository<'_> {
                 },
             )
             .optional()
+        })
+    }
+
+    /// Load every setting row for a key (used to hydrate project metadata in one query).
+    pub fn list_by_key(&self, key: &str) -> Result<Vec<Setting>> {
+        self.0.read(|db| {
+            let mut statement = db.prepare(
+                "SELECT scope,key,value_json,updated_at FROM settings WHERE key=?1",
+            )?;
+            statement
+                .query_map([key], |row| {
+                    let encoded: String = row.get(2)?;
+                    let value = serde_json::from_str(&encoded).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            encoded.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(Setting {
+                        scope: row.get(0)?,
+                        key: row.get(1)?,
+                        value,
+                        updated_at: row.get(3)?,
+                    })
+                })?
+                .collect()
         })
     }
     pub fn delete(&self, scope: &str, key: &str) -> Result<bool> {
