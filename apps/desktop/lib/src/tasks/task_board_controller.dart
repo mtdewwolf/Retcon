@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import 'task_models.dart';
@@ -5,10 +7,13 @@ import 'task_repository.dart';
 
 class TaskBoardController extends ChangeNotifier {
   TaskBoardController({required TaskRepository repository, this.projectId})
-    : _repository = repository;
+    : _repository = repository {
+    _changes = _repository.changes.listen((_) => unawaited(refresh()));
+  }
 
   final TaskRepository _repository;
   final String? projectId;
+  StreamSubscription<void>? _changes;
 
   List<RoadmapTask> _tasks = const [];
   List<TaskSavedView> _savedViews = const [];
@@ -225,5 +230,11 @@ class TaskBoardController extends ChangeNotifier {
     final saved = await _repository.saveTask(task, projectId: projectId);
     _tasks = _tasks.map((item) => item.id == saved.id ? saved : item).toList();
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_changes?.cancel());
+    super.dispose();
   }
 }

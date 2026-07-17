@@ -3,6 +3,7 @@ import 'task_models.dart';
 /// Desktop-facing seam for the Phase 21 task APIs. The core adapter can map its
 /// wire format here without leaking protocol types into widgets or controllers.
 abstract interface class TaskRepository {
+  Stream<void> get changes;
   Future<List<RoadmapTask>> listTasks({String? projectId});
   Future<RoadmapTask> saveTask(RoadmapTask task, {String? projectId});
   Future<List<TaskSavedView>> listSavedViews({String? projectId});
@@ -20,6 +21,9 @@ class InMemoryTaskRepository implements TaskRepository {
 
   final List<RoadmapTask> _tasks;
   final List<TaskSavedView> _views;
+
+  @override
+  Stream<void> get changes => const Stream.empty();
 
   @override
   Future<List<RoadmapTask>> listTasks({String? projectId}) async => [..._tasks];

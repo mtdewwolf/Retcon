@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -106,6 +107,31 @@ void main() {
     expect(find.byTooltip('Close task board'), findsOneWidget);
   });
 
+  testWidgets('connected core uses RPC task repository instead of demo data', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final core = FakeConnectedCoreClient();
+    addTearDown(core.dispose);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: core,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('View'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Task board').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('No tasks match this view.'), findsOneWidget);
+    expect(find.text('Evidence-based task completion'), findsNothing);
+    expect(core.methods, contains('task.list'));
+  });
+
   testWidgets('F11 routes to native fullscreen control', (tester) async {
     await setDesktopSize(tester);
     final window = FakeWindowController();
@@ -204,4 +230,32 @@ class FakeWindowController implements RetconWindowController {
 
   @override
   Future<void> toggleFullScreen() async => fullScreenToggles++;
+}
+
+class FakeConnectedCoreClient extends CoreClient {
+  final methods = <String>[];
+  final _fakeEvents = StreamController<Map<String, dynamic>>.broadcast();
+
+  @override
+  CoreConnectionStatus get status => CoreConnectionStatus.connected;
+
+  @override
+  Stream<Map<String, dynamic>> get events => _fakeEvents.stream;
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String method, {
+    Map<String, dynamic> params = const {},
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    methods.add(method);
+    if (method == 'task.list') return const {'tasks': []};
+    return const {};
+  }
+
+  @override
+  void dispose() {
+    _fakeEvents.close();
+    super.dispose();
+  }
 }

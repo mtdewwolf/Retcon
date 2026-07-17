@@ -637,7 +637,7 @@ class _CriterionTile extends StatelessWidget {
     value: criterion.status == CriterionStatus.passed,
     onChanged: (passed) => controller.setCriterionStatus(
       criterion.id,
-      passed == true ? CriterionStatus.passed : CriterionStatus.pending,
+      passed == true ? CriterionStatus.passed : CriterionStatus.failed,
     ),
     secondary: criterion.status == CriterionStatus.failed
         ? Icon(Icons.error, color: Theme.of(context).colorScheme.error)

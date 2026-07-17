@@ -173,6 +173,9 @@ class DesktopShell extends StatefulWidget {
 class _DesktopShellState extends State<DesktopShell> {
   bool _startMenuOpen = false;
   late final WorkspaceController _workspace = WorkspaceController();
+  late final InMemoryTaskRepository _offlineTasks =
+      InMemoryTaskRepository.demo();
+  CoreTaskRepository? _coreTasks;
 
   @override
   void initState() {
@@ -193,6 +196,9 @@ class _DesktopShellState extends State<DesktopShell> {
     if (oldWidget.projectController != widget.projectController) {
       oldWidget.projectController?.removeListener(_handleProjectUpdate);
       widget.projectController?.addListener(_handleProjectUpdate);
+    }
+    if (oldWidget.core != widget.core) {
+      _coreTasks = null;
     }
   }
 
@@ -238,7 +244,7 @@ class _DesktopShellState extends State<DesktopShell> {
       case ShellCommand.taskBoard:
         await TaskBoardDialog.show(
           context,
-          repository: widget.taskRepository ?? InMemoryTaskRepository.demo(),
+          repository: _taskRepository,
           projectId: widget.projectController?.current?.id,
         );
       case ShellCommand.fullScreen:
@@ -265,6 +271,16 @@ class _DesktopShellState extends State<DesktopShell> {
           await _showNewProjectStub();
         }
     }
+  }
+
+  TaskRepository get _taskRepository {
+    final override = widget.taskRepository;
+    if (override != null) return override;
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      return _offlineTasks;
+    }
+    return _coreTasks ??= CoreTaskRepository.fromCore(core);
   }
 
   Future<void> _showNewProjectStub() => showDialog<void>(
