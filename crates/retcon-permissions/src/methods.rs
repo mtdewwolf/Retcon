@@ -54,7 +54,13 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
         | "browser.automation.upload"
         | "browser.automation.download"
         | "browser.takeover.start"
-        | "browser.takeover.stop" => Some(ApprovalCategory::Browser),
+        | "browser.takeover.stop"
+        | "browser.verification.definition.create"
+        | "browser.verification.definition.update"
+        | "browser.verification.run"
+        | "browser.verification.cancel"
+        | "browser.verification.review"
+        | "browser.verification.baseline.approve" => Some(ApprovalCategory::Browser),
         _ => None,
     }
 }
@@ -118,6 +124,12 @@ pub fn method_summary(method: &str) -> &'static str {
         "browser.automation.download" => "Download a browser file into the project",
         "browser.takeover.start" => "Take manual control of the managed browser",
         "browser.takeover.stop" => "Release manual control of the managed browser",
+        "browser.verification.definition.create" => "Create a browser verification definition",
+        "browser.verification.definition.update" => "Change a browser verification definition",
+        "browser.verification.run" => "Run browser verification",
+        "browser.verification.cancel" => "Cancel browser verification",
+        "browser.verification.review" => "Review browser verification evidence",
+        "browser.verification.baseline.approve" => "Approve a browser visual baseline",
         _ => "Perform a protected operation",
     }
 }

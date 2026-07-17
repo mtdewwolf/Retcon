@@ -619,6 +619,7 @@ impl VerificationRepository<'_> {
                 .count();
             json!({"gates": gates, "resultCount": result_count})
         };
+        let browser_verifications = self.0.browser_verification().runs(task_id)?;
         let mut limitations = Vec::new();
         for (kind, label) in [
             ("test", "tests"),
@@ -628,7 +629,9 @@ impl VerificationRepository<'_> {
             ("security", "security"),
             ("git", "git"),
         ] {
-            if !details.gates.iter().any(|gate| gate.kind == kind) {
+            if !details.gates.iter().any(|gate| gate.kind == kind)
+                && (kind != "browser" || browser_verifications.is_empty())
+            {
                 limitations.push(format!(
                     "no {label} verification command was configured for this run"
                 ));
@@ -642,7 +645,7 @@ impl VerificationRepository<'_> {
             files_changed,
             tests: section("test"),
             build: section("build"),
-            browser: section("browser"),
+            browser: json!({"commands":section("browser"),"verifications":browser_verifications}),
             accessibility: section("accessibility"),
             security: section("security"),
             git: json!({"gates": details.gates.iter().filter(|gate| gate.kind == "git").collect::<Vec<_>>(), "branch": branch, "worktreePath": worktree_path}),

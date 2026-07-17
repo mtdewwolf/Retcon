@@ -270,7 +270,17 @@
       "browser.automation.download",
       "browser.takeover.start",
       "browser.takeover.stop",
-      "browser.takeover.status"
+      "browser.takeover.status",
+      "browser.verification.definition.create",
+      "browser.verification.definition.update",
+      "browser.verification.definition.list",
+      "browser.verification.definition.get",
+      "browser.verification.run",
+      "browser.verification.cancel",
+      "browser.verification.get",
+      "browser.verification.list",
+      "browser.verification.review",
+      "browser.verification.baseline.approve"
     ],
     "file": ["file.list", "file.read", "file.write", "file.watch", "file.unwatch"],
     "checkpoint": [

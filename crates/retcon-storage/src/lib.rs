@@ -2,6 +2,7 @@
 
 mod artifacts;
 mod browser;
+mod browser_verification;
 mod database;
 mod dev_servers;
 mod error;
@@ -16,6 +17,16 @@ pub use artifacts::{Artifact, ArtifactCleanup, ArtifactStore};
 pub use browser::{
     BrowserHistoryEvent, BrowserObservation, BrowserProfile, BrowserRepository, BrowserTab,
     BrowserTakeover, DurableBrowserSession, NewDurableBrowserSession,
+};
+pub use browser_verification::{
+    BrowserAccessibilityFinding, BrowserConsoleEvidence, BrowserNetworkEvidence,
+    BrowserVerificationArtifact, BrowserVerificationBaseline, BrowserVerificationDefinition,
+    BrowserVerificationDetails, BrowserVerificationEvent, BrowserVerificationMutation,
+    BrowserVerificationOutcome, BrowserVerificationRepository, BrowserVerificationRun,
+    BrowserVerificationVariant, BrowserVisualComparison, NewAccessibilityFinding,
+    NewBrowserAssertionResult, NewBrowserVerificationArtifact, NewBrowserVerificationDefinition,
+    NewBrowserVerificationEvent, NewBrowserVerificationRun, NewBrowserVerificationVariant,
+    NewConsoleEvidence, NewNetworkEvidence, NewVisualComparison,
 };
 pub use database::{Database, IntegrityReport, MaintenanceReport};
 pub use dev_servers::{

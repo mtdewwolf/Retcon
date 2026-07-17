@@ -262,7 +262,12 @@ fn referenced_hashes(database: &Database) -> Result<HashSet<String>> {
              UNION SELECT artifact_hash FROM diagnostics WHERE artifact_hash IS NOT NULL
              UNION SELECT artifact_hash FROM verification_artifacts
              UNION SELECT log_artifact_hash FROM dev_server_instances WHERE log_artifact_hash IS NOT NULL
-             UNION SELECT artifact_hash FROM browser_observations",
+             UNION SELECT artifact_hash FROM browser_observations
+             UNION SELECT artifact_hash FROM browser_verification_artifacts
+             UNION SELECT artifact_hash FROM browser_verification_baselines
+             UNION SELECT current_artifact_hash FROM browser_visual_comparisons
+             UNION SELECT difference_artifact_hash FROM browser_visual_comparisons WHERE difference_artifact_hash IS NOT NULL
+             UNION SELECT artifact_hash FROM browser_accessibility_findings WHERE artifact_hash IS NOT NULL",
         )?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?

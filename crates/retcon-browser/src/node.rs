@@ -21,7 +21,9 @@ use crate::{
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+// Browser verification permits 120 seconds; allow a small transport envelope
+// so its own timeout result can arrive before stdio issues browser.cancel.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(125);
 
 type PendingSender = oneshot::Sender<Result<Value, BrowserServiceError>>;
 
@@ -569,6 +571,7 @@ fn map_call(
             object.remove("path");
             "browser.action"
         }
+        "browser.verification.run" => "browser.verification.run",
         "browser.takeover.start" => {
             let headed = object
                 .get("headed")
@@ -620,6 +623,9 @@ async fn extract_artifacts(
     value: &Value,
     artifact_root: &Path,
 ) -> Result<Vec<BrowserServiceArtifact>, BrowserServiceError> {
+    if method == "browser.verification.run" {
+        return extract_verification_artifacts(value, artifact_root).await;
+    }
     let Some((kind, mime_type)) = (match method {
         "browser.observation.screenshot" => Some(("screenshot", "image/png")),
         "browser.observation.trace" if value.get("path").is_some() => {
@@ -663,6 +669,83 @@ async fn extract_artifacts(
         bytes,
         metadata: json!({"servicePath":path,"serviceMetadata":value}),
     }])
+}
+
+async fn extract_verification_artifacts(
+    value: &Value,
+    artifact_root: &Path,
+) -> Result<Vec<BrowserServiceArtifact>, BrowserServiceError> {
+    let entries = value
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            BrowserServiceError::new("artifact", "browser verification omitted artifacts")
+        })?;
+    if entries.len() > 64 {
+        return Err(BrowserServiceError::new(
+            "artifact",
+            "browser verification returned too many artifacts",
+        ));
+    }
+    let root = tokio::fs::canonicalize(artifact_root)
+        .await
+        .map_err(io_error("resolve browser artifact root"))?;
+    let mut total = 0_u64;
+    let mut artifacts = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let raw_path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+            BrowserServiceError::new("artifact", "browser verification artifact omitted path")
+        })?;
+        if !Path::new(raw_path).is_absolute() {
+            return Err(BrowserServiceError::new(
+                "artifact_boundary",
+                "browser verification artifact path must be absolute",
+            ));
+        }
+        let path = tokio::fs::canonicalize(raw_path)
+            .await
+            .map_err(io_error("resolve browser verification artifact"))?;
+        if !path.starts_with(&root) {
+            return Err(BrowserServiceError::new(
+                "artifact_boundary",
+                "browser verification artifact escaped the managed artifact root",
+            ));
+        }
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(io_error("inspect browser verification artifact"))?;
+        if !metadata.is_file() || metadata.len() > MAX_SERVICE_ARTIFACT_BYTES as u64 {
+            return Err(BrowserServiceError::new(
+                "artifact_too_large",
+                "browser verification artifact is invalid or exceeds 16 MiB",
+            ));
+        }
+        total = total.saturating_add(metadata.len());
+        if total > 32 * 1024 * 1024 {
+            return Err(BrowserServiceError::new(
+                "artifact_too_large",
+                "browser verification artifacts exceed 32 MiB total",
+            ));
+        }
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(io_error("read browser verification artifact"))?;
+        artifacts.push(BrowserServiceArtifact {
+            kind: entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("verification")
+                .to_owned(),
+            mime_type: entry
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream")
+                .to_owned(),
+            bytes,
+            metadata: json!({"servicePath":path,"serviceMetadata":entry}),
+        });
+    }
+    Ok(artifacts)
 }
 
 async fn read_loop(
@@ -799,6 +882,51 @@ mod tests {
 
         assert_eq!(params["sessionId"], session_id.to_string());
         assert!(params.get("approvalId").is_none());
+    }
+
+    #[tokio::test]
+    async fn verification_mapping_extracts_plural_managed_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("artifacts");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let first = root.join("first.png");
+        let second = root.join("second.json");
+        tokio::fs::write(&first, b"png").await.unwrap();
+        tokio::fs::write(&second, b"{}").await.unwrap();
+        let session_id = Uuid::new_v4();
+        let (method, params) = map_call(
+            session_id,
+            "browser.verification.run",
+            json!({"runId":session_id,"definition":{"visual":{"updateBaseline":"never"}}}),
+            &SyncMutex::new(HashMap::new()),
+        )
+        .unwrap();
+        assert_eq!(method, "browser.verification.run");
+        assert_eq!(params["definition"]["visual"]["updateBaseline"], "never");
+        let value = json!({"artifacts":[
+            {"kind":"screenshot","mimeType":"image/png","path":first},
+            {"kind":"accessibility","mimeType":"application/json","path":second}
+        ]});
+        let artifacts = extract_artifacts("browser.verification.run", &value, &root)
+            .await
+            .unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].bytes, b"png");
+        assert_eq!(artifacts[1].bytes, b"{}");
+    }
+
+    #[tokio::test]
+    async fn verification_artifact_extraction_rejects_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("artifacts");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let escaped = directory.path().join("escaped.png");
+        tokio::fs::write(&escaped, b"png").await.unwrap();
+        let value = json!({"artifacts":[{"kind":"screenshot","path":escaped}]});
+        let error = extract_artifacts("browser.verification.run", &value, &root)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "artifact_boundary");
     }
 
     async fn fixture() -> (String, tokio::task::JoinHandle<()>) {
