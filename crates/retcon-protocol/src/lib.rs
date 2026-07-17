@@ -243,6 +243,8 @@ pub struct VerificationCommandInput {
 pub struct VerificationCommandsConfigureParams {
     pub project_id: Uuid,
     pub commands: Vec<VerificationCommandInput>,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

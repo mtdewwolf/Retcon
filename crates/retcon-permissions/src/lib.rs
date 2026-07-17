@@ -102,6 +102,7 @@ mod tests {
             "task.acceptance.delete",
             "verification.start",
             "verification.rerun",
+            "verification.commands.configure",
         ] {
             assert_eq!(
                 check_rpc_method_with_bypass(method, true),
@@ -244,6 +245,14 @@ mod tests {
                 RpcPermission::Denied { .. }
             ));
         }
+    }
+
+    #[test]
+    fn deny_verification_requirement_changes_by_default() {
+        assert!(matches!(
+            check_rpc_method_with_bypass("verification.commands.configure", false),
+            RpcPermission::Denied { .. }
+        ));
     }
 
     #[test]

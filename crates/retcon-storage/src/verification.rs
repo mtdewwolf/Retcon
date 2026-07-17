@@ -297,12 +297,21 @@ impl VerificationRepository<'_> {
             drop(statement);
             let commands: Vec<_> = commands
                 .into_iter()
-                .filter(|command| selected.is_empty() || selected.contains(command.kind.as_str()))
+                .filter(|command| {
+                    command.required
+                        || selected.is_empty()
+                        || selected.contains(command.kind.as_str())
+                })
                 .collect();
             if commands.is_empty() {
                 return Err(validation_error("no enabled verification commands matched this run"));
             }
-            let now = now_ms();
+            let previous_created_at: Option<i64> = tx.query_row(
+                "SELECT MAX(created_at) FROM verification_runs WHERE task_id=?1",
+                [task_id.as_bytes()],
+                |row| row.get(0),
+            )?;
+            let now = now_ms().max(previous_created_at.unwrap_or(0).saturating_add(1));
             tx.execute(
                 "INSERT INTO verification_runs(id,task_id,project_id,rerun_of_id,status,trigger_kind,summary_json,created_at) VALUES (?1,?2,?3,?4,'queued',?5,'{}',?6)",
                 params![run_id.as_bytes(), task_id.as_bytes(), project_id.as_bytes(), optional_uuid_bytes(rerun_of_id), trigger_kind, now],
@@ -582,7 +591,7 @@ impl VerificationRepository<'_> {
         })?;
         let files_changed = if let Some(session_id) = session_id {
             self.0.read(|db| {
-                let mut statement = db.prepare("SELECT DISTINCT f.path FROM file_changes f JOIN turns t ON t.id=f.turn_id WHERE t.session_id=?1 ORDER BY f.path")?;
+                let mut statement = db.prepare("SELECT DISTINCT f.path FROM file_changes f LEFT JOIN turns t ON t.id=f.turn_id LEFT JOIN git_checkpoints c ON c.id=f.git_checkpoint_id LEFT JOIN git_worktrees w ON w.id=c.git_worktree_id WHERE t.session_id=?1 OR w.session_id=?1 ORDER BY f.path")?;
                 statement.query_map([session_id.as_bytes()], |row| row.get(0))?.collect::<rusqlite::Result<Vec<String>>>()
             })?
         } else {
@@ -1066,5 +1075,120 @@ mod tests {
         assert_eq!(recovered.run.status, "error");
         assert_eq!(recovered.gates[0].status, "error");
         assert_eq!(repo.history(created.value.run.id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn selected_optional_kinds_cannot_supersede_required_gates() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, task_id) = project_and_task(&db);
+        let repo = db.verification();
+        let required = NewVerificationCommand::new("build", "build", "cargo build");
+        let mut optional = NewVerificationCommand::new("browser", "browser", "browser test");
+        optional.required = false;
+        repo.replace_commands(project_id, &[required, optional])
+            .unwrap();
+
+        let run = repo
+            .create_run(task_id, &["browser".into()], "manual", None, "test")
+            .unwrap();
+        assert_eq!(run.value.gates.len(), 2);
+        assert!(
+            run.value
+                .gates
+                .iter()
+                .any(|gate| gate.kind == "build" && gate.required)
+        );
+        assert!(
+            db.task_planning()
+                .set_task_status(task_id, "completed")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn completion_requires_the_latest_run_to_finish_successfully() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, task_id) = project_and_task(&db);
+        let repo = db.verification();
+        repo.replace_commands(
+            project_id,
+            &[NewVerificationCommand::new("unit", "test", "cargo test")],
+        )
+        .unwrap();
+        let run = repo
+            .create_run(task_id, &[], "manual", None, "test")
+            .unwrap();
+        repo.start(run.value.run.id, "test").unwrap();
+        repo.record_gate(
+            run.value.run.id,
+            run.value.gates[0].id,
+            "passed",
+            json!({}),
+            &[],
+            &[],
+            "test",
+        )
+        .unwrap();
+
+        assert!(
+            db.task_planning()
+                .set_task_status(task_id, "completed")
+                .is_err()
+        );
+        repo.finish(run.value.run.id, "test").unwrap();
+        assert!(
+            db.task_planning()
+                .set_task_status(task_id, "completed")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn report_includes_checkpoint_changes_without_turn_ids() {
+        use crate::{NewFileChange, NewGitCheckpoint, NewGitWorktree, NewSession};
+
+        let db = Database::open_in_memory().unwrap();
+        let project = db
+            .projects()
+            .create(&NewProject::new("Report files"))
+            .unwrap();
+        db.projects()
+            .add_location(project.id, "C:/report-files", None)
+            .unwrap();
+        let location_id = db
+            .projects()
+            .location_id_by_path("C:/report-files")
+            .unwrap()
+            .unwrap();
+        let session = db
+            .sessions()
+            .create(&NewSession::new(project.id, "Report"))
+            .unwrap();
+        let mut worktree = NewGitWorktree::new(location_id, "C:/report-files/worktree");
+        worktree.session_id = Some(session.id);
+        let worktree = db.git_worktrees().create(&worktree).unwrap();
+        let checkpoint = db
+            .git_checkpoints()
+            .create(&NewGitCheckpoint::new(worktree.id, "file_write"))
+            .unwrap();
+        let mut change = NewFileChange::new("src/report.rs", "modified");
+        change.git_checkpoint_id = Some(checkpoint.id);
+        db.file_changes().create(&change).unwrap();
+        let mut task = NewTask::new("Report checkpoint file");
+        task.project_id = Some(project.id);
+        task.session_id = Some(session.id);
+        let task = db.tasks().create(&task).unwrap();
+        let repo = db.verification();
+        repo.replace_commands(
+            project.id,
+            &[NewVerificationCommand::new("unit", "test", "cargo test")],
+        )
+        .unwrap();
+        let run = repo
+            .create_run(task.id, &[], "manual", None, "test")
+            .unwrap();
+
+        let report = repo.report(run.value.run.id).unwrap().unwrap();
+        assert_eq!(report.files_changed, vec!["src/report.rs"]);
     }
 }

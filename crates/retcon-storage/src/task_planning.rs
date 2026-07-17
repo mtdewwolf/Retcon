@@ -666,7 +666,7 @@ impl TaskPlanningRepository<'_> {
                 incomplete_step_ids: collect("SELECT id FROM task_steps WHERE task_id=?1 AND status NOT IN ('completed','skipped') ORDER BY sequence")?,
                 unmet_dependency_ids: collect("SELECT d.depends_on_task_id FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=?1 AND t.status NOT IN ('completed','done') ORDER BY d.created_at")?,
                 unsatisfied_criterion_ids: collect("SELECT id FROM acceptance_criteria WHERE task_id=?1 AND is_required=1 AND status NOT IN ('passed','overridden') ORDER BY sort_order,updated_at")?,
-                verification_gate_ids: collect("SELECT g.id FROM verification_gates g WHERE g.run_id=(SELECT id FROM verification_runs WHERE task_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1) AND g.is_required=1 AND g.status<>'passed' ORDER BY g.gate_kind,g.command_key")?,
+                verification_gate_ids: collect("SELECT g.id FROM verification_gates g JOIN verification_runs r ON r.id=g.run_id WHERE r.id=(SELECT id FROM verification_runs WHERE task_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1) AND g.is_required=1 AND (r.status<>'passed' OR g.status<>'passed') ORDER BY g.gate_kind,g.command_key")?,
             })
         })
     }
@@ -692,7 +692,7 @@ pub(crate) fn map_validation<T>(result: Result<T>) -> Result<T> {
 
 fn has_completion_blockers(tx: &Transaction<'_>, task_id: Uuid) -> rusqlite::Result<bool> {
     tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM task_steps WHERE task_id=?1 AND status NOT IN ('completed','skipped')) OR EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=?1 AND t.status NOT IN ('completed','done')) OR EXISTS(SELECT 1 FROM acceptance_criteria WHERE task_id=?1 AND is_required=1 AND status NOT IN ('passed','overridden')) OR EXISTS(SELECT 1 FROM verification_gates g WHERE g.run_id=(SELECT id FROM verification_runs WHERE task_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1) AND g.is_required=1 AND g.status<>'passed')",
+        "SELECT EXISTS(SELECT 1 FROM task_steps WHERE task_id=?1 AND status NOT IN ('completed','skipped')) OR EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=?1 AND t.status NOT IN ('completed','done')) OR EXISTS(SELECT 1 FROM acceptance_criteria WHERE task_id=?1 AND is_required=1 AND status NOT IN ('passed','overridden')) OR EXISTS(SELECT 1 FROM verification_gates g JOIN verification_runs r ON r.id=g.run_id WHERE r.id=(SELECT id FROM verification_runs WHERE task_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1) AND g.is_required=1 AND (r.status<>'passed' OR g.status<>'passed'))",
         [task_id.as_bytes()],
         |row| row.get(0),
     )

@@ -36,6 +36,7 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
         "task.acceptance.override" | "task.acceptance.delete" => {
             Some(ApprovalCategory::System)
         }
+        "verification.commands.configure" => Some(ApprovalCategory::System),
         _ => None,
     }
 }
@@ -71,6 +72,7 @@ pub fn method_summary(method: &str) -> &'static str {
         "task.acceptance.delete" => "Delete a task acceptance criterion",
         "verification.start" => "Start project verification commands",
         "verification.rerun" => "Rerun project verification commands",
+        "verification.commands.configure" => "Change project verification requirements",
         _ => "Perform a protected operation",
     }
 }
