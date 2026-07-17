@@ -8,10 +8,13 @@ use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 static CLAUDE_DETECTION: OnceLock<Mutex<Option<Result<ProviderInfo, String>>>> = OnceLock::new();
+
+/// Maximum bytes retained for a single provider stdout/stderr line.
+const MAX_PROVIDER_LINE_BYTES: usize = 1024 * 1024;
 
 /// Stable identifier for an agent provider.
 pub type ProviderId = String;
@@ -739,12 +742,16 @@ fn version_is_supported(version: &str) -> bool {
 }
 
 async fn find_executable(name: &str) -> Option<String> {
-    let output = Command::new("cmd")
-        .args(["/C", "where", name])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new("cmd")
+            .args(["/C", "where", name])
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     output
         .status
         .success()
@@ -760,13 +767,17 @@ async fn find_executable(name: &str) -> Option<String> {
 }
 
 async fn run_claude(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("cmd")
-        .args(["/C", "claude"])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|error| format!("Could not launch Claude Code: {error}"))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("cmd")
+            .args(["/C", "claude"])
+            .args(args)
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .map_err(|_| "Claude Code diagnostics timed out".to_owned())?
+    .map_err(|error| format!("Could not launch Claude Code: {error}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -871,15 +882,15 @@ impl AgentTurn {
             .ok_or_else(|| "no stderr handle".to_owned())?;
 
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_capped_provider_line(&mut reader).await {
                 tracing::debug!(target: "retcon_agents::stderr", "{line}");
             }
         });
 
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            while let Ok(Some(line)) = read_capped_provider_line(&mut reader).await {
                 on_line(line);
             }
         });
@@ -925,6 +936,50 @@ impl AgentTurn {
     /// Return the last known exit code after the process has exited.
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
+    }
+}
+
+async fn read_capped_provider_line(
+    reader: &mut (impl AsyncBufRead + Unpin),
+) -> Result<Option<String>, std::io::Error> {
+    let mut buffer = Vec::new();
+    loop {
+        let filled = reader.fill_buf().await?;
+        if filled.is_empty() {
+            if buffer.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
+        }
+
+        if let Some(newline_at) = filled.iter().position(|&byte| byte == b'\n') {
+            let take = newline_at + 1;
+            if buffer.len().saturating_add(take) > MAX_PROVIDER_LINE_BYTES + 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("provider line exceeds {MAX_PROVIDER_LINE_BYTES} bytes"),
+                ));
+            }
+            buffer.extend_from_slice(&filled[..take]);
+            reader.consume(take);
+            if buffer.ends_with(b"\n") {
+                buffer.pop();
+            }
+            if buffer.ends_with(b"\r") {
+                buffer.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
+        }
+
+        let take = filled.len();
+        if buffer.len().saturating_add(take) > MAX_PROVIDER_LINE_BYTES + 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("provider line exceeds {MAX_PROVIDER_LINE_BYTES} bytes"),
+            ));
+        }
+        buffer.extend_from_slice(filled);
+        reader.consume(take);
     }
 }
 
