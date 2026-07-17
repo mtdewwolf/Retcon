@@ -5,7 +5,7 @@
 //! cancel a running turn. The provider-neutral framework (normalized events,
 //! capability manifests) is Phase 11.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 
@@ -14,6 +14,241 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 static CLAUDE_DETECTION: OnceLock<Mutex<Option<Result<ProviderInfo, String>>>> = OnceLock::new();
+
+/// Stable identifier for an agent provider.
+pub type ProviderId = String;
+
+/// A capability exposed by an agent provider.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapability {
+    /// Read files in the workspace.
+    FileAccess,
+    /// Create or modify workspace files.
+    FileEditing,
+    /// Execute shell commands.
+    ShellExecution,
+    /// Control a browser.
+    BrowserUse,
+    /// Control the local computer.
+    ComputerUse,
+    /// Use Model Context Protocol servers.
+    Mcp,
+    /// Accept images as prompt input.
+    ImageInput,
+    /// Work in an explicit planning mode.
+    PlanMode,
+    /// Queue messages while a turn is running.
+    QueueMode,
+    /// Resume a native provider session.
+    SessionResume,
+    /// Delegate work to subagents.
+    Subagents,
+    /// Select a model for a session.
+    ModelSelection,
+    /// Report monetary usage.
+    CostReporting,
+    /// Report token usage.
+    TokenReporting,
+    /// Request approval using the provider's native mechanism.
+    NativeApprovals,
+}
+
+/// A provider's declared support for Retcon features.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityManifest {
+    /// Provider identifier this manifest belongs to.
+    pub provider_id: ProviderId,
+    /// Capabilities the adapter implements.
+    pub supported: Vec<ProviderCapability>,
+}
+
+impl CapabilityManifest {
+    /// Whether a capability is supported by this provider.
+    #[must_use]
+    pub fn supports(&self, capability: ProviderCapability) -> bool {
+        self.supported.contains(&capability)
+    }
+}
+
+/// Metadata and capabilities used to present a provider before a session starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderMetadata {
+    /// Stable provider identifier.
+    pub id: ProviderId,
+    /// Human-readable name.
+    pub display_name: String,
+    /// CLI executable name.
+    pub executable: String,
+    /// Provider capability declaration.
+    pub capabilities: CapabilityManifest,
+}
+
+/// A provider failure in a UI-safe, provider-neutral form.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderError {
+    /// The provider executable is absent or could not be launched.
+    #[error("provider unavailable: {detail}")]
+    Unavailable {
+        /// Safe diagnostic information about the unavailable provider.
+        detail: String,
+    },
+    /// The provider is not authenticated.
+    #[error("provider authentication required: {detail}")]
+    AuthenticationRequired {
+        /// Safe diagnostic information for reconnecting the account.
+        detail: String,
+    },
+    /// A requested feature is not implemented by the provider.
+    #[error("provider capability unsupported: {capability:?}")]
+    UnsupportedCapability {
+        /// Feature requested from the provider.
+        capability: ProviderCapability,
+    },
+    /// The provider failed while processing a request.
+    #[error("provider failed: {detail}")]
+    Failed {
+        /// Safe diagnostic information from the provider adapter.
+        detail: String,
+    },
+}
+
+/// The lifecycle state of a normalized agent event.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEventKind {
+    /// A provider session was started.
+    SessionStarted,
+    /// A provider session was resumed.
+    SessionResumed,
+    /// A turn started running.
+    TurnStarted,
+    /// Incremental assistant text.
+    TextDelta,
+    /// The provider's reasoning status changed.
+    ReasoningStatus,
+    /// A tool needs permission or input before it can run.
+    ToolRequested,
+    /// A tool began running.
+    ToolStarted,
+    /// A tool emitted output.
+    ToolOutput,
+    /// A tool completed.
+    ToolCompleted,
+    /// The provider requested an approval.
+    ApprovalRequested,
+    /// A workspace file changed.
+    FileChanged,
+    /// A command began running.
+    CommandStarted,
+    /// A command completed.
+    CommandCompleted,
+    /// Usage information changed.
+    UsageUpdated,
+    /// A turn completed normally.
+    TurnCompleted,
+    /// A turn was cancelled.
+    TurnCancelled,
+    /// A provider session completed.
+    SessionCompleted,
+    /// The provider failed or disconnected.
+    ProviderFailed,
+}
+
+/// A provider-neutral event emitted while a session runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEvent {
+    /// Provider that emitted the event.
+    pub provider_id: ProviderId,
+    /// Native provider session ID when supplied by the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_session_id: Option<String>,
+    /// Normalized event category.
+    pub kind: AgentEventKind,
+    /// Provider-specific event data preserved for detailed rendering.
+    pub data: serde_json::Value,
+}
+
+/// Input required to start or resume a provider turn.
+#[derive(Debug, Clone)]
+pub struct StartTurnRequest {
+    /// Working directory visible to the provider.
+    pub cwd: PathBuf,
+    /// User message for the provider.
+    pub prompt: String,
+    /// Native session to resume, when supported.
+    pub resume_session: Option<String>,
+}
+
+/// Common contract each provider adapter exposes to Retcon.
+pub trait AgentProvider {
+    /// Return static provider metadata and declared capabilities.
+    fn metadata(&self) -> ProviderMetadata;
+
+    /// Run safe, non-billing provider health checks.
+    fn doctor<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProviderDoctorReport> + Send + 'a>>;
+}
+
+/// Claude Code implementation of the common provider contract.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClaudeCodeProvider;
+
+impl ClaudeCodeProvider {
+    /// Provider identifier used by storage and RPC clients.
+    pub const ID: &'static str = "claude-code";
+
+    /// Start a Claude Code turn using the provider-neutral request shape.
+    pub fn start_turn(
+        &self,
+        request: &StartTurnRequest,
+        on_line: impl FnMut(String) + Send + 'static,
+    ) -> Result<AgentTurn, ProviderError> {
+        AgentTurn::start_with_session(
+            &request.cwd,
+            &request.prompt,
+            request.resume_session.as_deref(),
+            on_line,
+        )
+        .map_err(|detail| ProviderError::Failed { detail })
+    }
+}
+
+impl AgentProvider for ClaudeCodeProvider {
+    fn metadata(&self) -> ProviderMetadata {
+        let supported = vec![
+            ProviderCapability::FileAccess,
+            ProviderCapability::FileEditing,
+            ProviderCapability::ShellExecution,
+            ProviderCapability::Mcp,
+            ProviderCapability::ImageInput,
+            ProviderCapability::PlanMode,
+            ProviderCapability::SessionResume,
+            ProviderCapability::Subagents,
+            ProviderCapability::ModelSelection,
+            ProviderCapability::TokenReporting,
+            ProviderCapability::NativeApprovals,
+        ];
+        ProviderMetadata {
+            id: Self::ID.to_owned(),
+            display_name: "Claude Code".to_owned(),
+            executable: "claude".to_owned(),
+            capabilities: CapabilityManifest {
+                provider_id: Self::ID.to_owned(),
+                supported,
+            },
+        }
+    }
+
+    fn doctor<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProviderDoctorReport> + Send + 'a>>
+    {
+        Box::pin(doctor_claude())
+    }
+}
 
 /// Information about a detected provider CLI.
 #[derive(Debug, Clone, Serialize)]
@@ -308,7 +543,7 @@ fn claude_configuration_path() -> Option<String> {
 
 #[cfg(test)]
 mod doctor_tests {
-    use super::version_is_supported;
+    use super::{AgentProvider, ClaudeCodeProvider, ProviderCapability, version_is_supported};
 
     #[test]
     fn version_check_handles_prefixes_and_old_versions() {
@@ -316,6 +551,15 @@ mod doctor_tests {
         assert!(version_is_supported("1.0.0"));
         assert!(!version_is_supported("0.9.9"));
         assert!(!version_is_supported("unknown"));
+    }
+
+    #[test]
+    fn claude_manifest_exposes_only_supported_capabilities() {
+        let manifest = ClaudeCodeProvider.metadata().capabilities;
+        assert!(manifest.supports(ProviderCapability::SessionResume));
+        assert!(manifest.supports(ProviderCapability::TokenReporting));
+        assert!(!manifest.supports(ProviderCapability::BrowserUse));
+        assert!(!manifest.supports(ProviderCapability::CostReporting));
     }
 }
 
