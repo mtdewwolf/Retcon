@@ -3,24 +3,39 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
+import '../verification/verification.dart';
 import 'task_board_controller.dart';
 import 'task_models.dart';
 import 'task_repository.dart';
 
 class TaskBoardDialog extends StatelessWidget {
-  const TaskBoardDialog({required this.repository, super.key, this.projectId});
+  const TaskBoardDialog({
+    required this.repository,
+    required this.verificationRepository,
+    super.key,
+    this.projectId,
+    this.projectPath,
+  });
 
   final TaskRepository repository;
+  final VerificationRepository verificationRepository;
   final String? projectId;
+  final String? projectPath;
 
   static Future<void> show(
     BuildContext context, {
     required TaskRepository repository,
+    required VerificationRepository verificationRepository,
     String? projectId,
+    String? projectPath,
   }) => showDialog<void>(
     context: context,
-    builder: (context) =>
-        TaskBoardDialog(repository: repository, projectId: projectId),
+    builder: (context) => TaskBoardDialog(
+      repository: repository,
+      verificationRepository: verificationRepository,
+      projectId: projectId,
+      projectPath: projectPath,
+    ),
   );
 
   @override
@@ -54,7 +69,12 @@ class TaskBoardDialog extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: TaskBoardPanel(repository: repository, projectId: projectId),
+            child: TaskBoardPanel(
+              repository: repository,
+              verificationRepository: verificationRepository,
+              projectId: projectId,
+              projectPath: projectPath,
+            ),
           ),
         ],
       ),
@@ -63,10 +83,18 @@ class TaskBoardDialog extends StatelessWidget {
 }
 
 class TaskBoardPanel extends StatefulWidget {
-  const TaskBoardPanel({required this.repository, super.key, this.projectId});
+  const TaskBoardPanel({
+    required this.repository,
+    super.key,
+    this.verificationRepository,
+    this.projectId,
+    this.projectPath,
+  });
 
   final TaskRepository repository;
+  final VerificationRepository? verificationRepository;
   final String? projectId;
+  final String? projectPath;
 
   @override
   State<TaskBoardPanel> createState() => _TaskBoardPanelState();
@@ -74,14 +102,20 @@ class TaskBoardPanel extends StatefulWidget {
 
 class _TaskBoardPanelState extends State<TaskBoardPanel> {
   late final TaskBoardController _controller;
+  late final VerificationRepository _verificationRepository;
+  final _verificationControllers = <String, VerificationController>{};
   final _search = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    _verificationRepository =
+        widget.verificationRepository ?? InMemoryVerificationRepository.demo();
     _controller = TaskBoardController(
       repository: widget.repository,
       projectId: widget.projectId,
+      verificationAllowsCompletion: (taskId) =>
+          _verificationControllers[taskId]?.allowsCompletion ?? false,
     );
     unawaited(_controller.refresh());
   }
@@ -90,6 +124,9 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
   void dispose() {
     _search.dispose();
     _controller.dispose();
+    for (final controller in _verificationControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -123,7 +160,13 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
                   builder: (context, constraints) {
                     final narrow = constraints.maxWidth < 900;
                     final board = _RoadmapBoard(controller: _controller);
-                    final detail = _TaskDetail(controller: _controller);
+                    final selected = _controller.selectedTask;
+                    final detail = _TaskDetail(
+                      controller: _controller,
+                      verification: selected == null
+                          ? null
+                          : _verificationFor(selected),
+                    );
                     if (narrow) {
                       return Row(
                         children: [
@@ -147,6 +190,18 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
       ],
     ),
   );
+
+  VerificationController _verificationFor(RoadmapTask task) =>
+      _verificationControllers.putIfAbsent(task.id, () {
+        final controller = VerificationController(
+          repository: _verificationRepository,
+          taskId: task.id,
+          projectId: widget.projectId,
+          projectPath: widget.projectPath,
+        );
+        unawaited(controller.load());
+        return controller;
+      });
 }
 
 class _TaskToolbar extends StatelessWidget {
@@ -367,8 +422,9 @@ class _TaskCard extends StatelessWidget {
 }
 
 class _TaskDetail extends StatelessWidget {
-  const _TaskDetail({required this.controller});
+  const _TaskDetail({required this.controller, required this.verification});
   final TaskBoardController controller;
+  final VerificationController? verification;
 
   @override
   Widget build(BuildContext context) {
@@ -378,117 +434,123 @@ class _TaskDetail extends StatelessWidget {
         child: Center(child: Text('Select a task to edit its plan.')),
       );
     }
-    return RetconPanel(
-      key: Key('task-detail-${task.id}'),
-      label: 'Task plan',
-      padding: const EdgeInsets.all(RetconSpacing.md),
-      child: ListView(
-        children: [
-          Text(task.title, style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: RetconSpacing.xs),
-          Wrap(
-            spacing: RetconSpacing.xs,
-            runSpacing: RetconSpacing.xs,
-            children: [
-              RetconBadge(
-                label: task.status.label,
-                status: _taskStatus(task.status),
-              ),
-              RetconBadge(
-                label: task.planApproved
-                    ? 'Plan approved'
-                    : 'Plan awaiting approval',
-                status: task.planApproved
-                    ? RetconStatus.success
-                    : RetconStatus.warning,
-              ),
-            ],
-          ),
-          const SizedBox(height: RetconSpacing.sm),
-          Wrap(
-            spacing: RetconSpacing.xs,
-            runSpacing: RetconSpacing.xs,
-            children: [
-              FilledButton.icon(
-                key: const Key('approve-plan'),
-                onPressed: task.planApproved
-                    ? null
-                    : () => controller.approvePlan(true),
-                icon: const Icon(Icons.approval),
-                label: const Text('Approve plan'),
-              ),
-              OutlinedButton.icon(
-                onPressed: task.status == TaskStatus.inProgress
-                    ? () => controller.setTaskStatus(TaskStatus.paused)
-                    : () => controller.setTaskStatus(TaskStatus.inProgress),
-                icon: Icon(
-                  task.status == TaskStatus.inProgress
-                      ? Icons.pause
-                      : Icons.play_arrow,
+    final verification = this.verification!;
+    return AnimatedBuilder(
+      animation: verification,
+      builder: (context, _) => RetconPanel(
+        key: Key('task-detail-${task.id}'),
+        label: 'Task plan',
+        padding: const EdgeInsets.all(RetconSpacing.md),
+        child: ListView(
+          children: [
+            Text(task.title, style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: RetconSpacing.xs),
+            Wrap(
+              spacing: RetconSpacing.xs,
+              runSpacing: RetconSpacing.xs,
+              children: [
+                RetconBadge(
+                  label: task.status.label,
+                  status: _taskStatus(task.status),
                 ),
-                label: Text(
-                  task.status == TaskStatus.inProgress ? 'Pause' : 'Resume',
+                RetconBadge(
+                  label: task.planApproved
+                      ? 'Plan approved'
+                      : 'Plan awaiting approval',
+                  status: task.planApproved
+                      ? RetconStatus.success
+                      : RetconStatus.warning,
                 ),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => controller.setTaskStatus(TaskStatus.blocked),
-                icon: const Icon(Icons.block),
-                label: const Text('Block'),
-              ),
-            ],
-          ),
-          const Divider(height: RetconSpacing.lg),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Plan steps',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-              ),
-              IconButton(
-                key: const Key('add-step'),
-                tooltip: 'Add plan step',
-                onPressed: () => _addStep(context),
-                icon: const Icon(Icons.add),
-              ),
-            ],
-          ),
-          if (task.steps.isEmpty) const Text('No plan steps yet.'),
-          for (var index = 0; index < task.steps.length; index++)
-            _PlanStepTile(
-              step: task.steps[index],
-              index: index,
-              count: task.steps.length,
-              controller: controller,
+              ],
             ),
-          const Divider(height: RetconSpacing.lg),
-          Text(
-            'Acceptance criteria',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: RetconSpacing.xs),
-          if (task.criteria.isEmpty)
-            const Text('No acceptance criteria defined.'),
-          for (final criterion in task.criteria)
-            _CriterionTile(criterion: criterion, controller: controller),
-          const SizedBox(height: RetconSpacing.md),
-          if (!task.canComplete)
+            const SizedBox(height: RetconSpacing.sm),
+            Wrap(
+              spacing: RetconSpacing.xs,
+              runSpacing: RetconSpacing.xs,
+              children: [
+                FilledButton.icon(
+                  key: const Key('approve-plan'),
+                  onPressed: task.planApproved
+                      ? null
+                      : () => controller.approvePlan(true),
+                  icon: const Icon(Icons.approval),
+                  label: const Text('Approve plan'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: task.status == TaskStatus.inProgress
+                      ? () => controller.setTaskStatus(TaskStatus.paused)
+                      : () => controller.setTaskStatus(TaskStatus.inProgress),
+                  icon: Icon(
+                    task.status == TaskStatus.inProgress
+                        ? Icons.pause
+                        : Icons.play_arrow,
+                  ),
+                  label: Text(
+                    task.status == TaskStatus.inProgress ? 'Pause' : 'Resume',
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => controller.setTaskStatus(TaskStatus.blocked),
+                  icon: const Icon(Icons.block),
+                  label: const Text('Block'),
+                ),
+              ],
+            ),
+            const Divider(height: RetconSpacing.lg),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Plan steps',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                IconButton(
+                  key: const Key('add-step'),
+                  tooltip: 'Add plan step',
+                  onPressed: () => _addStep(context),
+                  icon: const Icon(Icons.add),
+                ),
+              ],
+            ),
+            if (task.steps.isEmpty) const Text('No plan steps yet.'),
+            for (var index = 0; index < task.steps.length; index++)
+              _PlanStepTile(
+                step: task.steps[index],
+                index: index,
+                count: task.steps.length,
+                controller: controller,
+              ),
+            const Divider(height: RetconSpacing.lg),
             Text(
-              _gateMessage(task),
-              key: const Key('completion-gate-message'),
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
+              'Acceptance criteria',
+              style: Theme.of(context).textTheme.titleMedium,
             ),
-          const SizedBox(height: RetconSpacing.sm),
-          FilledButton.icon(
-            key: const Key('complete-task'),
-            onPressed: task.canComplete
-                ? () => controller.setTaskStatus(TaskStatus.complete)
-                : null,
-            icon: const Icon(Icons.task_alt),
-            label: const Text('Complete task'),
-          ),
-        ],
+            const SizedBox(height: RetconSpacing.xs),
+            if (task.criteria.isEmpty)
+              const Text('No acceptance criteria defined.'),
+            for (final criterion in task.criteria)
+              _CriterionTile(criterion: criterion, controller: controller),
+            const Divider(height: RetconSpacing.lg),
+            TaskVerificationSection(controller: verification, task: task),
+            const SizedBox(height: RetconSpacing.md),
+            if (!task.canComplete || !verification.allowsCompletion)
+              Text(
+                _gateMessage(task, verification),
+                key: const Key('completion-gate-message'),
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            const SizedBox(height: RetconSpacing.sm),
+            FilledButton.icon(
+              key: const Key('complete-task'),
+              onPressed: task.canComplete && verification.allowsCompletion
+                  ? () => controller.setTaskStatus(TaskStatus.complete)
+                  : null,
+              icon: const Icon(Icons.task_alt),
+              label: const Text('Complete task'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -647,12 +709,21 @@ class _CriterionTile extends StatelessWidget {
   );
 }
 
-String _gateMessage(RoadmapTask task) {
+String _gateMessage(RoadmapTask task, VerificationController verification) {
   final missing = <String>[];
   if (!task.planApproved) missing.add('approve the plan');
   if (!task.stepsComplete) missing.add('complete every plan step');
   if (!task.acceptanceCriteriaMet) {
     missing.add('pass all required acceptance criteria');
+  }
+  if (!verification.allowsCompletion) {
+    final blocker =
+        verification.completionBlocker ?? 'pass required verification gates';
+    missing.add(
+      blocker.endsWith('.')
+          ? blocker.substring(0, blocker.length - 1)
+          : blocker,
+    );
   }
   return 'Completion blocked: ${missing.join(', ')}.';
 }

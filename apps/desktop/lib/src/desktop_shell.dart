@@ -12,6 +12,7 @@ import 'projects/project_picker.dart';
 import 'projects/project_controller.dart';
 import 'provider_doctor_dialog.dart';
 import 'tasks/tasks.dart';
+import 'verification/verification.dart';
 import 'window_controller.dart';
 import 'workspace.dart';
 
@@ -154,6 +155,7 @@ class DesktopShell extends StatefulWidget {
     this.branch = '—',
     this.provider = 'Provider offline',
     this.taskRepository,
+    this.verificationRepository,
     this.onCommand,
   });
 
@@ -164,6 +166,7 @@ class DesktopShell extends StatefulWidget {
   final String branch;
   final String provider;
   final TaskRepository? taskRepository;
+  final VerificationRepository? verificationRepository;
   final ValueChanged<ShellCommand>? onCommand;
 
   @override
@@ -176,10 +179,13 @@ class _DesktopShellState extends State<DesktopShell> {
   late final InMemoryTaskRepository _offlineTasks =
       InMemoryTaskRepository.demo();
   CoreTaskRepository? _coreTasks;
+  late VerificationRepository _verificationRepository;
 
   @override
   void initState() {
     super.initState();
+    _verificationRepository =
+        widget.verificationRepository ?? InMemoryVerificationRepository.demo();
     final core = widget.core;
     if (core != null) {
       _workspace.bindRpcStore(
@@ -199,6 +205,11 @@ class _DesktopShellState extends State<DesktopShell> {
     }
     if (oldWidget.core != widget.core) {
       _coreTasks = null;
+    }
+    if (oldWidget.verificationRepository != widget.verificationRepository) {
+      _verificationRepository =
+          widget.verificationRepository ??
+          InMemoryVerificationRepository.demo();
     }
   }
 
@@ -245,7 +256,10 @@ class _DesktopShellState extends State<DesktopShell> {
         await TaskBoardDialog.show(
           context,
           repository: _taskRepository,
+          verificationRepository: _verificationRepository,
           projectId: widget.projectController?.current?.id,
+          projectPath:
+              widget.projectController?.current?.metadata.repositoryPath,
         );
       case ShellCommand.fullScreen:
         await widget.windowController.toggleFullScreen();

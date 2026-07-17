@@ -8,6 +8,7 @@ import 'package:retcon_desktop/main.dart';
 import 'package:retcon_desktop/src/core_client.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
 import 'package:retcon_desktop/src/tasks/tasks.dart';
+import 'package:retcon_desktop/src/verification/verification.dart';
 import 'package:retcon_desktop/src/window_controller.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
@@ -93,6 +94,17 @@ void main() {
               ),
             ],
           ),
+          verificationRepository: InMemoryVerificationRepository(
+            gates: const {
+              'shell-task': [
+                VerificationGate(
+                  id: 'analyze',
+                  label: 'Static analysis',
+                  command: 'flutter analyze',
+                ),
+              ],
+            },
+          ),
           windowController: FakeWindowController(),
         ),
       ),
@@ -104,6 +116,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Shell task board integration'), findsAtLeastNWidgets(1));
+    expect(find.text('Verification gates'), findsAtLeastNWidgets(1));
     expect(find.byTooltip('Close task board'), findsOneWidget);
   });
 
