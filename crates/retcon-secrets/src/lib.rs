@@ -7,6 +7,8 @@
 
 mod detect;
 mod redact;
+mod staged;
 
 pub use detect::{FindingKind, ScanResult, SecretFinding, scan_text, scan_texts};
 pub use redact::{redact_text, scrub_json, scrub_string_fields};
+pub use staged::{StagedScanError, scan_staged};

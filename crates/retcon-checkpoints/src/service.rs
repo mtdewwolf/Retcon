@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use retcon_git::DiffMode;
 use retcon_storage::{
@@ -222,14 +222,22 @@ impl CheckpointService {
             paths.iter().map(String::as_str).collect();
         let mut restored = Vec::new();
         let mut skipped = Vec::new();
-        let mut conflicts = Vec::new();
+        let conflicts: Vec<String> = preview
+            .items
+            .iter()
+            .filter(|item| selected.contains(item.path.as_str()) && item.conflict)
+            .map(|item| item.path.clone())
+            .collect();
+
+        // Preflight the complete selection before touching the worktree. Otherwise a
+        // later conflict can leave earlier paths restored even though this method
+        // reports failure to the caller.
+        if !force && !conflicts.is_empty() {
+            return Err(CheckpointError::Conflicts(conflicts.join(", ")));
+        }
 
         for item in preview.items {
             if !selected.contains(item.path.as_str()) {
-                continue;
-            }
-            if item.conflict && !force {
-                conflicts.push(item.path.clone());
                 continue;
             }
             if self.restore_item(root, &item)? {
@@ -239,15 +247,11 @@ impl CheckpointService {
             }
         }
 
-        if !conflicts.is_empty() {
-            return Err(CheckpointError::Conflicts(conflicts.join(", ")));
-        }
-
         Ok(RestoreReport {
             checkpoint_id: checkpoint_id.to_string(),
             restored,
             skipped,
-            conflicts,
+            conflicts: if force { conflicts } else { Vec::new() },
         })
     }
 
@@ -378,22 +382,46 @@ fn resolve_within_root(root: &Path, relative_path: &str) -> Result<PathBuf, Chec
     let root = fs::canonicalize(root).map_err(|error| {
         CheckpointError::InvalidRequest(format!("invalid project root: {error}"))
     })?;
+    let requested = Path::new(relative_path);
+    if !requested.is_absolute()
+        && requested
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
+        return Err(CheckpointError::OutsideRoot(relative_path.to_owned()));
+    }
+
     let joined = if relative_path.is_empty() {
         root.clone()
-    } else if Path::new(relative_path).is_absolute() {
-        PathBuf::from(relative_path)
+    } else if requested.is_absolute() {
+        requested.to_path_buf()
     } else {
-        root.join(relative_path)
+        root.join(requested)
     };
-    let joined = joined
-        .canonicalize()
-        .unwrap_or(joined);
-    if !joined.starts_with(&root) {
+
+    // Canonicalize the nearest existing ancestor as well as existing targets.
+    // This catches both symlink escapes and not-yet-created paths outside the root.
+    let existing_ancestor = joined
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .ok_or_else(|| CheckpointError::OutsideRoot(joined.to_string_lossy().into_owned()))?;
+    let canonical_ancestor = existing_ancestor.canonicalize()?;
+    if !canonical_ancestor.starts_with(&root) {
         return Err(CheckpointError::OutsideRoot(
             joined.to_string_lossy().into_owned(),
         ));
     }
-    Ok(joined)
+    if joined.exists() {
+        let canonical = joined.canonicalize()?;
+        if !canonical.starts_with(&root) {
+            return Err(CheckpointError::OutsideRoot(
+                canonical.to_string_lossy().into_owned(),
+            ));
+        }
+        Ok(canonical)
+    } else {
+        Ok(joined)
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -484,5 +512,73 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, CheckpointError::Conflicts(_)));
+    }
+
+    #[test]
+    fn conflict_preflight_prevents_partial_restore() {
+        let (_temp, service, root) = setup();
+        fs::write(root.join("a.txt"), "before-a").unwrap();
+        let snapshot = service.begin_file_write(&root, "a.txt", None).unwrap();
+        fs::write(root.join("a.txt"), "after-a").unwrap();
+        let first = service.finish_file_write(&root, snapshot).unwrap();
+        let checkpoint_id = first.git_checkpoint_id.unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let before_hash = service.store_file_bytes(b"before-b").unwrap();
+        let after_hash = service.store_file_bytes(b"after-b").unwrap();
+        let mut second = NewFileChange::new("b.txt", "modify");
+        second.git_checkpoint_id = Some(checkpoint_id);
+        second.before_artifact_hash = Some(before_hash);
+        second.after_artifact_hash = Some(after_hash);
+        service.database.file_changes().create(&second).unwrap();
+        fs::write(root.join("b.txt"), "user-edit-b").unwrap();
+
+        let error = service
+            .restore_selective(
+                &root,
+                checkpoint_id,
+                &["a.txt".into(), "b.txt".into()],
+                false,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, CheckpointError::Conflicts(_)));
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "after-a");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "user-edit-b");
+    }
+
+    #[test]
+    fn nonexistent_parent_traversal_is_rejected() {
+        let (temp, service, root) = setup();
+        let error = service
+            .begin_file_write(&root, "../outside/new.txt", None)
+            .unwrap_err();
+
+        assert!(matches!(error, CheckpointError::OutsideRoot(_)));
+        assert!(!temp.path().join("outside/new.txt").exists());
+        assert!(service.list_for_root(&root, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn force_restore_reports_overwritten_conflicts() {
+        let (_temp, service, root) = setup();
+        fs::write(root.join("note.txt"), "before").unwrap();
+        let snapshot = service.begin_file_write(&root, "note.txt", None).unwrap();
+        fs::write(root.join("note.txt"), "after").unwrap();
+        let change = service.finish_file_write(&root, snapshot).unwrap();
+        fs::write(root.join("note.txt"), "user-edit").unwrap();
+
+        let report = service
+            .restore_selective(
+                &root,
+                change.git_checkpoint_id.unwrap(),
+                &[change.path],
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(report.restored, vec!["note.txt"]);
+        assert_eq!(report.conflicts, vec!["note.txt"]);
+        assert_eq!(fs::read_to_string(root.join("note.txt")).unwrap(), "before");
     }
 }

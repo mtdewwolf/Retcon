@@ -1,6 +1,6 @@
 //! RPC adapter for Git operations (Phase 16).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use retcon_git::{DiffMode, GitError};
 use retcon_worktrees::{WorktreeError, WorktreeManager};
@@ -115,6 +115,39 @@ fn worktrees(state: &CoreState) -> WorktreeManager {
     WorktreeManager::new(state.storage().database().clone())
 }
 
+async fn ensure_staged_changes_safe(repo: &Path) -> Result<(), CoreError> {
+    let repo = repo.to_path_buf();
+    let scan = tokio::task::spawn_blocking(move || retcon_secrets::scan_staged(&repo))
+        .await
+        .map_err(|error| {
+            CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::System,
+                "Retcon could not complete the staged secret scan.",
+                format!("staged secret scan task failed: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            CoreError::new(
+                ErrorCode::Io,
+                ErrorSource::System,
+                "Retcon could not inspect the staged Git changes.",
+                error.to_string(),
+            )
+            .suggested_fix("Confirm this is a Git repository and retry the commit.")
+        })?;
+    if scan.is_clean() {
+        return Ok(());
+    }
+    Err(CoreError::new(
+        ErrorCode::PermissionDenied,
+        ErrorSource::Rpc,
+        "Retcon blocked the commit because staged changes may contain secrets.",
+        format!("staged secret scan blocked commit: {}", scan.summary()),
+    )
+    .suggested_fix("Remove the secret from the staged changes, rotate it if necessary, and retry."))
+}
+
 /// Handle a `git.*` request.
 pub async fn handle(state: CoreState, request: Request) -> Response {
     let Request { id, method, params } = request;
@@ -212,7 +245,6 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             }
         }
         "git.commit" => {
-            crate::checkpoints_rpc::hook_git_mutation(&state, &repo, &params).await;
             let message = match str_param(&params, "message") {
                 Ok(message) => message,
                 Err(error) => return failed(id, error),
@@ -221,6 +253,10 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 .get("allowEmpty")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            if let Err(error) = ensure_staged_changes_safe(&repo).await {
+                return failed(id, error);
+            }
+            crate::checkpoints_rpc::hook_git_mutation(&state, &repo, &params).await;
             match retcon_git::commit(&repo, message, allow_empty).await {
                 Ok(oid) => Response::ok(id, json!({ "oid": oid })),
                 Err(error) => git_fail(id, error),
@@ -377,6 +413,7 @@ impl From<retcon_storage::GitWorktree> for StoredWorktreeResponse {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -384,5 +421,35 @@ mod tests {
     fn diff_mode_defaults_to_unstaged() {
         assert_eq!(parse_diff_mode(&json!({})), DiffMode::Unstaged);
         assert_eq!(parse_diff_mode(&json!({"mode":"staged"})), DiffMode::Staged);
+    }
+
+    #[tokio::test]
+    async fn commit_scan_blocks_staged_secret_without_exposing_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        std::fs::write(
+            directory.path().join("config.txt"),
+            "API_KEY=not-a-real-secret-for-testing",
+        )
+        .unwrap();
+        let add = std::process::Command::new("git")
+            .args(["add", "config.txt"])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+
+        let error = ensure_staged_changes_safe(directory.path())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert!(error.user_message.contains("blocked the commit"));
+        assert!(!error.technical_message.contains("not-a-real-secret-for-testing"));
     }
 }

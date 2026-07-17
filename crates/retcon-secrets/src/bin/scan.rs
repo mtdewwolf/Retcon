@@ -3,9 +3,9 @@
 use std::env;
 use std::fs;
 use std::io::{self, Read};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
-use retcon_secrets::{ScanResult, scan_text, scan_texts};
+use retcon_secrets::{ScanResult, scan_staged, scan_text};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -24,7 +24,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         Some("scan") => scan_paths(&args[1..]),
-        Some("scan-staged") => scan_staged(),
+        Some("scan-staged") => scan_staged_changes(),
         Some("scan-stdin") => scan_stdin(),
         other => Err(format!(
             "unknown command `{}`; expected scan, scan-staged, or scan-stdin",
@@ -72,27 +72,10 @@ fn scan_stdin() -> Result<(), String> {
     report(scan_text(&buffer), "stdin")
 }
 
-fn scan_staged() -> Result<(), String> {
-    let output = Command::new("git")
-        .args(["diff", "--cached", "--no-color", "--unified=0"])
-        .output()
-        .map_err(|error| format!("failed to run git diff --cached: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git diff --cached failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let diff = String::from_utf8_lossy(&output.stdout);
-    if diff.trim().is_empty() {
-        return Ok(());
-    }
-    let added_lines = diff
-        .lines()
-        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
-        .map(|line| line.trim_start_matches('+'))
-        .collect::<Vec<_>>();
-    report(scan_texts(added_lines), "staged changes")
+fn scan_staged_changes() -> Result<(), String> {
+    let result = scan_staged(&env::current_dir().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    report(result, "staged changes")
 }
 
 fn report(result: ScanResult, label: &str) -> Result<(), String> {
