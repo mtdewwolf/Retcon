@@ -17,6 +17,12 @@ dependencies:
   provider: ^6.1.2
   retcon_design_system:
     path: ../../packages/retcon-design-system
+  retcon_terminal_view:
+    path: ../../packages/retcon-terminal-view
+  retcon_file_viewer:
+    path: ../../packages/retcon-file-viewer
+  retcon_diff_viewer:
+    path: ../../packages/retcon-diff-viewer
   window_manager: ^0.4.3
 
 dev_dependencies:

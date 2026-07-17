@@ -49,11 +49,12 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
         .await
         .ok()
         .filter(|s| !s.is_empty());
-    let project = match state.storage().projects().find_by_path(&root_text)? {
+    let project = match state.storage().database().projects().find_by_path(&root_text)? {
         Some(project) => project,
         None => {
             let project = state
                 .storage()
+                .database()
                 .projects()
                 .create(&retcon_storage::NewProject::new(
                     root.file_name()
@@ -62,6 +63,7 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
                 ))?;
             state
                 .storage()
+                .database()
                 .projects()
                 .add_location(project.id, &root_text, remote.as_deref())?;
             project
@@ -70,6 +72,7 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
     // A reopened project may have gained an origin or moved between remotes.
     state
         .storage()
+        .database()
         .projects()
         .add_location(project.id, &root_text, remote.as_deref())?;
     let current = metadata(state, project.id)?;
@@ -131,6 +134,7 @@ pub fn list(state: &CoreState, query: Option<&str>) -> Result<Value, CoreError> 
     let needle = query.unwrap_or_default().to_ascii_lowercase();
     let records = state
         .storage()
+        .database()
         .projects()
         .list()?
         .into_iter()
@@ -155,7 +159,7 @@ pub fn list(state: &CoreState, query: Option<&str>) -> Result<Value, CoreError> 
 
 /// Persist a partial metadata update for a project.
 pub fn update_metadata(state: &CoreState, id: Uuid, patch: &Value) -> Result<Value, CoreError> {
-    if state.storage().projects().get(id)?.is_none() {
+    if state.storage().database().projects().get(id)?.is_none() {
         return Err(CoreError::new(
             ErrorCode::NotFound,
             ErrorSource::System,
@@ -171,7 +175,7 @@ pub fn update_metadata(state: &CoreState, id: Uuid, patch: &Value) -> Result<Val
 
 /// Remove a project from the recent-project list without touching its files.
 pub fn remove(state: &CoreState, id: Uuid) -> Result<(), CoreError> {
-    if !state.storage().projects().archive(id)? {
+    if !state.storage().database().projects().archive(id)? {
         return Err(CoreError::new(
             ErrorCode::NotFound,
             ErrorSource::System,
@@ -192,6 +196,7 @@ pub async fn inspect(path: &str) -> Result<Value, CoreError> {
 fn metadata(state: &CoreState, id: Uuid) -> Result<Value, CoreError> {
     Ok(state
         .storage()
+        .database()
         .settings()
         .get(&scope(id), METADATA_KEY)?
         .map(|s| s.value)
@@ -200,6 +205,7 @@ fn metadata(state: &CoreState, id: Uuid) -> Result<Value, CoreError> {
 fn save_metadata(state: &CoreState, id: Uuid, value: &Value) -> Result<(), CoreError> {
     state
         .storage()
+        .database()
         .settings()
         .set(&scope(id), METADATA_KEY, value)?;
     Ok(())
@@ -316,7 +322,7 @@ async fn health(root: &Path) -> Value {
         .map(|s| s.split("...").next().unwrap_or(s));
     let dirty = git_status
         .as_deref()
-        .map(|s| s.lines().skip(1).next().is_some())
+        .map(|s| s.lines().nth(1).is_some())
         .unwrap_or(false);
     let disk = std::fs::metadata(root)
         .ok()
@@ -346,6 +352,7 @@ async fn git_output(root: &Path, args: &[&str]) -> Result<String, ()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]

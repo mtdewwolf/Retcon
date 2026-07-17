@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use retcon_git::DiffMode;
+
 use serde_json::json;
 
 use super::{fail, param_str};
@@ -91,7 +93,7 @@ pub async fn handle(request: Request) -> Response {
                 Err(e) => git_fail(id, e),
             }
         }
-        "git.diff" => match retcon_git::diff(&repo, param_str(&params, "path")).await {
+        "git.diff" => match retcon_git::diff(&repo, param_str(&params, "path"), DiffMode::Unstaged).await {
             Ok(d) => Response::ok(id, json!({ "diff": d })),
             Err(e) => git_fail(id, e),
         },

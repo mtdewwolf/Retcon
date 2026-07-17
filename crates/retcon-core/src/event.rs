@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use std::collections::VecDeque;
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -84,7 +85,27 @@ struct EventBusInner {
 
 /// Sequence-numbered event bus with in-memory replay and durable persistence.
 pub struct EventBus {
-    inner: Arc<EventBusInner>,
+    inner: ManuallyDrop<Arc<EventBusInner>>,
+}
+
+impl Clone for EventBus {
+    fn clone(&self) -> Self {
+        Self {
+            inner: ManuallyDrop::new(Arc::clone(&self.inner)),
+        }
+    }
+}
+
+impl Drop for EventBus {
+    fn drop(&mut self) {
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+        if let Ok(inner) = Arc::try_unwrap(inner) {
+            drop(inner.persist_tx);
+            if let Err(error) = inner._writer.join() {
+                tracing::warn!(?error, "event writer thread panicked during shutdown");
+            }
+        }
+    }
 }
 
 impl EventBus {
@@ -106,18 +127,19 @@ impl EventBus {
             .name("event-writer".into())
             .spawn(move || event_writer_loop(persist_rx, writer_db))
             .map_err(|error| internal_io(error.to_string()))?;
-        Ok(Self {
-            inner: Arc::new(EventBusInner {
-                log: Mutex::new(EventLog {
-                    events,
-                    next_sequence,
-                }),
-                sender,
-                database,
-                persist_tx,
-                inserts_since_prune: AtomicU64::new(0),
-                _writer: writer,
+        let inner = Arc::new(EventBusInner {
+            log: Mutex::new(EventLog {
+                events,
+                next_sequence,
             }),
+            sender,
+            database,
+            persist_tx,
+            inserts_since_prune: AtomicU64::new(0),
+            _writer: writer,
+        });
+        Ok(Self {
+            inner: ManuallyDrop::new(inner),
         })
     }
 

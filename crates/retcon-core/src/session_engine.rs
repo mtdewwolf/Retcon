@@ -208,6 +208,51 @@ impl Default for TurnMachine {
     }
 }
 
+impl TurnMachine {
+    /// Rehydrate a state machine from durable state.
+    #[must_use]
+    pub const fn from_state(state: TurnState) -> Self {
+        Self { state }
+    }
+}
+
+/// Parse a durable session status string.
+#[must_use]
+pub fn parse_session_state(value: &str) -> Option<SessionState> {
+    Some(match value {
+        "created" => SessionState::Created,
+        "preparing" => SessionState::Preparing,
+        "starting" => SessionState::Starting,
+        "running" => SessionState::Running,
+        "waiting_for_approval" => SessionState::WaitingForApproval,
+        "waiting_for_user" => SessionState::WaitingForUser,
+        "paused" => SessionState::Paused,
+        "completed" => SessionState::Completed,
+        "failed" => SessionState::Failed,
+        "cancelled" => SessionState::Cancelled,
+        "disconnected" => SessionState::Disconnected,
+        "recovering" => SessionState::Recovering,
+        _ => return None,
+    })
+}
+
+/// Parse a durable turn status string.
+#[must_use]
+pub fn parse_turn_state(value: &str) -> Option<TurnState> {
+    Some(match value {
+        "queued" => TurnState::Queued,
+        "sending" => TurnState::Sending,
+        "running" => TurnState::Running,
+        "tool_execution" => TurnState::ToolExecution,
+        "waiting_for_approval" => TurnState::WaitingForApproval,
+        "completing" => TurnState::Completing,
+        "completed" => TurnState::Completed,
+        "failed" => TurnState::Failed,
+        "cancelled" => TurnState::Cancelled,
+        _ => return None,
+    })
+}
+
 const fn session_transition_allowed(from: SessionState, to: SessionState) -> bool {
     matches!(
         (from, to),
@@ -300,6 +345,7 @@ const fn turn_transition_allowed(from: TurnState, to: TurnState) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

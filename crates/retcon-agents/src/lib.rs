@@ -1,9 +1,7 @@
 //! Coding-agent provider framework.
 //!
-//! Phase 2 spike scope: drive one provider (Claude Code) end to end — detect
-//! the CLI, read its version, run a prompt with streaming JSON output, and
-//! cancel a running turn. The provider-neutral framework (normalized events,
-//! capability manifests) is Phase 11.
+//! Phase 11 scope: provider-neutral normalized events, capability manifests, and
+//! the Claude Code adapter used by the session engine.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -275,6 +273,52 @@ pub enum HealthStatus {
     Failure,
 }
 
+/// A user-facing repair action the shell can execute locally.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RepairAction {
+    /// Open provider documentation in the default browser.
+    OpenDocs {
+        /// Link target.
+        url: String,
+        /// Button or menu label.
+        label: String,
+    },
+    /// Reveal a configuration directory in the file manager.
+    RevealConfig {
+        /// Directory to open.
+        path: String,
+        /// Button or menu label.
+        label: String,
+    },
+    /// Show PATH entries and install-location hints.
+    PathHints {
+        /// Entries to display in the shell.
+        hints: Vec<PathHint>,
+        /// Button or menu label.
+        label: String,
+    },
+    /// Re-run one or all provider doctor checks.
+    Retry {
+        /// Specific check to retry, or `None` for the full report.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        check_id: Option<String>,
+        /// Button or menu label.
+        label: String,
+    },
+}
+
+/// One PATH or install-location hint for provider setup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathHint {
+    /// Human-readable description.
+    pub label: String,
+    /// Path or PATH entry.
+    pub path: String,
+    /// Whether the path currently exists or resolves.
+    pub present: bool,
+}
+
 /// One diagnostic performed by the provider doctor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheck {
@@ -289,6 +333,9 @@ pub struct HealthCheck {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// A user-facing next step, when available.
     pub suggested_action: Option<String>,
+    /// Repair actions the shell can offer for this check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_actions: Vec<RepairAction>,
 }
 
 /// A complete, safe-to-share setup report for the supported provider.
@@ -310,11 +357,48 @@ pub struct ProviderDoctorReport {
     pub authenticated: bool,
     /// Existing provider configuration directory.
     pub configuration_path: Option<String>,
+    /// Provider documentation URL for setup help.
+    pub documentation_url: String,
+    /// PATH and install-location hints for the provider executable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_hints: Vec<PathHint>,
+    /// Report-level repair actions the shell can offer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_actions: Vec<RepairAction>,
     /// Individual health-check results.
     pub checks: Vec<HealthCheck>,
 }
 
+impl ProviderDoctorReport {
+    /// Build a support-safe diagnostic bundle suitable for export or clipboard copy.
+    #[must_use]
+    pub fn diagnostic_bundle(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "provider_doctor_bundle",
+            "generated_at": diagnostic_timestamp(),
+            "report": self,
+        })
+    }
+}
+
+fn diagnostic_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
 const MINIMUM_CLAUDE_VERSION: &str = "1.0.0";
+const CLAUDE_DOCS_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/overview";
+
+/// Clear cached provider detection so the next doctor run re-probes the CLI.
+pub fn clear_detection_cache() {
+    if let Some(cache) = CLAUDE_DETECTION.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        *guard = None;
+    }
+}
 
 /// Run non-invasive setup checks for Claude Code.
 ///
@@ -323,22 +407,51 @@ const MINIMUM_CLAUDE_VERSION: &str = "1.0.0";
 pub async fn doctor_claude() -> ProviderDoctorReport {
     let executable_path = find_executable("claude").await;
     let configuration_path = claude_configuration_path();
+    let path_hints = collect_path_hints(&executable_path);
     let mut checks = Vec::new();
+    let report_repair_actions = vec![
+        RepairAction::OpenDocs {
+            url: CLAUDE_DOCS_URL.to_owned(),
+            label: "Open Claude Code docs".to_owned(),
+        },
+        RepairAction::Retry {
+            check_id: None,
+            label: "Retry all checks".to_owned(),
+        },
+    ];
 
     let Some(path) = executable_path.clone() else {
-        checks.push(check(
+        checks.push(check_with_actions(
             "executable",
             "Claude Code installation",
             HealthStatus::Failure,
             "The `claude` command was not found on PATH.",
             Some("Install Claude Code, or repair PATH and then retry this check.".to_owned()),
+            vec![
+                RepairAction::OpenDocs {
+                    url: CLAUDE_DOCS_URL.to_owned(),
+                    label: "Open install docs".to_owned(),
+                },
+                RepairAction::PathHints {
+                    hints: path_hints.clone(),
+                    label: "Show PATH hints".to_owned(),
+                },
+                RepairAction::Retry {
+                    check_id: Some("executable".to_owned()),
+                    label: "Retry installation check".to_owned(),
+                },
+            ],
         ));
-        checks.push(check(
+        checks.push(check_with_actions(
             "authentication",
             "Account authentication",
             HealthStatus::Failure,
             "Authentication cannot be checked until Claude Code is installed.",
             Some("Install Claude Code first.".to_owned()),
+            vec![RepairAction::OpenDocs {
+                url: CLAUDE_DOCS_URL.to_owned(),
+                label: "Open install docs".to_owned(),
+            }],
         ));
         return ProviderDoctorReport {
             provider_id: "claude-code".to_owned(),
@@ -349,6 +462,9 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
             minimum_supported_version: MINIMUM_CLAUDE_VERSION.to_owned(),
             authenticated: false,
             configuration_path,
+            documentation_url: CLAUDE_DOCS_URL.to_owned(),
+            path_hints,
+            repair_actions: report_repair_actions,
             checks,
         };
     };
@@ -360,21 +476,32 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
         .map(|output| output.trim().to_owned())
         .filter(|output| !output.is_empty());
     match &version {
-        Some(version) if version_is_supported(version) => checks.push(check(
+        Some(version) if version_is_supported(version) => checks.push(check_with_actions(
             "version",
             "Supported version",
             HealthStatus::Ready,
             format!("Claude Code {version} meets the minimum supported version."),
             None,
+            vec![],
         )),
-        Some(version) => checks.push(check(
+        Some(version) => checks.push(check_with_actions(
             "version",
             "Supported version",
             HealthStatus::Warning,
             format!("Claude Code {version} is older than {MINIMUM_CLAUDE_VERSION}."),
             Some("Update Claude Code, then retry this check.".to_owned()),
+            vec![
+                RepairAction::OpenDocs {
+                    url: CLAUDE_DOCS_URL.to_owned(),
+                    label: "Open update docs".to_owned(),
+                },
+                RepairAction::Retry {
+                    check_id: Some("version".to_owned()),
+                    label: "Retry version check".to_owned(),
+                },
+            ],
         )),
-        None => checks.push(check(
+        None => checks.push(check_with_actions(
             "version",
             "Executable response",
             HealthStatus::Failure,
@@ -382,21 +509,35 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
                 .err()
                 .unwrap_or_else(|| "Claude Code returned no version.".to_owned()),
             Some("Reinstall Claude Code or select another executable.".to_owned()),
+            vec![
+                RepairAction::OpenDocs {
+                    url: CLAUDE_DOCS_URL.to_owned(),
+                    label: "Open install docs".to_owned(),
+                },
+                RepairAction::Retry {
+                    check_id: Some("version".to_owned()),
+                    label: "Retry version check".to_owned(),
+                },
+            ],
         )),
     }
 
-    checks.push(check(
+    checks.push(check_with_actions(
         "executable",
         "Claude Code installation",
         HealthStatus::Ready,
         format!("Found executable at {path}."),
         None,
+        vec![RepairAction::PathHints {
+            hints: path_hints.clone(),
+            label: "Show PATH hints".to_owned(),
+        }],
     ));
 
     let authenticated = run_claude(&["auth", "status"])
         .await
         .is_ok_and(|output| !output.trim().is_empty());
-    checks.push(check(
+    checks.push(check_with_actions(
         "authentication",
         "Account authentication",
         if authenticated {
@@ -410,6 +551,20 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
             "Claude Code did not report an authenticated account.".to_owned()
         },
         (!authenticated).then_some("Run `claude auth login` to reconnect your account.".to_owned()),
+        if authenticated {
+            vec![]
+        } else {
+            vec![
+                RepairAction::OpenDocs {
+                    url: CLAUDE_DOCS_URL.to_owned(),
+                    label: "Open auth docs".to_owned(),
+                },
+                RepairAction::Retry {
+                    check_id: Some("authentication".to_owned()),
+                    label: "Retry auth check".to_owned(),
+                },
+            ]
+        },
     ));
 
     let config_status = if configuration_path.is_some() {
@@ -417,7 +572,20 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
     } else {
         HealthStatus::Warning
     };
-    checks.push(check(
+    let mut config_actions = vec![RepairAction::OpenDocs {
+        url: CLAUDE_DOCS_URL.to_owned(),
+        label: "Open setup docs".to_owned(),
+    }];
+    if let Some(config_path) = &configuration_path {
+        config_actions.insert(
+            0,
+            RepairAction::RevealConfig {
+                path: config_path.clone(),
+                label: "Reveal config folder".to_owned(),
+            },
+        );
+    }
+    checks.push(check_with_actions(
         "configuration",
         "Configuration location",
         config_status,
@@ -428,8 +596,9 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
         configuration_path
             .is_none()
             .then_some("Sign in to Claude Code to create its configuration.".to_owned()),
+        config_actions,
     ));
-    checks.push(check(
+    checks.push(check_with_actions(
         "network_and_model_access",
         "Network and model access",
         HealthStatus::Warning,
@@ -439,6 +608,10 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
             "Start a session when ready; Retcon will report any connection or model-access error."
                 .to_owned(),
         ),
+        vec![RepairAction::OpenDocs {
+            url: CLAUDE_DOCS_URL.to_owned(),
+            label: "Open troubleshooting docs".to_owned(),
+        }],
     ));
 
     let overall_status = checks
@@ -446,6 +619,20 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
         .map(|check| check.status)
         .max_by_key(status_rank)
         .unwrap_or(HealthStatus::Failure);
+    let mut repair_actions = report_repair_actions;
+    if let Some(config_path) = configuration_path.clone() {
+        repair_actions.insert(
+            1,
+            RepairAction::RevealConfig {
+                path: config_path,
+                label: "Reveal config folder".to_owned(),
+            },
+        );
+    }
+    repair_actions.push(RepairAction::PathHints {
+        hints: path_hints.clone(),
+        label: "Show PATH hints".to_owned(),
+    });
     ProviderDoctorReport {
         provider_id: "claude-code".to_owned(),
         provider_name: "Claude Code".to_owned(),
@@ -455,16 +642,20 @@ pub async fn doctor_claude() -> ProviderDoctorReport {
         minimum_supported_version: MINIMUM_CLAUDE_VERSION.to_owned(),
         authenticated,
         configuration_path,
+        documentation_url: CLAUDE_DOCS_URL.to_owned(),
+        path_hints,
+        repair_actions,
         checks,
     }
 }
 
-fn check(
+fn check_with_actions(
     id: &str,
     label: &str,
     status: HealthStatus,
     detail: impl Into<String>,
     suggested_action: Option<String>,
+    repair_actions: Vec<RepairAction>,
 ) -> HealthCheck {
     HealthCheck {
         id: id.to_owned(),
@@ -472,7 +663,55 @@ fn check(
         status,
         detail: detail.into(),
         suggested_action,
+        repair_actions,
     }
+}
+
+fn collect_path_hints(executable_path: &Option<String>) -> Vec<PathHint> {
+    let mut hints = Vec::new();
+    if let Some(path) = executable_path {
+        hints.push(PathHint {
+            label: "Resolved Claude executable".to_owned(),
+            path: path.clone(),
+            present: Path::new(path).exists(),
+        });
+    } else {
+        hints.push(PathHint {
+            label: "Resolved Claude executable".to_owned(),
+            path: "Not found on PATH".to_owned(),
+            present: false,
+        });
+    }
+
+    if let Ok(path_var) = std::env::var("PATH") {
+        for entry in path_var.split(';').take(8) {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            hints.push(PathHint {
+                label: "PATH entry".to_owned(),
+                path: trimmed.to_owned(),
+                present: Path::new(trimmed).is_dir(),
+            });
+        }
+    }
+
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        for candidate in [
+            Path::new(&home).join(".local/bin/claude.exe"),
+            Path::new(&home).join("AppData/Roaming/npm/claude.cmd"),
+            Path::new(&home).join("AppData/Local/Programs/claude/claude.exe"),
+        ] {
+            hints.push(PathHint {
+                label: "Common install location".to_owned(),
+                path: candidate.display().to_string(),
+                present: candidate.exists(),
+            });
+        }
+    }
+
+    hints
 }
 
 fn status_rank(status: &HealthStatus) -> u8 {
@@ -539,28 +778,6 @@ fn claude_configuration_path() -> Option<String> {
     let home = std::env::var_os("USERPROFILE")?;
     let path = Path::new(&home).join(".claude");
     path.is_dir().then(|| path.display().to_string())
-}
-
-#[cfg(test)]
-mod doctor_tests {
-    use super::{AgentProvider, ClaudeCodeProvider, ProviderCapability, version_is_supported};
-
-    #[test]
-    fn version_check_handles_prefixes_and_old_versions() {
-        assert!(version_is_supported("Claude Code 1.2.3"));
-        assert!(version_is_supported("1.0.0"));
-        assert!(!version_is_supported("0.9.9"));
-        assert!(!version_is_supported("unknown"));
-    }
-
-    #[test]
-    fn claude_manifest_exposes_only_supported_capabilities() {
-        let manifest = ClaudeCodeProvider.metadata().capabilities;
-        assert!(manifest.supports(ProviderCapability::SessionResume));
-        assert!(manifest.supports(ProviderCapability::TokenReporting));
-        assert!(!manifest.supports(ProviderCapability::BrowserUse));
-        assert!(!manifest.supports(ProviderCapability::CostReporting));
-    }
 }
 
 /// Detect the Claude Code CLI and read its version.
@@ -708,5 +925,100 @@ impl AgentTurn {
     /// Return the last known exit code after the process has exited.
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
+    }
+}
+
+/// Map a Claude Code `stream-json` line to a provider-neutral [`AgentEvent`].
+#[must_use]
+pub fn normalize_claude_stream_event(provider_id: &str, line: &str) -> AgentEvent {
+    let data: serde_json::Value =
+        serde_json::from_str(line).unwrap_or_else(|_| serde_json::json!({ "raw": line }));
+    let kind = match data.get("type").and_then(serde_json::Value::as_str) {
+        Some("system") => AgentEventKind::SessionStarted,
+        Some("assistant") | Some("content_block_delta") | Some("content_block_start") => {
+            AgentEventKind::TextDelta
+        }
+        Some("user") => AgentEventKind::TurnStarted,
+        Some("result") => AgentEventKind::TurnCompleted,
+        Some("error") => AgentEventKind::ProviderFailed,
+        Some("tool_use") | Some("tool_use_block") => AgentEventKind::ToolRequested,
+        Some("tool_result") => AgentEventKind::ToolCompleted,
+        Some("command") => AgentEventKind::CommandStarted,
+        _ => AgentEventKind::ReasoningStatus,
+    };
+    AgentEvent {
+        provider_id: provider_id.to_owned(),
+        native_session_id: data
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        kind,
+        data,
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::{
+        AgentProvider, ClaudeCodeProvider, HealthStatus, ProviderCapability, RepairAction,
+        collect_path_hints, version_is_supported,
+    };
+
+    #[test]
+    fn version_check_handles_prefixes_and_old_versions() {
+        assert!(version_is_supported("Claude Code 1.2.3"));
+        assert!(version_is_supported("1.0.0"));
+        assert!(!version_is_supported("0.9.9"));
+        assert!(!version_is_supported("unknown"));
+    }
+
+    #[test]
+    fn normalize_claude_stream_event_maps_assistant_lines() {
+        let event = super::normalize_claude_stream_event(
+            "claude-code",
+            r#"{"type":"assistant","message":{"content":"hi"}}"#,
+        );
+        assert_eq!(event.provider_id, "claude-code");
+        assert_eq!(event.kind, super::AgentEventKind::TextDelta);
+    }
+
+    #[test]
+    fn claude_manifest_exposes_only_supported_capabilities() {
+        let manifest = ClaudeCodeProvider.metadata().capabilities;
+        assert!(manifest.supports(ProviderCapability::SessionResume));
+        assert!(manifest.supports(ProviderCapability::TokenReporting));
+        assert!(!manifest.supports(ProviderCapability::BrowserUse));
+        assert!(!manifest.supports(ProviderCapability::CostReporting));
+    }
+
+    #[test]
+    fn path_hints_mark_missing_executable() {
+        let hints = collect_path_hints(&None);
+        assert!(hints.iter().any(|hint| !hint.present));
+    }
+
+    #[test]
+    fn diagnostic_bundle_includes_report_metadata() {
+        let report = super::ProviderDoctorReport {
+            provider_id: "claude-code".to_owned(),
+            provider_name: "Claude Code".to_owned(),
+            overall_status: HealthStatus::Warning,
+            executable_path: None,
+            version: None,
+            minimum_supported_version: "1.0.0".to_owned(),
+            authenticated: false,
+            configuration_path: None,
+            documentation_url: "https://example.com".to_owned(),
+            path_hints: Vec::new(),
+            repair_actions: vec![RepairAction::Retry {
+                check_id: None,
+                label: "Retry all checks".to_owned(),
+            }],
+            checks: Vec::new(),
+        };
+        let bundle = report.diagnostic_bundle();
+        assert_eq!(bundle["kind"], "provider_doctor_bundle");
+        assert_eq!(bundle["report"]["provider_id"], "claude-code");
+        assert!(bundle["generated_at"].is_string());
     }
 }

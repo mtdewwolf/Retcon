@@ -52,7 +52,26 @@ impl Database {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{NewProject, NewSession, NewTask};
+    use crate::{NewProject, NewSession, NewTask, NewTurn};
+
+    #[test]
+    fn marks_in_flight_turns_failed_on_restart() {
+        let db = Database::open_in_memory().unwrap();
+        let project = db.projects().create(&NewProject::new("Retcon")).unwrap();
+        let session = db
+            .sessions()
+            .create(&NewSession::new(project.id, "Turn recovery"))
+            .unwrap();
+        let mut new_turn = NewTurn::new(session.id, 1);
+        new_turn.status = "running".into();
+        let turn = db.turns().create(&new_turn).unwrap();
+
+        let report = db.recover_interrupted().unwrap();
+        assert_eq!(report.interrupted_turns, 1);
+        let stored = db.turns().get(turn.id).unwrap().unwrap();
+        assert_eq!(stored.status, "failed");
+        assert!(stored.completed_at.is_some());
+    }
 
     #[test]
     fn marks_process_owned_work_and_preserves_task_progress() {

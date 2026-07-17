@@ -17,6 +17,7 @@ pub enum ErrorCode {
     InvalidRequest,
     Io,
     NotFound,
+    PermissionDenied,
     Shutdown,
     Internal,
 }
@@ -163,49 +164,12 @@ impl From<retcon_storage::StorageError> for CoreError {
     }
 }
 
-/// Keep obvious credentials out of diagnostics until the dedicated redaction system lands.
 fn redact(message: String) -> String {
-    message
-        .split_whitespace()
-        .map(|part| {
-            let lower = part.to_ascii_lowercase();
-            if lower.starts_with("token=")
-                || lower.starts_with("password=")
-                || lower.starts_with("secret=")
-            {
-                "[REDACTED]"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    retcon_secrets::redact_text(&message)
 }
 
 fn redact_value(value: Value) -> Value {
-    match value {
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| {
-                    let secret = matches!(
-                        key.to_ascii_lowercase().as_str(),
-                        "token" | "password" | "secret" | "authorization" | "api_key"
-                    );
-                    (
-                        key,
-                        if secret {
-                            Value::String("[REDACTED]".into())
-                        } else {
-                            redact_value(value)
-                        },
-                    )
-                })
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(redact_value).collect()),
-        other => other,
-    }
+    retcon_secrets::scrub_json(value)
 }
 
 #[cfg(test)]

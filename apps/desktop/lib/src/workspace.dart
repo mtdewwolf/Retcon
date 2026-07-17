@@ -3,7 +3,15 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:retcon_diff_viewer/retcon_diff_viewer.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
+import 'package:retcon_file_viewer/retcon_file_viewer.dart';
+import 'package:retcon_terminal_view/retcon_terminal_view.dart';
+
+import 'conversation/conversation_panel.dart';
+import 'core_client.dart';
+import 'approvals/approval_center.dart';
+import 'checkpoints/checkpoints.dart';
 
 /// Persistent, versioned workspace layout.  This stays deliberately independent
 /// of widgets so a project layout can be restored before the desktop is drawn.
@@ -160,6 +168,21 @@ class PanelDefinition {
     title: 'Browser',
     icon: 'language',
   );
+  static const approvals = PanelDefinition(
+    id: 'approvals',
+    title: 'Approval center',
+    icon: 'verified_user',
+  );
+  static const review = PanelDefinition(
+    id: 'review',
+    title: 'Diff review',
+    icon: 'difference',
+  );
+  static const checkpoints = PanelDefinition(
+    id: 'checkpoints',
+    title: 'Checkpoints',
+    icon: 'history',
+  );
   final String id;
   final String title;
   final String icon;
@@ -199,6 +222,12 @@ class FloatingPanel {
     ),
     detached: json['detached'] as bool? ?? false,
   );
+
+  FloatingPanel copyWith({Rect? rect, bool? detached}) => FloatingPanel(
+    panel: panel,
+    rect: rect ?? this.rect,
+    detached: detached ?? this.detached,
+  );
 }
 
 abstract interface class WorkspaceStore {
@@ -230,12 +259,114 @@ class FileWorkspaceStore implements WorkspaceStore {
       _file.writeAsString(jsonEncode(layout.toJson()), flush: true);
 }
 
+/// Persists workspace layouts through `storage.layout.*` RPC.
+class RpcWorkspaceStore implements WorkspaceStore {
+  RpcWorkspaceStore({
+    required this.core,
+    this.layoutId = 'default',
+    this.workspaceId,
+  });
+
+  final CoreClient core;
+  final String layoutId;
+  final String? workspaceId;
+
+  @override
+  Future<WorkspaceLayout?> read() async {
+    if (core.status != CoreConnectionStatus.connected) return null;
+    final result = await core.request('storage.layout.get', params: {
+      'layoutId': layoutId,
+      if (workspaceId != null) 'workspaceId': workspaceId,
+    });
+    final record = result['layout'] as Map<String, dynamic>?;
+    if (record == null) return null;
+    final payload = record['layout'] as Map<String, dynamic>?;
+    if (payload == null) return null;
+    return WorkspaceLayout.fromJson(payload);
+  }
+
+  @override
+  Future<void> write(WorkspaceLayout layout) async {
+    if (core.status != CoreConnectionStatus.connected) return;
+    await core.request('storage.layout.save', params: {
+      'layoutId': layoutId,
+      'name': layoutId,
+      'layout': layout.toJson(),
+      if (workspaceId != null) 'workspaceId': workspaceId,
+      'isActive': true,
+    });
+  }
+}
+
+enum LayoutPreset {
+  focus('Focus'),
+  build('Build'),
+  review('Review'),
+  browser('Browser');
+
+  const LayoutPreset(this.label);
+  final String label;
+
+  WorkspaceLayout layout() => switch (this) {
+    LayoutPreset.focus => WorkspaceLayout(
+      root: const TabGroup(panels: [PanelDefinition.workspace]),
+    ),
+    LayoutPreset.build => WorkspaceLayout(
+      root: SplitGroup.horizontal(
+        first: const TabGroup(panels: [PanelDefinition.explorer]),
+        second: SplitGroup.vertical(
+          first: const TabGroup(panels: [PanelDefinition.workspace]),
+          second: const TabGroup(panels: [PanelDefinition.terminal]),
+          fraction: .65,
+        ),
+        fraction: .22,
+      ),
+    ),
+    LayoutPreset.review => WorkspaceLayout(
+      root: SplitGroup.horizontal(
+        first: const TabGroup(panels: [PanelDefinition.explorer]),
+        second: SplitGroup.vertical(
+          first: SplitGroup.horizontal(
+            first: const TabGroup(panels: [PanelDefinition.workspace]),
+            second: const TabGroup(panels: [PanelDefinition.review]),
+            fraction: .55,
+          ),
+          second: const TabGroup(panels: [PanelDefinition.browser]),
+          fraction: .58,
+        ),
+        fraction: .22,
+      ),
+    ),
+    LayoutPreset.browser => WorkspaceLayout(
+      root: SplitGroup.horizontal(
+        first: const TabGroup(panels: [PanelDefinition.browser]),
+        second: const TabGroup(panels: [PanelDefinition.workspace]),
+        fraction: .62,
+      ),
+    ),
+  };
+}
+
 class WorkspaceController extends ChangeNotifier {
   WorkspaceController({WorkspaceStore? store})
     : _store = store ?? FileWorkspaceStore();
-  final WorkspaceStore _store;
+  WorkspaceStore _store;
+  String? _boundLayoutId;
   WorkspaceLayout _layout = WorkspaceLayout.initial();
   WorkspaceLayout get layout => _layout;
+
+  void bindRpcStore(CoreClient core, {String? projectId}) {
+    final layoutId = projectId == null ? 'default' : 'project-$projectId';
+    if (_boundLayoutId == layoutId && _store is RpcWorkspaceStore) return;
+    _boundLayoutId = layoutId;
+    _store = RpcWorkspaceStore(
+      core: core,
+      layoutId: layoutId,
+      workspaceId: projectId,
+    );
+    unawaited(restore());
+  }
+
   Future<void> restore() async {
     try {
       _layout = await _store.read() ?? WorkspaceLayout.initial();
@@ -250,6 +381,11 @@ class WorkspaceController extends ChangeNotifier {
     await _save();
   }
 
+  Future<void> applyPreset(LayoutPreset preset) async {
+    _layout = preset.layout();
+    await _save();
+  }
+
   Future<void> reopenLast() async {
     if (_layout.closedPanels.isEmpty) return;
     final panel = _layout.closedPanels.last;
@@ -260,6 +396,21 @@ class WorkspaceController extends ChangeNotifier {
         0,
         _layout.closedPanels.length - 1,
       ),
+    );
+    await _save();
+  }
+
+  Future<void> openPanel(PanelDefinition panel) async {
+    if (_containsPanel(_layout.root, panel.id)) {
+      notifyListeners();
+      return;
+    }
+    _layout = WorkspaceLayout(
+      root: _append(_layout.root, panel),
+      floatingPanels: _layout.floatingPanels,
+      closedPanels: _layout.closedPanels
+          .where((item) => item.id != panel.id)
+          .toList(),
     );
     await _save();
   }
@@ -303,10 +454,74 @@ class WorkspaceController extends ChangeNotifier {
     await _save();
   }
 
+  Future<void> moveFloating(FloatingPanel floating, Offset delta) async {
+    final moved = floating.copyWith(
+      rect: floating.rect.shift(delta),
+    );
+    _layout = WorkspaceLayout(
+      root: _layout.root,
+      closedPanels: _layout.closedPanels,
+      floatingPanels: _layout.floatingPanels
+          .map((item) => item == floating ? moved : item)
+          .toList(),
+    );
+    await _save();
+  }
+
+  Future<void> recoverMonitorLayout(Size viewport) async {
+    if (_layout.floatingPanels.isEmpty) return;
+    const margin = 8.0;
+    final recovered = _layout.floatingPanels.map((floating) {
+      var rect = floating.rect;
+      if (rect.right > viewport.width - margin) {
+        rect = rect.shift(Offset(viewport.width - margin - rect.right, 0));
+      }
+      if (rect.bottom > viewport.height - margin) {
+        rect = rect.shift(Offset(0, viewport.height - margin - rect.bottom));
+      }
+      if (rect.left < margin) {
+        rect = rect.shift(Offset(margin - rect.left, 0));
+      }
+      if (rect.top < margin) {
+        rect = rect.shift(Offset(0, margin - rect.top));
+      }
+      return floating.copyWith(rect: rect);
+    }).toList();
+    final changed = !_panelsEqual(_layout.floatingPanels, recovered);
+    if (!changed) return;
+    _layout = WorkspaceLayout(
+      root: _layout.root,
+      closedPanels: _layout.closedPanels,
+      floatingPanels: recovered,
+    );
+    await _save();
+  }
+
+  bool _panelsEqual(List<FloatingPanel> left, List<FloatingPanel> right) {
+    if (left.length != right.length) return false;
+    for (var index = 0; index < left.length; index++) {
+      final a = left[index].rect;
+      final b = right[index].rect;
+      if (a.left != b.left ||
+          a.top != b.top ||
+          a.width != b.width ||
+          a.height != b.height) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   Future<void> _save() async {
     notifyListeners();
     await _store.write(_layout);
   }
+
+  bool _containsPanel(WorkspaceNode node, String id) => switch (node) {
+    TabGroup group => group.panels.any((panel) => panel.id == id),
+    SplitGroup split =>
+      _containsPanel(split.first, id) || _containsPanel(split.second, id),
+  };
 
   WorkspaceNode _append(WorkspaceNode node, PanelDefinition panel) =>
       switch (node) {
@@ -337,36 +552,66 @@ class WorkspaceController extends ChangeNotifier {
 }
 
 class DockingWorkspace extends StatefulWidget {
-  const DockingWorkspace({super.key, required this.controller});
+  const DockingWorkspace({
+    super.key,
+    required this.controller,
+    this.core,
+    this.workingDirectory,
+  });
   final WorkspaceController controller;
+  final CoreClient? core;
+  final String? workingDirectory;
   @override
   State<DockingWorkspace> createState() => _DockingWorkspaceState();
 }
 
 class _DockingWorkspaceState extends State<DockingWorkspace> {
+  Size? _lastViewport;
+
   @override
   void initState() {
     super.initState();
     unawaited(widget.controller.restore());
   }
 
+  void _handleViewportChange(Size viewport) {
+    if (_lastViewport != null && _lastViewport != viewport) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(widget.controller.recoverMonitorLayout(viewport));
+      });
+    }
+    _lastViewport = viewport;
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.controller,
     builder: (context, _) => LayoutBuilder(
-      builder: (context, bounds) => Stack(
-        children: [
-          Positioned.fill(
-            child: _NodeView(
-              node: widget.controller.layout.root,
-              controller: widget.controller,
-              workspaceSize: bounds.biggest,
+      builder: (context, bounds) {
+        final viewport = bounds.biggest;
+        _handleViewportChange(viewport);
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: _NodeView(
+                node: widget.controller.layout.root,
+                controller: widget.controller,
+                workspaceSize: viewport,
+                core: widget.core,
+                workingDirectory: widget.workingDirectory,
+              ),
             ),
-          ),
-          for (final floating in widget.controller.layout.floatingPanels)
-            _FloatingView(floating: floating, controller: widget.controller),
-        ],
-      ),
+            for (final floating in widget.controller.layout.floatingPanels)
+              _FloatingView(
+                floating: floating,
+                controller: widget.controller,
+                workspaceSize: viewport,
+                core: widget.core,
+                workingDirectory: widget.workingDirectory,
+              ),
+          ],
+        );
+      },
     ),
   );
 }
@@ -376,16 +621,22 @@ class _NodeView extends StatelessWidget {
     required this.node,
     required this.controller,
     required this.workspaceSize,
+    this.core,
+    this.workingDirectory,
   });
   final WorkspaceNode node;
   final WorkspaceController controller;
   final Size workspaceSize;
+  final CoreClient? core;
+  final String? workingDirectory;
   @override
   Widget build(BuildContext context) => switch (node) {
     TabGroup group => _TabGroupView(
       group: group,
       controller: controller,
       workspaceSize: workspaceSize,
+      core: core,
+      workingDirectory: workingDirectory,
     ),
     SplitGroup split => Flex(
       direction: split.axis == SplitAxis.horizontal
@@ -398,6 +649,8 @@ class _NodeView extends StatelessWidget {
             node: split.first,
             controller: controller,
             workspaceSize: workspaceSize,
+            core: core,
+            workingDirectory: workingDirectory,
           ),
         ),
         const SizedBox(width: RetconSpacing.xs, height: RetconSpacing.xs),
@@ -407,6 +660,8 @@ class _NodeView extends StatelessWidget {
             node: split.second,
             controller: controller,
             workspaceSize: workspaceSize,
+            core: core,
+            workingDirectory: workingDirectory,
           ),
         ),
       ],
@@ -419,10 +674,14 @@ class _TabGroupView extends StatelessWidget {
     required this.group,
     required this.controller,
     required this.workspaceSize,
+    this.core,
+    this.workingDirectory,
   });
   final TabGroup group;
   final WorkspaceController controller;
   final Size workspaceSize;
+  final CoreClient? core;
+  final String? workingDirectory;
   @override
   Widget build(BuildContext context) {
     final panel = group.active;
@@ -481,88 +740,199 @@ class _TabGroupView extends StatelessWidget {
               ],
             ),
           ),
-          Expanded(child: _PanelBody(panel: panel)),
+          Expanded(
+            child: _PanelBody(
+              panel: panel,
+              core: core,
+              workingDirectory: workingDirectory,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _FloatingView extends StatelessWidget {
-  const _FloatingView({required this.floating, required this.controller});
+class _FloatingView extends StatefulWidget {
+  const _FloatingView({
+    required this.floating,
+    required this.controller,
+    required this.workspaceSize,
+    this.core,
+    this.workingDirectory,
+  });
   final FloatingPanel floating;
   final WorkspaceController controller;
+  final Size workspaceSize;
+  final CoreClient? core;
+  final String? workingDirectory;
+
   @override
-  Widget build(BuildContext context) => Positioned(
-    left: floating.rect.left,
-    top: floating.rect.top,
-    width: floating.rect.width,
-    height: floating.rect.height,
-    child: Material(
-      elevation: 12,
-      child: RetconPanel(
-        label: floating.panel.title,
-        padding: EdgeInsets.zero,
-        child: Column(
-          children: [
-            Container(
-              height: 32,
-              color: RetconColors.titleBarTop,
-              child: Row(
-                children: [
-                  const SizedBox(width: RetconSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      '${floating.detached ? 'Detached: ' : ''}${floating.panel.title}',
+  State<_FloatingView> createState() => _FloatingViewState();
+}
+
+class _FloatingViewState extends State<_FloatingView> {
+  Offset? _dragOrigin;
+
+  Future<void> _onDragEnd(DragEndDetails details) async {
+    final center = widget.floating.rect.center;
+    final workspace = widget.workspaceSize;
+    final nearDockZone =
+        center.dx < workspace.width * .25 ||
+        center.dx > workspace.width * .75 ||
+        center.dy > workspace.height * .75;
+    if (nearDockZone) {
+      await widget.controller.dock(widget.floating);
+    }
+    setState(() => _dragOrigin = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final floating = widget.floating;
+    return Positioned(
+      left: floating.rect.left,
+      top: floating.rect.top,
+      width: floating.rect.width,
+      height: floating.rect.height,
+      child: Material(
+        elevation: 12,
+        child: RetconPanel(
+          label: floating.panel.title,
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              GestureDetector(
+                onPanStart: (_) => setState(
+                  () => _dragOrigin = floating.rect.topLeft,
+                ),
+                onPanUpdate: (details) {
+                  if (_dragOrigin == null) return;
+                  unawaited(
+                    widget.controller.moveFloating(
+                      floating,
+                      details.delta,
                     ),
+                  );
+                },
+                onPanEnd: _onDragEnd,
+                child: Container(
+                  height: 32,
+                  color: RetconColors.titleBarTop,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: RetconSpacing.sm),
+                      const Icon(Icons.drag_indicator, size: 16),
+                      const SizedBox(width: RetconSpacing.xs),
+                      Expanded(
+                        child: Text(
+                          '${floating.detached ? 'Detached: ' : ''}${floating.panel.title}',
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.call_merge),
+                        tooltip: 'Dock panel',
+                        onPressed: () =>
+                            unawaited(widget.controller.dock(floating)),
+                      ),
+                    ],
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.call_merge),
-                    tooltip: 'Dock panel',
-                    onPressed: () => unawaited(controller.dock(floating)),
-                  ),
-                ],
+                ),
               ),
-            ),
-            Expanded(child: _PanelBody(panel: floating.panel)),
-          ],
+              Expanded(
+                child: _PanelBody(
+                  panel: floating.panel,
+                  core: widget.core,
+                  workingDirectory: widget.workingDirectory,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _PanelBody extends StatelessWidget {
-  const _PanelBody({required this.panel});
+  const _PanelBody({
+    required this.panel,
+    this.core,
+    this.workingDirectory,
+  });
   final PanelDefinition panel;
+  final CoreClient? core;
+  final String? workingDirectory;
   @override
-  Widget build(BuildContext context) => Center(
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(_icon(panel.icon), size: 48),
-        const SizedBox(height: RetconSpacing.sm),
-        Text(panel.title, style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: RetconSpacing.xs),
-        if (panel.id == 'workspace')
-          const Text('Retcon workspace', textAlign: TextAlign.center),
-        if (panel.id == 'workspace') const SizedBox(height: RetconSpacing.xs),
-        Text(_message(panel.id), textAlign: TextAlign.center),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    if (panel.id == 'workspace' && core != null) {
+      return ConversationPanel(
+        core: core!,
+        workingDirectory: workingDirectory,
+      );
+    }
+    if (panel.id == 'terminal' && core != null) {
+      return TerminalPanel(
+        service: RpcTerminalService(
+          (method, {params = const {}}) => core!.request(method, params: params),
+        ),
+        events: core!.events,
+      );
+    }
+    if (panel.id == 'approvals' && core != null) {
+      return ApprovalCenterPanel(core: core!);
+    }
+    if (panel.id == 'explorer' && core != null && workingDirectory != null) {
+      return FileWorkspacePanel(
+        service: RpcFileService(
+          (method, {params = const {}}) => core!.request(method, params: params),
+        ),
+        root: workingDirectory!,
+        events: core!.events,
+      );
+    }
+    if (panel.id == 'review' && core != null && workingDirectory != null) {
+      return DiffReviewPanel(
+        service: RpcDiffService(
+          (method, {params = const {}}) => core!.request(method, params: params),
+        ),
+        repo: workingDirectory!,
+      );
+    }
+    if (panel.id == 'checkpoints' && core != null && workingDirectory != null) {
+      return CheckpointPanel(core: core!, root: workingDirectory!);
+    }
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(_icon(panel.icon), size: 48),
+          const SizedBox(height: RetconSpacing.sm),
+          Text(panel.title, style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: RetconSpacing.xs),
+          Text(_message(panel.id), textAlign: TextAlign.center),
+        ],
+      ),
+    );
+  }
 }
 
 IconData _icon(String icon) => switch (icon) {
   'folder' => Icons.folder_open,
   'terminal' => Icons.terminal,
   'language' => Icons.language,
+  'verified_user' => Icons.verified_user,
+  'difference' => Icons.difference,
+  'history' => Icons.history,
   _ => Icons.dashboard_customize,
 };
 String _message(String id) => switch (id) {
   'explorer' => 'Open a project to begin.',
-  'workspace' => 'Drag and arrange your workspace panels.',
+  'workspace' => 'Agent conversation appears here when Core is connected.',
   'terminal' => 'Terminal sessions appear here.',
   'browser' => 'Browser sessions appear here.',
+  'approvals' => 'Pending approvals appear here when Core is connected.',
+  'review' => 'Diff review appears here when a project is open.',
+  'checkpoints' => 'Checkpoint history appears here when a project is open.',
   _ => '',
 };

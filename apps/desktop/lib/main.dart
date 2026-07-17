@@ -12,6 +12,8 @@ import 'package:window_manager/window_manager.dart';
 import 'src/core_client.dart';
 import 'src/desktop_shell.dart';
 import 'src/logging.dart';
+import 'src/projects/project_controller.dart';
+import 'src/storage_recovery_dialog.dart';
 
 final _log = Logger('retcon.desktop');
 final services = GetIt.instance;
@@ -20,6 +22,12 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   initLogging();
   services.registerLazySingleton(CoreClient.new);
+  services.registerLazySingleton<ProjectController>(
+    () => ProjectController.fromCore(services<CoreClient>()),
+  );
+  services.registerLazySingleton<ShellState>(
+    () => ShellState(services<CoreClient>()),
+  );
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
@@ -46,29 +54,45 @@ class RetconApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final client = core ?? CoreClient();
+    final projectController = services.isRegistered<ProjectController>()
+        ? services<ProjectController>()
+        : null;
+    final shellState = services.isRegistered<ShellState>()
+        ? services<ShellState>()
+        : null;
     final router = GoRouter(
       routes: [
         GoRoute(
           path: '/',
-          builder: (context, state) => DesktopShell(core: client),
+          builder: (context, state) => DesktopShell(
+            core: client,
+            projectController: projectController,
+          ),
         ),
       ],
     );
-    return ChangeNotifierProvider.value(
-      value: client,
-      child: MaterialApp.router(
-        title: 'Retcon',
-        debugShowCheckedModeBanner: false,
-        theme: buildLunaDarkTheme(),
-        routerConfig: router,
-        supportedLocales: const [Locale('en')],
-        localizationsDelegates: const [
-          GlobalMaterialLocalizations.delegate,
-          GlobalWidgetsLocalizations.delegate,
-          GlobalCupertinoLocalizations.delegate,
-        ],
-        scrollBehavior: const MaterialScrollBehavior().copyWith(
-          dragDevices: PointerDeviceKind.values.toSet(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: client),
+        if (shellState != null)
+          ChangeNotifierProvider<ShellState>.value(value: shellState),
+      ],
+      child: StorageRecoveryGate(
+        core: client,
+        child: MaterialApp.router(
+          title: 'Retcon',
+          debugShowCheckedModeBanner: false,
+          theme: buildLunaDarkTheme(),
+          routerConfig: router,
+          supportedLocales: const [Locale('en')],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          scrollBehavior: const MaterialScrollBehavior().copyWith(
+            dragDevices: PointerDeviceKind.values.toSet(),
+          ),
         ),
       ),
     );

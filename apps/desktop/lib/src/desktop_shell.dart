@@ -3,10 +3,14 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'core_client.dart';
+import 'projects/project_picker.dart';
+import 'projects/project_controller.dart';
+import 'provider_doctor_dialog.dart';
 import 'window_controller.dart';
 import 'workspace.dart';
 
@@ -14,6 +18,7 @@ enum ShellCommand {
   newProject('New project', Icons.create_new_folder),
   openProject('Open project', Icons.folder_open),
   commandPalette('Command palette', Icons.search),
+  approvals('Approval center', Icons.verified_user),
   terminal('Open terminal', Icons.terminal),
   browser('Open browser', Icons.language),
   taskBoard('Task board', Icons.view_kanban),
@@ -25,6 +30,108 @@ enum ShellCommand {
   const ShellCommand(this.label, this.icon);
   final String label;
   final IconData icon;
+}
+
+/// Live provider and counter metadata sourced from Retcon Core.
+class ShellState extends ChangeNotifier {
+  ShellState(this.core) {
+    _coreListener = () {
+      if (core.status == CoreConnectionStatus.connected) {
+        unawaited(refresh());
+      } else {
+        provider = 'Core offline';
+        notifyListeners();
+      }
+    };
+    core.addListener(_coreListener);
+    _events = core.events.listen(_onEvent);
+    _poll = Timer.periodic(const Duration(seconds: 30), (_) => refresh());
+    unawaited(refresh());
+  }
+
+  final CoreClient core;
+  late final VoidCallback _coreListener;
+  StreamSubscription<Map<String, dynamic>>? _events;
+  Timer? _poll;
+
+  String provider = 'Provider offline';
+  int approvalCount = 0;
+  int errorCount = 0;
+
+  Future<void> refresh() async {
+    if (core.status != CoreConnectionStatus.connected) {
+      provider = 'Core offline';
+      notifyListeners();
+      return;
+    }
+    try {
+      final doctor = await core.request('provider.doctor');
+      provider = _providerLabel(doctor);
+      errorCount = _failureCount(doctor['checks'] as List<dynamic>? ?? const []);
+
+      final approvals = await core.request(
+        'approval.list',
+        params: const {'status': 'pending', 'limit': 1},
+      );
+      approvalCount =
+          (approvals['pendingCount'] as num?)?.toInt() ??
+          (approvals['approvals'] as List<dynamic>? ?? const []).length;
+    } on Object {
+      // Keep the last known values when core is briefly unavailable.
+    }
+    notifyListeners();
+  }
+
+  void _onEvent(Map<String, dynamic> event) {
+    final envelope = event['event'] as Map<String, dynamic>? ?? event;
+    final name =
+        envelope['kind']?.toString() ??
+        event['name']?.toString() ??
+        event['type']?.toString();
+    if (name == 'approval.requested' ||
+        name == 'approval.decided' ||
+        name == 'permission.rule_created' ||
+        name == 'permission.rule_deleted') {
+      unawaited(refresh());
+    }
+  }
+
+  static String _providerLabel(Map<String, dynamic> doctor) {
+    final name = doctor['provider_name']?.toString() ?? 'Provider';
+    final status = doctor['overall_status']?.toString() ?? 'failure';
+    final version = doctor['version']?.toString();
+    final suffix = switch (status) {
+      'ready' => 'ready',
+      'warning' => 'needs attention',
+      _ => 'offline',
+    };
+    if (version != null && version.isNotEmpty) {
+      return '$name $version ($suffix)';
+    }
+    return '$name ($suffix)';
+  }
+
+  static int _failureCount(List<dynamic> checks) =>
+      checks.where((check) {
+        if (check is! Map) return false;
+        return check['status']?.toString() == 'failure';
+      }).length;
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    _events?.cancel();
+    core.removeListener(_coreListener);
+    super.dispose();
+  }
+}
+
+ShellState? shellStateOf(BuildContext context) {
+  try {
+    return context.watch<ShellState>();
+  } on ProviderNotFoundException {
+    return null;
+  }
 }
 
 class _OpenPaletteIntent extends Intent {
@@ -40,6 +147,7 @@ class DesktopShell extends StatefulWidget {
   const DesktopShell({
     super.key,
     this.core,
+    this.projectController,
     this.windowController = const NativeWindowController(),
     this.projectTitle = 'No project open',
     this.branch = '—',
@@ -48,6 +156,7 @@ class DesktopShell extends StatefulWidget {
   });
 
   final CoreClient? core;
+  final ProjectController? projectController;
   final RetconWindowController windowController;
   final String projectTitle;
   final String branch;
@@ -63,15 +172,56 @@ class _DesktopShellState extends State<DesktopShell> {
   late final WorkspaceController _workspace = WorkspaceController();
 
   @override
+  void initState() {
+    super.initState();
+    final core = widget.core;
+    if (core != null) {
+      _workspace.bindRpcStore(
+        core,
+        projectId: widget.projectController?.current?.id,
+      );
+    }
+    widget.projectController?.addListener(_handleProjectUpdate);
+  }
+
+  @override
+  void didUpdateWidget(covariant DesktopShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.projectController != widget.projectController) {
+      oldWidget.projectController?.removeListener(_handleProjectUpdate);
+      widget.projectController?.addListener(_handleProjectUpdate);
+    }
+  }
+
+  @override
   void dispose() {
+    widget.projectController?.removeListener(_handleProjectUpdate);
     _workspace.dispose();
     super.dispose();
   }
+
+  void _handleProjectUpdate() {
+    final core = widget.core;
+    if (core != null) {
+      _workspace.bindRpcStore(
+        core,
+        projectId: widget.projectController?.current?.id,
+      );
+    }
+    if (mounted) setState(() {});
+  }
+
+  String get _projectTitle =>
+      widget.projectController?.projectTitle ?? widget.projectTitle;
+
+  String get _branch => widget.projectController?.branch ?? widget.branch;
 
   Future<void> _run(ShellCommand command) async {
     widget.onCommand?.call(command);
     setState(() => _startMenuOpen = false);
     switch (command) {
+      case ShellCommand.approvals:
+        await _workspace.openPanel(PanelDefinition.approvals);
       case ShellCommand.terminal:
         await _workspace.float(PanelDefinition.terminal, const Size(900, 600));
       case ShellCommand.browser:
@@ -80,14 +230,165 @@ class _DesktopShellState extends State<DesktopShell> {
         await _showCommandPalette();
       case ShellCommand.settings:
         await _showProviderDoctor();
+      case ShellCommand.diagnostics:
+        await _showDiagnosticsDialog();
+      case ShellCommand.taskBoard:
+        await _showTaskBoardStub();
       case ShellCommand.fullScreen:
         await widget.windowController.toggleFullScreen();
       case ShellCommand.exit:
         await widget.windowController.close();
-      default:
-        break;
+      case ShellCommand.openProject:
+        if (widget.projectController != null) {
+          await showProjectPickerFlow(
+            context,
+            controller: widget.projectController!,
+          );
+        } else {
+          await _showOpenProjectFallback();
+        }
+      case ShellCommand.newProject:
+        if (widget.projectController != null) {
+          await showProjectPickerFlow(
+            context,
+            controller: widget.projectController!,
+            cloneFirst: true,
+          );
+        } else {
+          await _showNewProjectStub();
+        }
     }
   }
+
+  Future<void> _showNewProjectStub() => showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('New project'),
+      content: const Text(
+        'Project creation flows arrive in Phase 9. Use Open project to register an existing folder for now.',
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> _showOpenProjectFallback() async {
+    final controller = TextEditingController();
+    final path = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Open project'),
+        content: RetconTextField(
+          label: 'Project folder',
+          hint: r'C:\projects\my-app',
+          controller: controller,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
+    if (path == null || path.isEmpty || widget.core == null) return;
+    try {
+      await widget.core!.request('project.open', params: {'path': path});
+    } catch (error) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Could not open project'),
+          content: Text(error.toString()),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  Future<void> _showDiagnosticsDialog() async {
+    Map<String, dynamic>? report;
+    Object? error;
+    final core = widget.core;
+    if (core != null && core.status == CoreConnectionStatus.connected) {
+      try {
+        report = await core.storageStatus();
+      } catch (caught) {
+        error = caught;
+      }
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Diagnostics'),
+        content: SizedBox(
+          width: 620,
+          child: error != null
+              ? Text('Could not load diagnostics: $error')
+              : report == null
+              ? const Text('Retcon Core is unavailable.')
+              : SingleChildScrollView(
+                  child: SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(report),
+                  ),
+                ),
+        ),
+        actions: [
+          if (report != null)
+            TextButton(
+              onPressed: () => Clipboard.setData(
+                ClipboardData(
+                  text: const JsonEncoder.withIndent('  ').convert(report),
+                ),
+              ),
+              child: const Text('Copy'),
+            ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showTaskBoardStub() => showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Task board'),
+      content: const SizedBox(
+        width: 420,
+        height: 220,
+        child: Center(
+          child: Text(
+            'Task board UI arrives in a later phase. Sessions and approvals will appear here.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _showCommandPalette() => showDialog<void>(
     context: context,
@@ -96,11 +397,18 @@ class _DesktopShellState extends State<DesktopShell> {
 
   Future<void> _showProviderDoctor() => showDialog<void>(
     context: context,
-    builder: (context) => _ProviderDoctorDialog(core: widget.core),
+    builder: (context) => ProviderDoctorDialog(core: widget.core),
   );
 
   @override
   Widget build(BuildContext context) {
+    final shell = shellStateOf(context);
+    final projectTitle = _projectTitle;
+    final branch = _branch;
+    final provider = shell?.provider ?? widget.provider;
+    final approvalCount = shell?.approvalCount ?? 0;
+    final errorCount = shell?.errorCount ?? 0;
+
     return Shortcuts(
       shortcuts: const {
         SingleActivator(LogicalKeyboardKey.keyP, control: true, shift: true):
@@ -131,18 +439,28 @@ class _DesktopShellState extends State<DesktopShell> {
                   children: [
                     _TitleBar(
                       core: widget.core,
-                      projectTitle: widget.projectTitle,
-                      branch: widget.branch,
-                      provider: widget.provider,
+                      projectTitle: projectTitle,
+                      branch: branch,
+                      provider: provider,
                       windowController: widget.windowController,
                     ),
                     _ApplicationMenu(onCommand: _run),
-                    Expanded(child: _Workspace(controller: _workspace)),
+                    Expanded(
+                      child: _Workspace(
+                        controller: _workspace,
+                        core: widget.core,
+                        workingDirectory:
+                            widget.projectController?.current?.metadata.repositoryPath,
+                      ),
+                    ),
                     _Taskbar(
                       core: widget.core,
+                      approvalCount: approvalCount,
+                      errorCount: errorCount,
                       startMenuOpen: _startMenuOpen,
                       onStartPressed: () =>
                           setState(() => _startMenuOpen = !_startMenuOpen),
+                      onApprovalsPressed: () => unawaited(_run(ShellCommand.approvals)),
                     ),
                   ],
                 ),
@@ -156,144 +474,6 @@ class _DesktopShellState extends State<DesktopShell> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _ProviderDoctorDialog extends StatefulWidget {
-  const _ProviderDoctorDialog({required this.core});
-  final CoreClient? core;
-  @override
-  State<_ProviderDoctorDialog> createState() => _ProviderDoctorDialogState();
-}
-
-class _ProviderDoctorDialogState extends State<_ProviderDoctorDialog> {
-  Map<String, dynamic>? _report;
-  Object? _error;
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_refresh());
-  }
-
-  Future<void> _refresh() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final result =
-          await widget.core?.request('provider.doctor') ?? <String, dynamic>{};
-      if (mounted) setState(() => _report = result);
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Provider Doctor'),
-    content: SizedBox(
-      width: 620,
-      child: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-          ? Text('Could not run the provider checks: $_error')
-          : _report == null || _report!.isEmpty
-          ? const Text('Retcon Core is unavailable. Start the core and retry.')
-          : _DoctorReport(report: _report!),
-    ),
-    actions: [
-      if (_report != null && _report!.isNotEmpty)
-        TextButton(
-          onPressed: () => Clipboard.setData(
-            ClipboardData(
-              text: const JsonEncoder.withIndent('  ').convert(_report),
-            ),
-          ),
-          child: const Text('Copy diagnostics'),
-        ),
-      TextButton(
-        onPressed: _loading ? null : _refresh,
-        child: const Text('Retry checks'),
-      ),
-      FilledButton(
-        onPressed: () => Navigator.of(context).pop(),
-        child: const Text('Close'),
-      ),
-    ],
-  );
-}
-
-class _DoctorReport extends StatelessWidget {
-  const _DoctorReport({required this.report});
-  final Map<String, dynamic> report;
-  @override
-  Widget build(BuildContext context) {
-    final checks = (report['checks'] as List? ?? const []).cast<Map>();
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '${report['providerName'] ?? 'Provider'} ${report['version'] ?? 'not installed'}',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 12),
-          for (final raw in checks)
-            _DoctorCheck(check: raw.cast<String, dynamic>()),
-        ],
-      ),
-    );
-  }
-}
-
-class _DoctorCheck extends StatelessWidget {
-  const _DoctorCheck({required this.check});
-  final Map<String, dynamic> check;
-  @override
-  Widget build(BuildContext context) {
-    final status = check['status']?.toString() ?? 'warning';
-    final color = switch (status) {
-      'ready' => Colors.greenAccent,
-      'failure' => Colors.redAccent,
-      _ => Colors.amberAccent,
-    };
-    final icon = switch (status) {
-      'ready' => Icons.check_circle,
-      'failure' => Icons.error,
-      _ => Icons.warning,
-    };
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: color),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  check['label']?.toString() ?? 'Check',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-                Text(check['detail']?.toString() ?? ''),
-                if (check['suggested_action'] != null)
-                  Text(
-                    check['suggested_action'].toString(),
-                    style: TextStyle(color: color),
-                  ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -435,7 +615,7 @@ class _ApplicationMenu extends StatelessWidget {
       ]),
       _menu('Edit', [ShellCommand.commandPalette]),
       _menu('View', [ShellCommand.fullScreen, ShellCommand.taskBoard]),
-      _menu('Agents', [ShellCommand.commandPalette]),
+      _menu('Agents', [ShellCommand.approvals, ShellCommand.commandPalette]),
       _menu('Git', [ShellCommand.commandPalette]),
       _menu('Browser', [ShellCommand.browser]),
       _menu('Tools', [
@@ -462,8 +642,14 @@ class _ApplicationMenu extends StatelessWidget {
 }
 
 class _Workspace extends StatelessWidget {
-  const _Workspace({required this.controller});
+  const _Workspace({
+    required this.controller,
+    this.core,
+    this.workingDirectory,
+  });
   final WorkspaceController controller;
+  final CoreClient? core;
+  final String? workingDirectory;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -474,7 +660,13 @@ class _Workspace extends StatelessWidget {
           alignment: Alignment.centerRight,
           child: Wrap(
             spacing: RetconSpacing.xs,
+            runSpacing: RetconSpacing.xs,
             children: [
+              for (final preset in LayoutPreset.values)
+                TextButton(
+                  onPressed: () => controller.applyPreset(preset),
+                  child: Text(preset.label),
+                ),
               TextButton.icon(
                 onPressed: () => controller.reopenLast(),
                 icon: const Icon(Icons.undo),
@@ -489,7 +681,13 @@ class _Workspace extends StatelessWidget {
           ),
         ),
         const SizedBox(height: RetconSpacing.xs),
-        Expanded(child: DockingWorkspace(controller: controller)),
+        Expanded(
+          child: DockingWorkspace(
+            controller: controller,
+            core: core,
+            workingDirectory: workingDirectory,
+          ),
+        ),
       ],
     ),
   );
@@ -498,12 +696,18 @@ class _Workspace extends StatelessWidget {
 class _Taskbar extends StatelessWidget {
   const _Taskbar({
     required this.core,
+    required this.approvalCount,
+    required this.errorCount,
     required this.startMenuOpen,
     required this.onStartPressed,
+    required this.onApprovalsPressed,
   });
   final CoreClient? core;
+  final int approvalCount;
+  final int errorCount;
   final bool startMenuOpen;
   final VoidCallback onStartPressed;
+  final VoidCallback onApprovalsPressed;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -529,9 +733,22 @@ class _Taskbar extends StatelessWidget {
           const RetconBadge(label: 'Workspace'),
           const Spacer(),
           if (constraints.maxWidth >= 900) ...[
-            const RetconBadge(label: '0 approvals'),
+            InkWell(
+              onTap: onApprovalsPressed,
+              child: RetconBadge(
+                label: '$approvalCount approvals',
+                status: approvalCount == 0
+                    ? RetconStatus.neutral
+                    : RetconStatus.warning,
+              ),
+            ),
             const SizedBox(width: RetconSpacing.xs),
-            const RetconBadge(label: '0 errors'),
+            RetconBadge(
+              label: '$errorCount errors',
+              status: errorCount == 0
+                  ? RetconStatus.success
+                  : RetconStatus.error,
+            ),
             const SizedBox(width: RetconSpacing.sm),
           ],
           _CoreStatus(core: core),

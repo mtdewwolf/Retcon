@@ -1,0 +1,28 @@
+[package]
+name = "retcon-secrets"
+description = "Secret detection, redaction, and pre-commit scanning for Retcon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "retcon_secrets"
+path = "src/lib.rs"
+
+[[bin]]
+name = "retcon-secrets"
+path = "src/bin/scan.rs"
+
+[dependencies]
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

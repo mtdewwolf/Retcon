@@ -11,10 +11,13 @@ use tokio::sync::watch;
 use crate::CoreError;
 use crate::event::EventBus;
 use crate::jobs::JobSupervisor;
+use crate::session_rpc::SessionRegistry;
 use crate::spikes::agent::AgentRegistry;
 use crate::spikes::browser::BrowserHandle;
 use crate::spikes::terminal::TerminalRegistry;
-use retcon_storage::{ArtifactStore, Database, RecoveryReport};
+use retcon_filesystem::FilesystemHandle;
+use retcon_permissions::ApprovalEngine;
+use retcon_storage::{RecoveryReport, Storage};
 
 #[derive(Clone)]
 pub struct CoreState {
@@ -28,21 +31,26 @@ struct Inner {
     jobs: JobSupervisor,
     terminals: TerminalRegistry,
     agents: AgentRegistry,
+    sessions: SessionRegistry,
     browser: BrowserHandle,
-    storage: Database,
-    artifacts: ArtifactStore,
+    storage: Storage,
+    filesystem: FilesystemHandle,
     recovery: RecoveryReport,
     schema_version: Option<u32>,
+    permissions: ApprovalEngine,
 }
 
 impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
         let (shutdown, _) = watch::channel(false);
-        let storage = Database::open(data_dir.join("retcon.db"))?;
-        let schema_version = storage.schema_version().ok();
-        let recovery = storage.recover_interrupted()?;
-        let artifacts = ArtifactStore::open(data_dir)?;
-        let events = EventBus::open(storage.clone())?;
+        let storage = Storage::open(data_dir)?;
+        let schema_version = storage.database().schema_version().ok();
+        let recovery = storage.startup_recovery().clone();
+        let permissions = ApprovalEngine::new(
+            storage.database().clone(),
+            retcon_permissions::dev_bypass_enabled(),
+        );
+        let events = EventBus::open(storage.database().clone())?;
         if recovery.changed_state() {
             events.emit(
                 "system.recovery",
@@ -54,14 +62,16 @@ impl CoreState {
                 started_at: Instant::now(),
                 shutdown,
                 events,
-                jobs: JobSupervisor::with_storage(storage.clone()),
+                jobs: JobSupervisor::with_storage(storage.database().clone()),
                 terminals: TerminalRegistry::default(),
                 agents: AgentRegistry::default(),
+                sessions: SessionRegistry::default(),
                 browser: BrowserHandle::default(),
                 storage,
-                artifacts,
+                filesystem: FilesystemHandle::default(),
                 recovery,
                 schema_version,
+                permissions,
             }),
         })
     }
@@ -91,23 +101,31 @@ impl CoreState {
     pub fn agents(&self) -> &AgentRegistry {
         &self.inner.agents
     }
+    pub fn sessions(&self) -> &SessionRegistry {
+        &self.inner.sessions
+    }
     pub fn browser(&self) -> &BrowserHandle {
         &self.inner.browser
     }
-    pub fn storage(&self) -> &Database {
+    pub fn storage(&self) -> &Storage {
         &self.inner.storage
     }
-    pub fn artifacts(&self) -> &ArtifactStore {
-        &self.inner.artifacts
+    pub fn filesystem(&self) -> &FilesystemHandle {
+        &self.inner.filesystem
     }
     pub fn recovery(&self) -> &RecoveryReport {
         &self.inner.recovery
+    }
+    pub fn permissions(&self) -> &ApprovalEngine {
+        &self.inner.permissions
     }
 
     pub async fn cleanup_children(&self) {
         self.inner.terminals.shutdown();
         self.inner.agents.shutdown().await;
+        self.inner.sessions.shutdown().await;
         self.inner.browser.shutdown().await;
+        self.inner.filesystem.shutdown();
     }
 
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
@@ -139,11 +157,18 @@ impl CoreState {
             "event_replay": true,
             "job_supervisor": true,
             "durable_storage": true,
+            "layout_persistence": true,
+            "storage_recovery": true,
+            "session_engine": true,
+            "provider_framework": true,
+            "filesystem": true,
+            "approval_engine": true,
+            "checkpoints": true,
         })
     }
 
     pub async fn diagnostics(&self) -> Value {
-        let artifact_bytes = self.inner.artifacts.disk_usage_async().await.ok();
+        let artifact_bytes = self.inner.storage.artifacts().disk_usage_async().await.ok();
         json!({
             "process_id": std::process::id(),
             "os": std::env::consts::OS,
@@ -151,7 +176,7 @@ impl CoreState {
             "uptime_ms": self.uptime().as_millis(),
             "version": env!("CARGO_PKG_VERSION"),
             "storage": {
-                "database": self.inner.storage.path(),
+                "database": self.inner.storage.database().path(),
                 "artifact_bytes": artifact_bytes,
                 "recovery": self.inner.recovery,
             },

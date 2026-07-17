@@ -8,6 +8,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+retcon-git.workspace = true
+retcon-storage.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

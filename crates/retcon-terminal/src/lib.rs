@@ -3,6 +3,10 @@
 //! Phase 2 spike scope: spawn a shell in a ConPTY, stream output, accept
 //! input, resize, and kill. Structured command tracking lands in Phase 14.
 
+mod command_tracker;
+
+pub use command_tracker::CommandLineTracker;
+
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Mutex;

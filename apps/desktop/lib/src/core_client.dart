@@ -5,6 +5,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
 
+import 'generated/protocol_v1.dart';
+import 'transport.dart';
+
 final _log = Logger('retcon.desktop.core');
 
 enum CoreConnectionStatus { disconnected, connecting, connected, reconnecting }
@@ -17,8 +20,7 @@ class CoreRpcException implements Exception {
   String toString() => message;
 }
 
-/// Temporary typed-enough client for the Phase 2 newline-delimited JSON spike.
-/// The generated Phase 4 protocol replaces this file.
+/// Local protocol v1 client for retcon-core (generated wire types + transport).
 class CoreClient extends ChangeNotifier {
   CoreClient({Directory? dataDirectory})
     : dataDirectory = dataDirectory ?? _defaultDataDirectory();
@@ -26,7 +28,7 @@ class CoreClient extends ChangeNotifier {
   final Directory dataDirectory;
   final _events = StreamController<Map<String, dynamic>>.broadcast();
   final _pending = <int, Completer<Map<String, dynamic>>>{};
-  Socket? _socket;
+  ProtocolConnection? _connection;
   StreamSubscription<String>? _lines;
   Timer? _heartbeat;
   bool _closing = false;
@@ -34,8 +36,10 @@ class CoreClient extends ChangeNotifier {
   int _nextId = 0;
   int _generation = 0;
   CoreConnectionStatus _status = CoreConnectionStatus.disconnected;
+  Object? _lastConnectionError;
 
   CoreConnectionStatus get status => _status;
+  Object? get lastConnectionError => _lastConnectionError;
   Stream<Map<String, dynamic>> get events => _events.stream;
 
   Future<void> connect({bool launchIfNeeded = true}) async {
@@ -58,50 +62,68 @@ class CoreClient extends ChangeNotifier {
       if (discovery == null) {
         throw CoreRpcException('Retcon Core is not running.');
       }
-      final address = (discovery['address'] as String).split(':');
-      final socket = await Socket.connect(
-        address.first,
-        int.parse(address.last),
-        timeout: const Duration(seconds: 3),
+      final connection = await openTransport(discovery);
+      await connection.writeLine(jsonEncode({'auth': discovery.token}));
+      await connection.writeLine(
+        jsonEncode(
+          const ClientHello(
+            clientVersion: '0.1.0',
+            features: ['ping', 'events.replay', 'request.cancel'],
+          ).toJson(),
+        ),
       );
-      _socket = socket;
-      socket.writeln(jsonEncode({'auth': discovery['token']}));
-      _lines = socket
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(
-            _handleLine,
-            onError: _handleDisconnect,
-            onDone: _handleDisconnect,
-          );
+      final helloLine = await connection.lines.first;
+      final hello = jsonDecode(helloLine) as Map<String, dynamic>;
+      if (hello['kind'] != 'server.hello') {
+        throw CoreRpcException('Retcon Core sent an invalid hello response.');
+      }
+      _connection = connection;
+      _lines = connection.lines.listen(
+        _handleLine,
+        onError: _handleDisconnect,
+        onDone: _handleDisconnect,
+      );
       _generation++;
       _setStatus(CoreConnectionStatus.connected);
       _heartbeat?.cancel();
       _heartbeat = Timer.periodic(const Duration(seconds: 10), (_) {
+        unawaited(
+          connection
+              .writeLine(jsonEncode(const PingFrame().toJson()))
+              .catchError((Object _) {}),
+        );
         request(
           'core.health',
           timeout: const Duration(seconds: 3),
         ).catchError((Object error) => <String, dynamic>{});
       });
       await request('core.health');
+      _lastConnectionError = null;
     } catch (error) {
+      _lastConnectionError = error;
       _setStatus(CoreConnectionStatus.disconnected);
       rethrow;
     }
   }
+
+  Future<Map<String, dynamic>> storageStatus() => request('storage.status');
+
+  Future<Map<String, dynamic>> storageRecover(String action) =>
+      request('storage.recover', params: {'action': action});
 
   Future<Map<String, dynamic>> request(
     String method, {
     Map<String, dynamic> params = const {},
     Duration timeout = const Duration(seconds: 30),
   }) async {
-    if (_socket == null) throw CoreRpcException('Retcon Core is disconnected.');
+    if (_connection == null) {
+      throw CoreRpcException('Retcon Core is disconnected.');
+    }
     final id = ++_nextId;
     final completer = Completer<Map<String, dynamic>>();
     _pending[id] = completer;
-    _socket!.writeln(
-      jsonEncode({'id': id, 'method': method, 'params': params}),
+    await _connection!.writeLine(
+      jsonEncode(RpcRequest(id: id, method: method, params: params).toJson()),
     );
     try {
       return await completer.future.timeout(timeout);
@@ -112,8 +134,15 @@ class CoreClient extends ChangeNotifier {
     }
   }
 
+  Future<void> cancelRequest(int id) async {
+    await _connection?.writeLine(
+      jsonEncode(CancelFrame(id).toJson()),
+    );
+  }
+
   void _handleLine(String line) {
     final value = jsonDecode(line) as Map<String, dynamic>;
+    if (value['kind'] == 'pong') return;
     final event = value['event'];
     if (event is Map<String, dynamic>) {
       _events.add(event);
@@ -140,7 +169,7 @@ class CoreClient extends ChangeNotifier {
   void _handleDisconnect([Object? error]) {
     if (_closing || _reconnectScheduled) return;
     _log.warning('core connection closed', error);
-    _socket = null;
+    _connection = null;
     for (final pending in _pending.values) {
       if (!pending.isCompleted) {
         pending.completeError(CoreRpcException('Core connection closed.'));
@@ -162,20 +191,21 @@ class CoreClient extends ChangeNotifier {
     });
   }
 
-  Future<Map<String, dynamic>?> _readDiscovery() async {
+  Future<Discovery?> _readDiscovery() async {
     final file = File(
       '${dataDirectory.path}${Platform.pathSeparator}core.json',
     );
     if (!await file.exists()) return null;
     try {
-      return (jsonDecode(await file.readAsString()) as Map)
-          .cast<String, dynamic>();
+      return Discovery.fromJson(
+        (jsonDecode(await file.readAsString()) as Map).cast<String, dynamic>(),
+      );
     } catch (_) {
       return null;
     }
   }
 
-  Future<Map<String, dynamic>?> _waitForDiscovery() async {
+  Future<Discovery?> _waitForDiscovery() async {
     for (var attempt = 0; attempt < 50; attempt++) {
       final value = await _readDiscovery();
       if (value != null) return value;
@@ -220,7 +250,7 @@ class CoreClient extends ChangeNotifier {
     _closing = true;
     _heartbeat?.cancel();
     _lines?.cancel();
-    _socket?.destroy();
+    unawaited(_connection?.close());
     _events.close();
     super.dispose();
   }

@@ -4,11 +4,11 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fs2::FileExt;
+use retcon_platform::LocalEndpoint;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ impl CoreConfig {
 
 pub struct CoreRuntime {
     config: CoreConfig,
-    address: SocketAddr,
+    endpoint: LocalEndpoint,
     state: CoreState,
     server_task: JoinHandle<()>,
     instance_lock: InstanceLock,
@@ -48,26 +48,26 @@ impl CoreRuntime {
 
         let state = CoreState::new(&config.data_dir)?;
         let token = Uuid::new_v4().to_string();
-        let server = Server::bind(state.clone(), token.clone()).await?;
-        let address = server.address()?;
-        write_discovery(&config.data_dir, address, token)?;
+        let server = Server::bind(state.clone(), token.clone(), &config.data_dir).await?;
+        let endpoint = server.endpoint().clone();
+        write_discovery(&config.data_dir, &endpoint, token)?;
         let server_task = tokio::spawn(server.run());
         state.emit(
             "system.ready",
-            serde_json::json!({"address": address, "version": env!("CARGO_PKG_VERSION")}),
+            serde_json::json!({"transport": endpoint.kind, "path": endpoint.path_string(), "version": env!("CARGO_PKG_VERSION")}),
         );
 
         Ok(Self {
             config,
-            address,
+            endpoint,
             state,
             server_task,
             instance_lock,
         })
     }
 
-    pub fn address(&self) -> SocketAddr {
-        self.address
+    pub fn endpoint(&self) -> &LocalEndpoint {
+        &self.endpoint
     }
 
     pub async fn wait_for_shutdown_signal(&self) -> Result<(), CoreError> {
@@ -97,13 +97,14 @@ impl CoreRuntime {
         self.state.request_shutdown();
         self.state.jobs().shutdown();
         self.state.cleanup_children().await;
-        if let Err(error) = self.state.storage().maintain() {
+        if let Err(error) = self.state.storage().database().maintain() {
             tracing::warn!(%error, "database maintenance failed during shutdown");
         }
         match self
             .state
+            .storage()
             .artifacts()
-            .cleanup_referenced(self.state.storage(), Duration::from_secs(30 * 24 * 60 * 60))
+            .cleanup_referenced(self.state.storage().database(), Duration::from_secs(30 * 24 * 60 * 60))
         {
             Ok(report) if report.removed_files > 0 => tracing::info!(
                 removed_files = report.removed_files,
@@ -122,6 +123,7 @@ impl CoreRuntime {
             let _ = self.server_task.await;
         }
 
+        remove_file_if_exists(&self.config.data_dir.join("core.sock"))?;
         remove_file_if_exists(&self.config.data_dir.join("core.json"))?;
         self.instance_lock.release()?;
         tracing::info!("Retcon core stopped cleanly");
@@ -162,7 +164,8 @@ impl InstanceLock {
 
 fn remove_stale_discovery(data_dir: &Path) -> Result<(), CoreError> {
     remove_file_if_exists(&data_dir.join("core.json.tmp"))?;
-    remove_file_if_exists(&data_dir.join("core.json"))
+    remove_file_if_exists(&data_dir.join("core.json"))?;
+    remove_file_if_exists(&data_dir.join("core.sock"))
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<(), CoreError> {
@@ -173,9 +176,17 @@ fn remove_file_if_exists(path: &Path) -> Result<(), CoreError> {
     }
 }
 
-fn write_discovery(data_dir: &Path, address: SocketAddr, token: String) -> Result<(), CoreError> {
+fn write_discovery(
+    data_dir: &Path,
+    endpoint: &LocalEndpoint,
+    token: String,
+) -> Result<(), CoreError> {
     let discovery = Discovery {
-        address: address.to_string(),
+        transport: match endpoint.kind {
+            retcon_platform::TransportKind::NamedPipe => "named_pipe".into(),
+            retcon_platform::TransportKind::UnixSocket => "unix_socket".into(),
+        },
+        path: endpoint.path_string(),
         token,
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -201,12 +212,56 @@ fn write_discovery(data_dir: &Path, address: SocketAddr, token: String) -> Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use retcon_storage::{NewProject, NewSession, NewTask};
+    use retcon_platform::TransportStream;
+    use retcon_protocol::VERSION;
+    use retcon_storage::{NewLayout, NewMessage, NewProject, NewSession, NewTask, NewTurn};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::TcpStream;
+
+    async fn handshake(
+        endpoint: &retcon_platform::LocalEndpoint,
+        token: &str,
+    ) -> (
+        BufReader<retcon_platform::TransportReadHalf>,
+        retcon_platform::TransportWriteHalf,
+    ) {
+        let stream = TransportStream::connect(endpoint).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(format!("{{\"auth\":\"{token}\"}}\n").as_bytes())
+            .await
+            .unwrap();
+        writer
+            .write_all(
+                format!(
+                    "{{\"kind\":\"client.hello\",\"protocolVersion\":{VERSION},\"clientVersion\":\"test\",\"features\":[]}}\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(reader);
+        let mut hello = String::new();
+        reader.read_line(&mut hello).await.unwrap();
+        (reader, writer)
+    }
+
+    async fn read_rpc_response(
+        lines: &mut tokio::io::Lines<BufReader<retcon_platform::TransportReadHalf>>,
+    ) -> serde_json::Value {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(&line).expect("json line");
+            if value.get("id").is_some() {
+                return value;
+            }
+        }
+        panic!("transport closed before RPC response");
+    }
 
     #[tokio::test]
     async fn lifecycle_writes_and_removes_discovery() {
@@ -219,7 +274,7 @@ mod tests {
         let discovery: Discovery =
             serde_json::from_slice(&std::fs::read(directory.path().join("core.json")).unwrap())
                 .unwrap();
-        assert_eq!(discovery.address, runtime.address().to_string());
+        assert_eq!(discovery.path, runtime.endpoint().path_string());
         assert!(directory.path().join("retcon.db").is_file());
 
         runtime.shutdown().await.unwrap();
@@ -253,24 +308,21 @@ mod tests {
         let discovery: Discovery =
             serde_json::from_slice(&std::fs::read(directory.path().join("core.json")).unwrap())
                 .unwrap();
-        let stream = TcpStream::connect(runtime.address()).await.unwrap();
-        let (reader, mut writer) = stream.into_split();
+        let endpoint = runtime.endpoint().clone();
+        let (reader, mut writer) = handshake(&endpoint, &discovery.token).await;
         writer
-            .write_all(
-                format!(
-                    "{{\"auth\":\"{}\"}}\n{{\"id\":1,\"method\":\"core.health\"}}\n{{\"id\":2,\"method\":\"core.shutdown\"}}\n",
-                    discovery.token
-                )
-                .as_bytes(),
-            )
+            .write_all(b"{\"id\":1,\"method\":\"core.health\",\"params\":{}}\n")
             .await
             .unwrap();
-
-        let mut lines = BufReader::new(reader).lines();
-        let health: serde_json::Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        let shutdown: serde_json::Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        writer.flush().await.unwrap();
+        let mut lines = reader.lines();
+        let health = read_rpc_response(&mut lines).await;
+        writer
+            .write_all(b"{\"id\":2,\"method\":\"core.shutdown\",\"params\":{}}\n")
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+        let shutdown = read_rpc_response(&mut lines).await;
         assert_eq!(health["result"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["schema_version"], 4);
@@ -289,6 +341,7 @@ mod tests {
         let project = first
             .state
             .storage()
+            .database()
             .projects()
             .create(&NewProject::new("Retcon"))
             .unwrap();
@@ -297,12 +350,49 @@ mod tests {
         let session = first
             .state
             .storage()
+            .database()
             .sessions()
             .create(&new_session)
             .unwrap();
+        let turn = first
+            .state
+            .storage()
+            .database()
+            .turns()
+            .create(&NewTurn::new(session.id, 1))
+            .unwrap();
+        let message = first
+            .state
+            .storage()
+            .database()
+            .messages()
+            .create(&NewMessage::new(
+                turn.id,
+                1,
+                "user",
+                serde_json::json!({"text":"persist me"}),
+            ))
+            .unwrap();
+        first
+            .state
+            .storage()
+            .database()
+            .layouts()
+            .upsert(&NewLayout::new(
+                "default",
+                "Default",
+                serde_json::json!({"version":1,"root":{"type":"tabs"}}),
+            ))
+            .unwrap();
         let mut new_task = NewTask::new("Durable task");
         new_task.session_id = Some(session.id);
-        let task = first.state.storage().tasks().create(&new_task).unwrap();
+        let task = first
+            .state
+            .storage()
+            .database()
+            .tasks()
+            .create(&new_task)
+            .unwrap();
         first.shutdown().await.unwrap();
 
         let second = CoreRuntime::start(CoreConfig::new(directory.path().to_owned()))
@@ -312,6 +402,7 @@ mod tests {
             second
                 .state
                 .storage()
+                .database()
                 .sessions()
                 .get(session.id)
                 .unwrap()
@@ -323,6 +414,7 @@ mod tests {
             second
                 .state
                 .storage()
+                .database()
                 .tasks()
                 .get(task.id)
                 .unwrap()
@@ -330,9 +422,46 @@ mod tests {
                 .status,
             "pending"
         );
+        assert_eq!(
+            second
+                .state
+                .storage()
+                .database()
+                .messages()
+                .get(message.id)
+                .unwrap(),
+            Some(message)
+        );
+        assert!(
+            second
+                .state
+                .storage()
+                .database()
+                .layouts()
+                .get("default")
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(second.state.recovery().interrupted_sessions, 1);
         assert_eq!(second.state.recovery().active_tasks, 1);
         second.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn offline_storage_reset_recovers_from_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("retcon.db"), b"not sqlite").unwrap();
+        let report = retcon_storage::Storage::recover_offline(
+            directory.path(),
+            retcon_storage::RecoverAction::Reset,
+            None,
+        )
+        .unwrap();
+        assert!(report.healthy);
+        let runtime = CoreRuntime::start(CoreConfig::new(directory.path().to_owned()))
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]

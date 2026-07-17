@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/src/workspace.dart';
 
@@ -33,6 +34,30 @@ void main() {
     final controller = WorkspaceController(store: _BrokenStore());
     await controller.restore();
     expect(controller.layout.root, isA<SplitGroup>());
+  });
+
+  test('layout presets produce distinct roots', () {
+    final presets = LayoutPreset.values.map((preset) => preset.layout().root);
+    expect(presets.toSet().length, LayoutPreset.values.length);
+  });
+
+  test('monitor recovery keeps floating panels inside the viewport', () async {
+    final store = _MemoryStore();
+    final controller = WorkspaceController(store: store);
+    await controller.float(
+      PanelDefinition.terminal,
+      const Size(800, 600),
+      detached: true,
+    );
+    var floating = controller.layout.floatingPanels.first;
+    await controller.moveFloating(floating, const Offset(900, 700));
+    floating = controller.layout.floatingPanels.first;
+    await controller.recoverMonitorLayout(const Size(800, 600));
+    final rect = store.value!.floatingPanels.first.rect;
+    expect(rect.right, lessThanOrEqualTo(800));
+    expect(rect.bottom, lessThanOrEqualTo(600));
+    expect(rect.left, greaterThanOrEqualTo(8));
+    expect(rect.top, greaterThanOrEqualTo(8));
   });
 }
 

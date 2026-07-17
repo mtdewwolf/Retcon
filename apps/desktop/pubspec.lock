@@ -212,6 +212,27 @@ packages:
       relative: true
     source: path
     version: "0.1.0"
+  retcon_diff_viewer:
+    dependency: "direct main"
+    description:
+      path: "../../packages/retcon-diff-viewer"
+      relative: true
+    source: path
+    version: "0.1.0"
+  retcon_file_viewer:
+    dependency: "direct main"
+    description:
+      path: "../../packages/retcon-file-viewer"
+      relative: true
+    source: path
+    version: "0.1.0"
+  retcon_terminal_view:
+    dependency: "direct main"
+    description:
+      path: "../../packages/retcon-terminal-view"
+      relative: true
+    source: path
+    version: "0.1.0"
   screen_retriever:
     dependency: transitive
     description:

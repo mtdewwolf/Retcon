@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/cli", "crates/*"]
+members = ["apps/cli", "crates/*", "tests/integration"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ retcon-worktrees = { path = "crates/retcon-worktrees" }
 retcon-filesystem = { path = "crates/retcon-filesystem" }
 retcon-index = { path = "crates/retcon-index" }
 retcon-permissions = { path = "crates/retcon-permissions" }
+retcon-secrets = { path = "crates/retcon-secrets" }
 retcon-checkpoints = { path = "crates/retcon-checkpoints" }
 retcon-browser = { path = "crates/retcon-browser" }
 retcon-diagnostics = { path = "crates/retcon-diagnostics" }

@@ -1,3 +1,10 @@
 //! OS integration: named pipes, credential vault, process management
-//!
-//! Placeholder crate created in Phase 1; implementation lands in later phases.
+
+pub mod error;
+pub mod transport;
+
+pub use error::TransportError;
+pub use transport::{
+    LocalEndpoint, TransportKind, TransportListener, TransportReadHalf, TransportStream,
+    TransportWriteHalf, default_endpoint,
+};

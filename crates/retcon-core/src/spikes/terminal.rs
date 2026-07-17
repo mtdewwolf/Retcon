@@ -1,13 +1,16 @@
 //! Terminal spike handlers: `terminal.*` methods over the PTY crate.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use retcon_terminal::PtySession;
+use retcon_storage::{NewCommand, NewTerminalSession};
+use retcon_terminal::{CommandLineTracker, PtySession};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::{fail, param_str, param_u64};
 use crate::error::ErrorCode;
@@ -16,12 +19,22 @@ use crate::state::CoreState;
 
 const OUTPUT_COALESCE_MS: u64 = 50;
 const OUTPUT_COALESCE_BYTES: usize = 4_096;
+const SCROLLBACK_FLUSH_BYTES: usize = 16_384;
+
+struct LiveTerminal {
+    pty: Arc<PtySession>,
+    session_id: Uuid,
+    shell: String,
+    cwd: String,
+    scrollback: Mutex<String>,
+    tracker: Mutex<CommandLineTracker>,
+}
 
 /// Live PTY sessions owned by the core.
 #[derive(Default)]
 pub struct TerminalRegistry {
     next: AtomicU64,
-    map: Mutex<HashMap<u64, Arc<PtySession>>>,
+    map: Mutex<HashMap<u64, LiveTerminal>>,
     shells: Mutex<Option<Vec<Value>>>,
 }
 
@@ -32,15 +45,10 @@ impl TerminalRegistry {
             .map
             .lock()
             .ok()
-            .map(|mut sessions| {
-                sessions
-                    .drain()
-                    .map(|(_, session)| session)
-                    .collect::<Vec<_>>()
-            })
+            .map(|mut sessions| sessions.drain().collect::<Vec<_>>())
             .unwrap_or_default();
-        for session in sessions {
-            session.kill();
+        for (_, session) in sessions {
+            session.pty.kill();
         }
     }
 }
@@ -62,16 +70,15 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             Response::ok(id, json!({"shells": shells}))
         }
         "terminal.start" => start(state, id, &params).await,
-        "terminal.input" => with_session(&state, id, &params, |s| {
-            let data = param_str(&params, "data").unwrap_or_default();
-            s.write(data.as_bytes())
-        }),
-        "terminal.resize" => with_session(&state, id, &params, |s| {
+        "terminal.input" => input_terminal(&state, id, &params),
+        "terminal.resize" => with_session(&state, id, &params, |terminal| {
             let cols = param_u64(&params, "cols").unwrap_or(80) as u16;
             let rows = param_u64(&params, "rows").unwrap_or(24) as u16;
-            s.resize(cols, rows)
+            terminal.pty.resize(cols, rows)
         }),
         "terminal.kill" => kill_terminal(&state, id, &params).await,
+        "terminal.list" => list_sessions(&state, id, &params),
+        "terminal.scrollback" => scrollback(&state, id, &params),
         other => fail(
             id,
             ErrorCode::NotFound,
@@ -110,9 +117,25 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     let shell = param_str(params, "shell")
         .unwrap_or("powershell.exe")
         .to_owned();
-    let cwd = param_str(params, "cwd").map(std::path::PathBuf::from);
+    let cwd = param_str(params, "cwd")
+        .map(str::to_owned)
+        .unwrap_or_else(|| ".".to_owned());
+    let cwd_path = param_str(params, "cwd").map(std::path::PathBuf::from);
     let cols = param_u64(params, "cols").unwrap_or(120) as u16;
     let rows = param_u64(params, "rows").unwrap_or(30) as u16;
+
+    let mut record = NewTerminalSession::new(&shell, &cwd);
+    record.status = "running".into();
+    let session_uuid = record.id;
+    let repos = state.storage().database();
+    if let Err(error) = repos.terminal_sessions().create(&record) {
+        return fail(
+            id,
+            ErrorCode::Internal,
+            "Retcon could not record the terminal session.",
+            error.to_string(),
+        );
+    }
 
     let terminal_id = state.terminals().next.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -130,6 +153,7 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
                         }
                         break;
                     };
+                    append_scrollback(&output_state, terminal_id, &chunk);
                     buffer.push_str(&chunk);
                     if buffer.len() >= OUTPUT_COALESCE_BYTES {
                         output_state.emit("terminal.output", json!({ "id": terminal_id, "data": buffer.clone() }));
@@ -146,11 +170,16 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
         }
     });
 
-    let session = match PtySession::spawn(&shell, cwd.as_deref(), cols, rows, move |chunk| {
+    let session = match PtySession::spawn(&shell, cwd_path.as_deref(), cols, rows, move |chunk| {
         let _ = tx.send(String::from_utf8_lossy(chunk).into_owned());
     }) {
         Ok(s) => Arc::new(s),
         Err(e) => {
+            let _ = state
+                .storage()
+                .database()
+                .terminal_sessions()
+                .finish(session_uuid, "failed");
             return fail(
                 id,
                 ErrorCode::Internal,
@@ -160,8 +189,16 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
         }
     };
 
+    let live = LiveTerminal {
+        pty: Arc::clone(&session),
+        session_id: session_uuid,
+        shell: shell.clone(),
+        cwd: cwd.clone(),
+        scrollback: Mutex::new(String::new()),
+        tracker: Mutex::new(CommandLineTracker::new()),
+    };
     if let Ok(mut map) = state.terminals().map.lock() {
-        map.insert(terminal_id, Arc::clone(&session));
+        map.insert(terminal_id, live);
     }
 
     let watch_state = state.clone();
@@ -171,18 +208,49 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
             if let Some(code) = session.try_exit_code() {
                 watch_state.emit(
                     "terminal.exit",
-                    json!({ "id": terminal_id, "exitCode": code }),
+                    json!({ "id": terminal_id, "exitCode": code, "sessionId": session_uuid.to_string() }),
                 );
-                if let Ok(mut map) = watch_state.terminals().map.lock() {
-                    map.remove(&terminal_id);
+                if let Ok(mut map) = watch_state.terminals().map.lock()
+                    && let Some(terminal) = map.remove(&terminal_id)
+                {
+                    flush_scrollback(&watch_state, &terminal);
+                    let _ = watch_state
+                        .storage()
+                        .database()
+                        .terminal_sessions()
+                        .finish(terminal.session_id, "ended");
                 }
                 break;
             }
         }
     });
 
-    tracing::info!(terminal_id, shell, "terminal started");
-    Response::ok(id, json!({ "terminalId": terminal_id, "shell": shell }))
+    tracing::info!(terminal_id, %session_uuid, shell, "terminal started");
+    Response::ok(
+        id,
+        json!({
+            "terminalId": terminal_id,
+            "sessionId": session_uuid.to_string(),
+            "shell": shell
+        }),
+    )
+}
+
+fn input_terminal(state: &CoreState, id: u64, params: &Value) -> Response {
+    let data = param_str(params, "data").unwrap_or_default();
+    with_session(state, id, params, |terminal| {
+        if let Ok(mut tracker) = terminal.tracker.lock() {
+            let commands = tracker.push_input(data);
+            let repos = state.storage().database();
+            for command in commands {
+                let record = NewCommand::new(terminal.session_id, command, &terminal.cwd);
+                if let Err(error) = repos.commands().create(&record) {
+                    tracing::warn!(error = %error, "failed to record terminal command");
+                }
+            }
+        }
+        terminal.pty.write(data.as_bytes())
+    })
 }
 
 async fn kill_terminal(state: &CoreState, id: u64, params: &Value) -> Response {
@@ -194,15 +262,21 @@ async fn kill_terminal(state: &CoreState, id: u64, params: &Value) -> Response {
             "missing 'id' parameter",
         );
     };
-    let session = state
+    let terminal = state
         .terminals()
         .map
         .lock()
         .ok()
         .and_then(|mut map| map.remove(&terminal_id));
-    match session {
-        Some(session) => {
-            session.kill();
+    match terminal {
+        Some(terminal) => {
+            flush_scrollback(state, &terminal);
+            let _ = state
+                .storage()
+                .database()
+                .terminal_sessions()
+                .finish(terminal.session_id, "ended");
+            terminal.pty.kill();
             Response::ok(id, json!({}))
         }
         None => fail(
@@ -214,11 +288,84 @@ async fn kill_terminal(state: &CoreState, id: u64, params: &Value) -> Response {
     }
 }
 
+fn list_sessions(state: &CoreState, id: u64, params: &Value) -> Response {
+    let limit = param_u64(params, "limit").unwrap_or(20) as usize;
+    let repos = state.storage().database();
+    match repos.terminal_sessions().list_recent(limit) {
+        Ok(sessions) => Response::ok(
+            id,
+            json!({
+                "sessions": sessions.into_iter().map(session_json).collect::<Vec<_>>()
+            }),
+        ),
+        Err(error) => fail(
+            id,
+            ErrorCode::Internal,
+            "Retcon could not list terminal sessions.",
+            error.to_string(),
+        ),
+    }
+}
+
+fn scrollback(state: &CoreState, id: u64, params: &Value) -> Response {
+    let Some(session_id) = param_str(params, "sessionId") else {
+        return fail(
+            id,
+            ErrorCode::InvalidRequest,
+            "The terminal scrollback request is missing its session id.",
+            "missing 'sessionId' parameter",
+        );
+    };
+    let Ok(uuid) = Uuid::parse_str(session_id) else {
+        return fail(
+            id,
+            ErrorCode::InvalidRequest,
+            "The terminal session id is invalid.",
+            format!("invalid session id: {session_id}"),
+        );
+    };
+
+    if let Ok(map) = state.terminals().map.lock() {
+        for terminal in map.values() {
+            if terminal.session_id == uuid {
+                let text = terminal
+                    .scrollback
+                    .lock()
+                    .map(|buffer| buffer.clone())
+                    .unwrap_or_default();
+                return Response::ok(id, json!({ "text": text, "live": true }));
+            }
+        }
+    }
+
+    let repos = state.storage().database();
+    let Ok(Some(record)) = repos.terminal_sessions().get(uuid) else {
+        return fail(
+            id,
+            ErrorCode::NotFound,
+            "That terminal session was not found.",
+            format!("no terminal session {session_id}"),
+        );
+    };
+    let Some(hash) = record.log_artifact_hash else {
+        return Response::ok(id, json!({ "text": "", "live": false }));
+    };
+    match read_artifact_text(state, &hash) {
+        Ok(text) => Response::ok(id, json!({ "text": text, "live": false })),
+        Err(error) => fail(
+            id,
+            ErrorCode::Internal,
+            "Retcon could not read terminal scrollback.",
+            error,
+        ),
+    }
+}
+
 fn with_session(
     state: &CoreState,
     id: u64,
     params: &Value,
-    f: impl FnOnce(&PtySession) -> Result<(), String>,
+    f: impl FnOnce(&LiveTerminal) -> Result<(), String>,
 ) -> Response {
     let Some(terminal_id) = param_u64(params, "id") else {
         return fail(
@@ -228,14 +375,14 @@ fn with_session(
             "missing 'id' parameter",
         );
     };
-    let session = state
+    let terminal = state
         .terminals()
         .map
         .lock()
         .ok()
         .and_then(|m| m.get(&terminal_id).cloned());
-    match session {
-        Some(s) => match f(&s) {
+    match terminal {
+        Some(terminal) => match f(&terminal) {
             Ok(()) => Response::ok(id, json!({})),
             Err(e) => fail(
                 id,
@@ -250,5 +397,114 @@ fn with_session(
             "That terminal is no longer running.",
             format!("no terminal {terminal_id}"),
         ),
+    }
+}
+
+fn append_scrollback(state: &CoreState, terminal_id: u64, chunk: &str) {
+    let Some(terminal) = state
+        .terminals()
+        .map
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&terminal_id).cloned())
+    else {
+        return;
+    };
+    let mut should_flush = false;
+    if let Ok(mut buffer) = terminal.scrollback.lock() {
+        buffer.push_str(chunk);
+        should_flush = buffer.len() >= SCROLLBACK_FLUSH_BYTES;
+    }
+    if should_flush {
+        flush_scrollback(state, &terminal);
+    }
+}
+
+fn flush_scrollback(state: &CoreState, terminal: &LiveTerminal) {
+    let text = terminal
+        .scrollback
+        .lock()
+        .map(|buffer| buffer.clone())
+        .unwrap_or_default();
+    if text.is_empty() {
+        return;
+    }
+    let store = state.storage().artifacts();
+    let Ok(artifact) = store.store_bytes(text.as_bytes()) else {
+        return;
+    };
+    let _ = state
+        .storage()
+        .database()
+        .terminal_sessions()
+        .set_log_artifact(terminal.session_id, &artifact.hash);
+}
+
+fn read_artifact_text(state: &CoreState, hash: &str) -> Result<String, String> {
+    let mut file = state
+        .storage()
+        .artifacts()
+        .get(hash)
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn session_json(session: retcon_storage::TerminalSession) -> Value {
+    json!({
+        "sessionId": session.id.to_string(),
+        "status": session.status,
+        "shell": session.shell,
+        "cwd": session.cwd,
+        "startedAt": session.started_at,
+        "endedAt": session.ended_at,
+        "logArtifactHash": session.log_artifact_hash,
+    })
+}
+
+impl Clone for LiveTerminal {
+    fn clone(&self) -> Self {
+        Self {
+            pty: Arc::clone(&self.pty),
+            session_id: self.session_id,
+            shell: self.shell.clone(),
+            cwd: self.cwd.clone(),
+            scrollback: Mutex::new(
+                self.scrollback
+                    .lock()
+                    .map(|buffer| buffer.clone())
+                    .unwrap_or_default(),
+            ),
+            tracker: Mutex::new(
+                self.tracker
+                    .lock()
+                    .map(|tracker| tracker.clone())
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_json_includes_session_id() {
+        let session = retcon_storage::TerminalSession {
+            id: Uuid::new_v4(),
+            session_id: None,
+            status: "ended".into(),
+            shell: "pwsh".into(),
+            cwd: ".".into(),
+            started_at: 1,
+            ended_at: Some(2),
+            log_artifact_hash: None,
+        };
+        let value = session_json(session);
+        assert_eq!(value["status"], "ended");
+        assert!(value["sessionId"].is_string());
     }
 }

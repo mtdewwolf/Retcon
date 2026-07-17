@@ -1,0 +1,34 @@
+﻿{
+    "floatingPanels":  [
+
+                       ],
+    "root":  {
+                 "second":  {
+                                "activeIndex":  0,
+                                "panels":  [
+                                               {
+                                                   "id":  "workspace",
+                                                   "title":  "Workspace"
+                                               }
+                                           ],
+                                "type":  "tabs"
+                            },
+                 "fraction":  0.24,
+                 "first":  {
+                               "activeIndex":  0,
+                               "panels":  [
+                                              {
+                                                  "id":  "explorer",
+                                                  "title":  "Explorer"
+                                              }
+                                          ],
+                               "type":  "tabs"
+                           },
+                 "orientation":  "horizontal",
+                 "type":  "split"
+             },
+    "closedPanels":  [
+
+                     ],
+    "version":  1
+}

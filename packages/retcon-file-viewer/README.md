@@ -1,4 +1,9 @@
 # retcon_file_viewer
 
-Flutter file viewer (syntax highlighting, large-file handling) for Retcon. Created in
-Phase 15.
+Flutter file explorer and viewer for Retcon Phase 15:
+
+- Lazy project tree with git badge stubs
+- Syntax-highlighted preview with large-file guard
+- Lightweight edit and save via `file.write` RPC
+
+Wired into the desktop workspace explorer panel when a project is open.

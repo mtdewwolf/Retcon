@@ -1,9 +1,16 @@
 //! Git repository operations via the native Git CLI.
 //!
-//! Phase 2 spike scope: open/inspect a repository, branches, worktrees, and
-//! diffs, with structured failures. The full repository service is Phase 16.
+//! Phase 16 scope: branch workflow, commit/stage, diffs, worktrees, and default
+//! branch protection.
+
+mod safety;
 
 use std::path::Path;
+
+pub use safety::{
+    ProtectedOperation, check_default_branch, ensure_branch_delete_allowed, ensure_commit_allowed,
+    ensure_push_allowed,
+};
 
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -22,6 +29,7 @@ pub struct GitError {
     /// Git's stderr (trimmed), the human-readable explanation.
     pub stderr: String,
 }
+impl std::error::Error for GitError {}
 
 impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -256,13 +264,29 @@ pub async fn worktree_remove(repo: &Path, path: &str) -> Result<(), GitError> {
         .map(|_| ())
 }
 
-/// Produce a unified diff of uncommitted changes (optionally for one path).
+/// Diff scope for [`diff`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffMode {
+    /// Working tree vs index.
+    #[default]
+    Unstaged,
+    /// Index vs HEAD.
+    Staged,
+    /// Working tree vs HEAD.
+    All,
+}
+
+/// Produce a unified diff (optionally for one path).
 ///
 /// # Errors
 ///
 /// Returns a [`GitError`] if Git fails.
-pub async fn diff(repo: &Path, path: Option<&str>) -> Result<String, GitError> {
-    let mut args = vec!["diff"];
+pub async fn diff(repo: &Path, path: Option<&str>, mode: DiffMode) -> Result<String, GitError> {
+    let mut args = match mode {
+        DiffMode::Unstaged => vec!["diff"],
+        DiffMode::Staged => vec!["diff", "--cached"],
+        DiffMode::All => vec!["diff", "HEAD"],
+    };
     if let Some(p) = path {
         args.push("--");
         args.push(p);
@@ -270,9 +294,175 @@ pub async fn diff(repo: &Path, path: Option<&str>) -> Result<String, GitError> {
     run_git(repo, &args).await
 }
 
+/// List local branch names.
+pub async fn branch_list(repo: &Path) -> Result<Vec<String>, GitError> {
+    let raw = run_git(repo, &["branch", "--format=%(refname:short)"]).await?;
+    Ok(raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Resolve the repository default branch name.
+pub async fn default_branch(repo: &Path) -> Result<String, GitError> {
+    if let Ok(raw) = run_git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
+        return Ok(raw.strip_prefix("origin/").unwrap_or(&raw).to_owned());
+    }
+    for candidate in ["main", "master"] {
+        if run_git(repo, &["rev-parse", "--verify", candidate])
+            .await
+            .is_ok()
+        {
+            return Ok(candidate.to_owned());
+        }
+    }
+    Ok("main".to_owned())
+}
+
+/// Current HEAD object id.
+pub async fn head_oid(repo: &Path) -> Result<String, GitError> {
+    run_git(repo, &["rev-parse", "HEAD"]).await
+}
+
 /// Create a branch without checking it out.
 pub async fn branch_create(repo: &Path, branch: &str) -> Result<(), GitError> {
     run_git(repo, &["branch", branch]).await.map(|_| ())
+}
+
+/// Delete a local branch.
+pub async fn branch_delete(repo: &Path, branch: &str, force: bool) -> Result<(), GitError> {
+    safety::ensure_branch_delete_allowed(repo, branch).await?;
+    let flag = if force { "-D" } else { "-d" };
+    run_git(repo, &["branch", flag, branch])
+        .await
+        .map(|_| ())
+}
+
+/// Check out a branch.
+pub async fn checkout(repo: &Path, branch: &str) -> Result<(), GitError> {
+    run_git(repo, &["checkout", branch]).await.map(|_| ())
+}
+
+/// Stage path(s). Pass `None` to stage all changes.
+pub async fn stage(repo: &Path, path: Option<&str>) -> Result<(), GitError> {
+    let mut args = vec!["add"];
+    if let Some(p) = path {
+        args.push("--");
+        args.push(p);
+    } else {
+        args.push("-A");
+    }
+    run_git(repo, &args).await.map(|_| ())
+}
+
+/// Unstage path(s). Pass `None` to unstage all changes.
+pub async fn unstage(repo: &Path, path: Option<&str>) -> Result<(), GitError> {
+    let mut args = vec!["restore", "--staged"];
+    if let Some(p) = path {
+        args.push("--");
+        args.push(p);
+    } else {
+        args.push(".");
+    }
+    run_git(repo, &args).await.map(|_| ())
+}
+
+/// Stage a unified-diff hunk via `git apply --cached`.
+pub async fn stage_hunk(repo: &Path, patch: &str) -> Result<(), GitError> {
+    apply_patch(repo, patch, &["apply", "--cached"]).await
+}
+
+/// Discard a working-tree hunk via reverse apply.
+pub async fn discard_hunk(repo: &Path, patch: &str) -> Result<(), GitError> {
+    apply_patch(repo, patch, &["apply", "-R"]).await
+}
+
+async fn apply_patch(repo: &Path, patch: &str, prefix: &[&str]) -> Result<(), GitError> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
+
+    let mut args: Vec<&str> = prefix.to_vec();
+    args.push("-");
+
+    let mut child = Command::new("git")
+        .args(&args)
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| GitError {
+            command: args.join(" "),
+            exit_code: None,
+            stderr: format!("failed to launch git: {e}"),
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(patch.as_bytes()).await.map_err(|e| GitError {
+            command: args.join(" "),
+            exit_code: None,
+            stderr: format!("failed to write patch: {e}"),
+        })?;
+    }
+
+    let output = child.wait_with_output().await.map_err(|e| GitError {
+        command: args.join(" "),
+        exit_code: None,
+        stderr: format!("failed to wait for git: {e}"),
+    })?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(GitError {
+            command: args.join(" "),
+            exit_code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
+    }
+}
+
+/// Create a commit with the given message.
+pub async fn commit(repo: &Path, message: &str, allow_empty: bool) -> Result<String, GitError> {
+    let branch = status(repo).await?.branch;
+    safety::ensure_commit_allowed(repo, &branch).await?;
+    let mut args = vec!["commit", "-m", message];
+    if allow_empty {
+        args.push("--allow-empty");
+    }
+    run_git(repo, &args).await?;
+    head_oid(repo).await
+}
+
+/// Push the current or named branch to a remote.
+pub async fn push(
+    repo: &Path,
+    remote: &str,
+    branch: Option<&str>,
+    force: bool,
+) -> Result<(), GitError> {
+    if force {
+        let target = match branch {
+            Some(name) => name.to_owned(),
+            None => status(repo).await?.branch,
+        };
+        safety::ensure_push_allowed(repo, &target, true).await?;
+    }
+    let mut args = vec!["push", remote];
+    if force {
+        args.push("--force-with-lease");
+    }
+    if let Some(branch) = branch {
+        args.push(branch);
+    }
+    run_git(repo, &args).await.map(|_| ())
 }
 
 /// Return paths currently reported as unmerged conflicts.
@@ -324,7 +514,10 @@ mod tests {
         branch_create(dir.path(), "review").await.unwrap();
         std::fs::write(dir.path().join("hello.txt"), "two\n").unwrap();
         assert_eq!(status(dir.path()).await.unwrap().branch, "main");
-        assert!(diff(dir.path(), None).await.unwrap().contains("+two"));
+        assert!(diff(dir.path(), None, DiffMode::Unstaged)
+            .await
+            .unwrap()
+            .contains("+two"));
         let worktree = dir.path().join("worktree");
         worktree_add(dir.path(), worktree.to_str().unwrap(), "spike")
             .await

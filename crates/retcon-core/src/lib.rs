@@ -14,8 +14,15 @@ pub mod frame;
 pub mod jobs;
 pub mod lifecycle;
 pub mod projects;
+mod permissions_rpc;
+mod secrets_rpc;
 mod projects_rpc;
 mod providers_rpc;
+mod storage_rpc;
+mod session_rpc;
+mod file_rpc;
+mod git_rpc;
+mod checkpoints_rpc;
 pub mod rpc;
 pub mod server;
 pub mod session_engine;
@@ -96,7 +103,7 @@ pub async fn run(data_dir: PathBuf) -> Result<(), CoreError> {
     );
 
     let runtime = CoreRuntime::start(CoreConfig::new(data_dir)).await?;
-    tracing::info!(address = %runtime.address(), "retcon-core is ready");
+    tracing::info!(transport = %runtime.endpoint().path_string(), "retcon-core is ready");
     runtime.wait_for_shutdown_signal().await?;
     runtime.shutdown().await
 }

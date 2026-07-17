@@ -14,6 +14,27 @@ env:
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
 jobs:
+  jobs:
+    name: Protocol (schema + fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate schema and fixtures
+        run: node scripts/protocol/validate.mjs
+      - name: Verify generated clients are fresh
+        run: |
+          node scripts/protocol/generate-typescript.mjs
+          node scripts/protocol/generate-dart.mjs
+          git diff --exit-code apps/browser-service/src/generated apps/desktop/lib/src/generated
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.0"
+      - name: Protocol fixture tests
+        run: cargo test -p retcon-protocol
+
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest

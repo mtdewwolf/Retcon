@@ -4,22 +4,217 @@
   "title": "Retcon local protocol v1",
   "description": "Authenticated local newline-delimited JSON protocol.",
   "oneOf": [
-    { "$ref": "#/$defs/auth" }, { "$ref": "#/$defs/clientHello" },
-    { "$ref": "#/$defs/serverHello" }, { "$ref": "#/$defs/request" }, { "$ref": "#/$defs/response" }, { "$ref": "#/$defs/event" },
-    { "$ref": "#/$defs/cancel" }, { "$ref": "#/$defs/ping" }, { "$ref": "#/$defs/pong" }
+    { "$ref": "#/$defs/auth" },
+    { "$ref": "#/$defs/clientHello" },
+    { "$ref": "#/$defs/serverHello" },
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/cancel" },
+    { "$ref": "#/$defs/ping" },
+    { "$ref": "#/$defs/pong" }
   ],
   "$defs": {
     "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-    "features": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$" }, "uniqueItems": true, "maxItems": 128 },
-    "auth": { "type": "object", "required": ["auth"], "properties": { "auth": { "type": "string", "minLength": 32, "maxLength": 512 } }, "additionalProperties": false },
-    "clientHello": { "type": "object", "required": ["kind", "protocolVersion", "clientVersion", "features"], "properties": { "kind": { "const": "client.hello" }, "protocolVersion": { "const": 1 }, "clientVersion": { "type": "string", "minLength": 1, "maxLength": 128 }, "features": { "$ref": "#/$defs/features" } }, "additionalProperties": false },
-    "serverHello": { "type": "object", "required": ["kind", "protocolVersion", "serverVersion", "features"], "properties": { "kind": { "const": "server.hello" }, "protocolVersion": { "const": 1 }, "serverVersion": { "type": "string", "minLength": 1, "maxLength": 128 }, "features": { "$ref": "#/$defs/features" } }, "additionalProperties": false },
-    "request": { "type": "object", "required": ["id", "method", "params"], "properties": { "id": { "$ref": "#/$defs/id" }, "method": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-zA-Z0-9]*)+$", "maxLength": 128 }, "params": { "type": "object" } }, "additionalProperties": false },
-    "response": { "type": "object", "required": ["id"], "properties": { "id": { "$ref": "#/$defs/id" }, "result": {}, "error": { "$ref": "#/$defs/error" } }, "oneOf": [{ "required": ["result"] }, { "required": ["error"] }], "additionalProperties": false },
-    "error": { "type": "object", "required": ["id", "code", "source", "user_message", "technical_message", "retryable"], "properties": { "id": { "type": "string", "format": "uuid" }, "code": { "type": "string" }, "source": { "type": "string" }, "user_message": { "type": "string" }, "technical_message": { "type": "string" }, "suggested_fix": { "type": ["string", "null"] }, "retryable": { "type": "boolean" }, "diagnostic": {} }, "additionalProperties": false },
-    "event": { "type": "object", "required": ["event"], "properties": { "event": { "type": "object" } }, "additionalProperties": false },
-    "cancel": { "type": "object", "required": ["kind", "id"], "properties": { "kind": { "const": "request.cancel" }, "id": { "$ref": "#/$defs/id" } }, "additionalProperties": false },
-    "ping": { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "ping" } }, "additionalProperties": false },
-    "pong": { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "pong" } }, "additionalProperties": false }
+    "features": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$" },
+      "uniqueItems": true,
+      "maxItems": 128
+    },
+    "auth": {
+      "type": "object",
+      "required": ["auth"],
+      "properties": {
+        "auth": { "type": "string", "minLength": 32, "maxLength": 512 }
+      },
+      "additionalProperties": false
+    },
+    "clientHello": {
+      "type": "object",
+      "required": ["kind", "protocolVersion", "clientVersion", "features"],
+      "properties": {
+        "kind": { "const": "client.hello" },
+        "protocolVersion": { "const": 1 },
+        "clientVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "features": { "$ref": "#/$defs/features" }
+      },
+      "additionalProperties": false
+    },
+    "serverHello": {
+      "type": "object",
+      "required": ["kind", "protocolVersion", "serverVersion", "features"],
+      "properties": {
+        "kind": { "const": "server.hello" },
+        "protocolVersion": { "const": 1 },
+        "serverVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "features": { "$ref": "#/$defs/features" }
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "method": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-zA-Z0-9]*)+$",
+          "maxLength": 128
+        },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "result": {},
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "oneOf": [{ "required": ["result"] }, { "required": ["error"] }],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["id", "code", "source", "user_message", "technical_message", "retryable"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "code": { "type": "string" },
+        "source": { "type": "string" },
+        "user_message": { "type": "string" },
+        "technical_message": { "type": "string" },
+        "suggested_fix": { "type": ["string", "null"] },
+        "retryable": { "type": "boolean" },
+        "diagnostic": {}
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["event"],
+      "properties": { "event": { "type": "object" } },
+      "additionalProperties": false
+    },
+    "cancel": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "const": "request.cancel" },
+        "id": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": false
+    },
+    "ping": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": { "kind": { "const": "ping" } },
+      "additionalProperties": false
+    },
+    "pong": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": { "kind": { "const": "pong" } },
+      "additionalProperties": false
+    },
+    "discovery": {
+      "type": "object",
+      "required": ["transport", "path", "token", "pid", "version", "protocolVersion"],
+      "properties": {
+        "transport": { "enum": ["named_pipe", "unix_socket"] },
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "token": { "type": "string", "minLength": 32, "maxLength": 512 },
+        "pid": { "type": "integer", "minimum": 1 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "protocolVersion": { "const": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "methodCatalog": {
+    "core": [
+      "core.health",
+      "core.version",
+      "core.capabilities",
+      "core.diagnostics",
+      "core.shutdown"
+    ],
+    "events": ["events.replay", "events.emit"],
+    "jobs": ["jobs.list", "jobs.get", "jobs.cancel", "jobs.forceStop"],
+    "project": [
+      "project.open",
+      "project.clone",
+      "project.list",
+      "project.inspect",
+      "project.updateMetadata",
+      "project.remove"
+    ],
+    "provider": ["provider.metadata", "provider.doctor"],
+    "session": [
+      "session.create",
+      "session.list",
+      "session.start",
+      "session.cancel",
+      "session.pause",
+      "session.resume"
+    ],
+    "turn": ["turn.send", "turn.cancel"],
+    "terminal": [
+      "terminal.detectShells",
+      "terminal.start",
+      "terminal.input",
+      "terminal.resize",
+      "terminal.kill",
+      "terminal.list",
+      "terminal.scrollback"
+    ],
+    "git": [
+      "git.status",
+      "git.defaultBranch",
+      "git.branchList",
+      "git.branchCreate",
+      "git.branchDelete",
+      "git.checkout",
+      "git.stage",
+      "git.unstage",
+      "git.stageHunk",
+      "git.discardHunk",
+      "git.commit",
+      "git.push",
+      "git.conflicts",
+      "git.submodules",
+      "git.worktreeList",
+      "git.worktreeListStored",
+      "git.worktreeAdd",
+      "git.worktreeRemove",
+      "git.worktreeAssign",
+      "git.diff"
+    ],
+    "agent": ["agent.detect", "agent.start", "agent.cancel"],
+    "browser": ["browser.startService", "browser.stopService", "browser.call"],
+    "file": ["file.list", "file.read", "file.write", "file.watch", "file.unwatch"],
+    "checkpoint": [
+      "checkpoint.create",
+      "checkpoint.list",
+      "checkpoint.get",
+      "checkpoint.preview",
+      "checkpoint.restore"
+    ],
+    "approval": ["approval.list", "approval.decide"],
+    "permission": [
+      "permission.rules.list",
+      "permission.rules.create",
+      "permission.rules.delete"
+    ],
+    "secrets": ["secrets.scan"],
+    "storage": [
+      "storage.status",
+      "storage.recover",
+      "storage.layout.get",
+      "storage.layout.save",
+      "storage.layout.list"
+    ]
   }
 }

@@ -1,0 +1,22 @@
+name: retcon_file_viewer
+description: "Retcon file explorer and viewer widgets wired to retcon-core file RPC."
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.1
+  flutter: ">=1.17.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  retcon_design_system:
+    path: ../retcon-design-system
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

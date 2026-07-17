@@ -44,7 +44,23 @@ pub async fn handle(request: Request) -> Response {
                     ),
                 );
             }
-            Response::ok(id, json!(retcon_agents::doctor_claude().await))
+            let force_refresh = params
+                .get("forceRefresh")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if force_refresh {
+                retcon_agents::clear_detection_cache();
+            }
+            let report = retcon_agents::doctor_claude().await;
+            let include_bundle = params
+                .get("includeBundle")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if include_bundle {
+                Response::ok(id, report.diagnostic_bundle())
+            } else {
+                Response::ok(id, json!(report))
+            }
         }
         _ => Response::error(
             id,

@@ -1,12 +1,24 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/main.dart';
+import 'package:retcon_desktop/src/core_client.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
 import 'package:retcon_desktop/src/window_controller.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
+CoreClient? _sharedCore;
+
+CoreClient testCore() => _sharedCore ??= CoreClient(dataDirectory: Directory.systemTemp);
+
 void main() {
+  tearDownAll(() {
+    _sharedCore?.dispose();
+    _sharedCore = null;
+  });
+
   testWidgets('desktop shell renders chrome, menus, workspace, and taskbar', (
     tester,
   ) async {
@@ -14,6 +26,7 @@ void main() {
     await tester.pumpWidget(
       DesktopShellTestApp(
         shell: DesktopShell(
+          core: testCore(),
           projectTitle: 'Retcon',
           branch: 'Master',
           provider: 'Codex connected',
@@ -35,17 +48,20 @@ void main() {
       'Tools',
       'Help',
     ]) {
-      expect(find.text(menu), findsOneWidget);
+      expect(find.text(menu), findsAtLeastNWidgets(1));
     }
     expect(find.text('start'), findsOneWidget);
-    expect(find.text('Retcon workspace'), findsOneWidget);
+    expect(find.text('Send a message to start an agent session.'), findsOneWidget);
   });
 
   testWidgets('command palette is available from Ctrl+Shift+P', (tester) async {
     await setDesktopSize(tester);
     await tester.pumpWidget(
       DesktopShellTestApp(
-        shell: DesktopShell(windowController: FakeWindowController()),
+        shell: DesktopShell(
+          core: testCore(),
+          windowController: FakeWindowController(),
+        ),
       ),
     );
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
@@ -57,7 +73,7 @@ void main() {
 
     expect(find.text('Search commands'), findsOneWidget);
     expect(find.text('Open terminal'), findsOneWidget);
-    expect(find.text('Diagnostics'), findsOneWidget);
+    expect(find.text('Approval center'), findsOneWidget);
   });
 
   testWidgets('F11 routes to native fullscreen control', (tester) async {
@@ -66,7 +82,11 @@ void main() {
     final commands = <ShellCommand>[];
     await tester.pumpWidget(
       DesktopShellTestApp(
-        shell: DesktopShell(windowController: window, onCommand: commands.add),
+        shell: DesktopShell(
+          core: testCore(),
+          windowController: window,
+          onCommand: commands.add,
+        ),
       ),
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.f11);
@@ -80,7 +100,9 @@ void main() {
     await setDesktopSize(tester);
     final window = FakeWindowController();
     await tester.pumpWidget(
-      DesktopShellTestApp(shell: DesktopShell(windowController: window)),
+      DesktopShellTestApp(
+        shell: DesktopShell(core: testCore(), windowController: window),
+      ),
     );
     await tester.tap(find.byTooltip('Minimize'));
     await tester.tap(find.byTooltip('Maximize or restore'));
@@ -95,7 +117,7 @@ void main() {
   testWidgets('application still boots through RetconApp', (tester) async {
     await setDesktopSize(tester);
     await tester.pumpWidget(const RetconApp());
-    expect(find.text('Retcon workspace'), findsOneWidget);
+    expect(find.text('Send a message to start an agent session.'), findsOneWidget);
   });
 
   testWidgets('shell remains usable at the minimum window size', (
@@ -104,7 +126,10 @@ void main() {
     await setDesktopSize(tester, size: const Size(760, 480));
     await tester.pumpWidget(
       DesktopShellTestApp(
-        shell: DesktopShell(windowController: FakeWindowController()),
+        shell: DesktopShell(
+          core: testCore(),
+          windowController: FakeWindowController(),
+        ),
       ),
     );
     expect(tester.takeException(), isNull);

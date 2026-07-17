@@ -14,7 +14,7 @@ use crate::migrations::{LATEST_VERSION, MIGRATIONS};
 const SLOW_QUERY_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// The result of SQLite's built-in integrity check.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct IntegrityReport {
     /// Whether SQLite found no damage or structural inconsistency.
     pub healthy: bool,
@@ -23,7 +23,7 @@ pub struct IntegrityReport {
 }
 
 /// Space and checkpoint information collected during database maintenance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct MaintenanceReport {
     /// Total database pages before optimization.
     pub page_count: u64,
@@ -39,6 +39,15 @@ pub struct MaintenanceReport {
 pub struct Database {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+}
+
+impl std::fmt::Debug for Database {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Database")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Database {
@@ -179,8 +188,22 @@ impl Database {
     ///
     /// Returns [`StorageError::Corrupt`] when the check reports damage.
     pub fn integrity_check(&self) -> Result<IntegrityReport> {
+        self.inspect_integrity().and_then(|report| {
+            if report.healthy {
+                Ok(report)
+            } else {
+                Err(StorageError::Corrupt {
+                    path: self.path.clone(),
+                    details: report.messages.join("; "),
+                })
+            }
+        })
+    }
+
+    /// Run SQLite's full integrity check and return diagnostics even when damaged.
+    pub fn inspect_integrity(&self) -> Result<IntegrityReport> {
         let connection = self.lock()?;
-        integrity_check_connection(&connection, &self.path)
+        read_integrity_report(&connection, &self.path)
     }
 
     /// Create a consistent SQLite backup using `VACUUM INTO`.
@@ -390,7 +413,11 @@ fn migrate_uuid_columns(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
             .unwrap_or(&[]);
         let mut schema = schema.clone();
         for column in uuid_columns {
-            schema = schema.replace(&format!("{column} TEXT"), &format!("{column} BLOB"));
+            for prefix in ["\n    ", "\n\t", ", ", "("] {
+                let from = format!("{prefix}{column} TEXT");
+                let to = format!("{prefix}{column} BLOB");
+                schema = schema.replace(&from, &to);
+            }
         }
         transaction.execute_batch(&schema)?;
     }
@@ -438,7 +465,7 @@ fn read_schema_version(connection: &Connection) -> rusqlite::Result<u32> {
     connection.query_row("PRAGMA user_version", [], |row| row.get(0))
 }
 
-fn integrity_check_connection(connection: &Connection, path: &Path) -> Result<IntegrityReport> {
+fn read_integrity_report(connection: &Connection, path: &Path) -> Result<IntegrityReport> {
     let mut statement = connection
         .prepare("PRAGMA integrity_check")
         .map_err(|error| classify_database_error(path, "prepare integrity check", error))?;
@@ -448,12 +475,6 @@ fn integrity_check_connection(connection: &Connection, path: &Path) -> Result<In
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| classify_database_error(path, "read integrity check", error))?;
     let healthy = messages.len() == 1 && messages[0].eq_ignore_ascii_case("ok");
-    if !healthy {
-        return Err(StorageError::Corrupt {
-            path: path.to_path_buf(),
-            details: messages.join("; "),
-        });
-    }
     Ok(IntegrityReport { healthy, messages })
 }
 
