@@ -49,6 +49,7 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         .current_dir(repo)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| GitError {
             command: command_label.clone(),
@@ -67,71 +68,91 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         stderr: "git process has no stderr".into(),
     })?;
 
-    let stdout_task = tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 8192];
-        loop {
-            let read = stdout
-                .read(&mut chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            if read == 0 {
-                break;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stdout_chunk = [0_u8; 8192];
+    let mut stderr_chunk = [0_u8; 1024];
+    let mut overflow: Option<&'static str> = None;
+
+    let status = loop {
+        tokio::select! {
+            result = stdout.read(&mut stdout_chunk), if !stdout_done => {
+                let read = result.map_err(|e| GitError {
+                    command: command_label.clone(),
+                    exit_code: None,
+                    stderr: format!("failed to read git stdout: {e}"),
+                })?;
+                if read == 0 {
+                    stdout_done = true;
+                } else if overflow.is_none() {
+                    if stdout_bytes.len().saturating_add(read) > max_bytes {
+                        overflow = Some("stdout");
+                        let _ = child.kill().await;
+                    } else {
+                        stdout_bytes.extend_from_slice(&stdout_chunk[..read]);
+                    }
+                }
             }
-            if buffer.len().saturating_add(read) > max_bytes {
-                return Err(format!("git output exceeded {max_bytes} bytes"));
+            result = stderr.read(&mut stderr_chunk), if !stderr_done => {
+                let read = result.map_err(|e| GitError {
+                    command: command_label.clone(),
+                    exit_code: None,
+                    stderr: format!("failed to read git stderr: {e}"),
+                })?;
+                if read == 0 {
+                    stderr_done = true;
+                } else if overflow.is_none() {
+                    if stderr_bytes.len().saturating_add(read) > max_bytes {
+                        overflow = Some("stderr");
+                        let _ = child.kill().await;
+                    } else {
+                        stderr_bytes.extend_from_slice(&stderr_chunk[..read]);
+                    }
+                }
             }
-            buffer.extend_from_slice(&chunk[..read]);
+            status = child.wait() => {
+                break status.map_err(|e| GitError {
+                    command: command_label.clone(),
+                    exit_code: None,
+                    stderr: format!("failed to wait for git: {e}"),
+                })?;
+            }
         }
-        Ok(buffer)
-    });
+    };
 
-    let stderr_task = tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 1024];
-        loop {
-            let read = stderr
-                .read(&mut chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            if read == 0 {
-                break;
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        Ok(buffer)
-    });
+    if let Some(stream) = overflow {
+        return Err(GitError {
+            command: command_label,
+            exit_code: status.code(),
+            stderr: format!("git {stream} exceeded {max_bytes} bytes"),
+        });
+    }
 
-    let status = child.wait().await.map_err(|e| GitError {
-        command: command_label.clone(),
-        exit_code: None,
-        stderr: format!("failed to wait for git: {e}"),
-    })?;
-
-    let stdout_bytes = stdout_task
-        .await
-        .map_err(|e| GitError {
-            command: command_label.clone(),
+    // Drain any remaining pipe data after the process exits, still respecting caps.
+    if !stdout_done
+        && read_remaining_capped(&mut stdout, &mut stdout_bytes, max_bytes)
+            .await
+            .is_err()
+    {
+        return Err(GitError {
+            command: command_label,
             exit_code: status.code(),
-            stderr: format!("stdout reader failed: {e}"),
-        })?
-        .map_err(|message| GitError {
-            command: command_label.clone(),
+            stderr: format!("git stdout exceeded {max_bytes} bytes"),
+        });
+    }
+    if !stderr_done
+        && read_remaining_capped(&mut stderr, &mut stderr_bytes, max_bytes)
+            .await
+            .is_err()
+    {
+        return Err(GitError {
+            command: command_label,
             exit_code: status.code(),
-            stderr: message,
-        })?;
-    let stderr_bytes = stderr_task
-        .await
-        .map_err(|e| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: format!("stderr reader failed: {e}"),
-        })?
-        .map_err(|message| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: message,
-        })?;
+            stderr: format!("git stderr exceeded {max_bytes} bytes"),
+        });
+    }
 
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout_bytes).trim_end().to_owned())
@@ -141,6 +162,24 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
             exit_code: status.code(),
             stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
         })
+    }
+}
+
+async fn read_remaining_capped(
+    reader: &mut (impl AsyncReadExt + Unpin),
+    buffer: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<(), ()> {
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await.map_err(|_| ())?;
+        if read == 0 {
+            return Ok(());
+        }
+        if buffer.len().saturating_add(read) > max_bytes {
+            return Err(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
     }
 }
 

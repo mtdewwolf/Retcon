@@ -3,8 +3,7 @@
 #![allow(missing_docs)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -20,6 +19,7 @@ use retcon_storage::Database;
 const DEFAULT_MAX_EVENTS: usize = 10_000;
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 const PRUNE_EVERY_N_INSERTS: u64 = 100;
+const PERSIST_QUEUE_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,8 +77,7 @@ struct EventBusInner {
     log: Mutex<EventLog>,
     sender: broadcast::Sender<Arc<EventEnvelope>>,
     database: Database,
-    persist_tx: Sender<PersistJob>,
-    inserts_since_prune: AtomicU64,
+    persist_tx: SyncSender<PersistJob>,
     _writer: JoinHandle<()>,
 }
 
@@ -100,7 +99,7 @@ impl EventBus {
             )
         })?;
         let (sender, _) = broadcast::channel(1024);
-        let (persist_tx, persist_rx) = mpsc::channel();
+        let (persist_tx, persist_rx) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
         let writer_db = database.clone();
         let writer = thread::Builder::new()
             .name("event-writer".into())
@@ -115,7 +114,6 @@ impl EventBus {
                 sender,
                 database,
                 persist_tx,
-                inserts_since_prune: AtomicU64::new(0),
                 _writer: writer,
             }),
         })
@@ -173,21 +171,21 @@ impl EventBus {
         };
 
         if durable {
-            self.inner
-                .persist_tx
-                .send(PersistJob {
-                    event: Arc::clone(&event),
-                    encoded_payload: encoded,
-                })
-                .map_err(|error| internal_io(error.to_string()))?;
-            let count = self
-                .inner
-                .inserts_since_prune
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1);
-            if count.is_multiple_of(PRUNE_EVERY_N_INSERTS) {
-                let _ = prune_database(&self.inner.database);
-                self.inner.inserts_since_prune.store(0, Ordering::Relaxed);
+            match self.inner.persist_tx.try_send(PersistJob {
+                event: Arc::clone(&event),
+                encoded_payload: encoded,
+            }) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        sequence = event.sequence,
+                        kind = %event.kind,
+                        "dropping durable event; persist queue is full"
+                    );
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(internal_io("event writer stopped".into()));
+                }
             }
         }
 
@@ -244,6 +242,7 @@ fn partition_after(events: &VecDeque<Arc<EventEnvelope>>, after_sequence: u64) -
 }
 
 fn event_writer_loop(rx: mpsc::Receiver<PersistJob>, database: Database) {
+    let mut inserts_since_prune = 0_u64;
     while let Ok(job) = rx.recv() {
         if let Err(error) = database.read(|db| {
             let mut statement = db.prepare_cached(
@@ -259,6 +258,14 @@ fn event_writer_loop(rx: mpsc::Receiver<PersistJob>, database: Database) {
             ])
         }) {
             tracing::error!(%error, sequence = job.event.sequence, "failed to persist event");
+            continue;
+        }
+        inserts_since_prune = inserts_since_prune.saturating_add(1);
+        if inserts_since_prune.is_multiple_of(PRUNE_EVERY_N_INSERTS) {
+            if let Err(error) = prune_database(&database) {
+                tracing::warn!(%error, "event retention prune failed");
+            }
+            inserts_since_prune = 0;
         }
     }
 }

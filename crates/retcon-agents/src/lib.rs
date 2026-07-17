@@ -500,12 +500,16 @@ fn version_is_supported(version: &str) -> bool {
 }
 
 async fn find_executable(name: &str) -> Option<String> {
-    let output = Command::new("cmd")
-        .args(["/C", "where", name])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new("cmd")
+            .args(["/C", "where", name])
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     output
         .status
         .success()
@@ -521,13 +525,17 @@ async fn find_executable(name: &str) -> Option<String> {
 }
 
 async fn run_claude(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("cmd")
-        .args(["/C", "claude"])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|error| format!("Could not launch Claude Code: {error}"))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("cmd")
+            .args(["/C", "claude"])
+            .args(args)
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .map_err(|_| "Claude Code diagnostics timed out".to_owned())?
+    .map_err(|error| format!("Could not launch Claude Code: {error}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {

@@ -1,6 +1,8 @@
 # Optimization TODO list
 
-Full codebase review after the SQLite event-bus migration (`7915613`).
+Full codebase review after session recovery (`a1e7eb3`: mark recovered sessions
+as `disconnected` / turns as `failed`).
+
 Priorities: **P0** = correctness / unbounded growth; **P1** = hot-path performance;
 **P2** = medium impact; **P3** = polish / future.
 
@@ -11,68 +13,95 @@ meaningful optimization surface yet.
 
 ---
 
-## Done in this PR
+## Done in this PR (post-`a1e7eb3` review)
 
-- [x] **P0** Cap browser-service console/network buffers with a ring buffer
-  (`apps/browser-service/src/browser.ts`)
-- [x] **P0** Remove timed-out / closed browser RPC entries from `pending`
+- [x] **P0** True chunked RPC frame cap via `fill_buf`/`consume`
+  (`crates/retcon-core/src/frame.rs`)
+- [x] **P0** Git kill-on-overflow + capped stderr
+  (`crates/retcon-git/src/lib.rs`)
+- [x] **P1** `jobs.shutdown` collects active IDs from the map (bypass 500 page cap)
+  (`crates/retcon-core/src/jobs.rs`)
+- [x] **P1** Allow `Queued -> Failed` for process-restart recovery
+  (`crates/retcon-core/src/session_engine.rs`)
+- [x] **P1** Migration `0005`: expand recovery partial indexes + normalize
+  legacy `interrupted` rows (`crates/retcon-storage`)
+- [x] **P1** Bounded event persist queue (`sync_channel`/`try_send`) + prune on writer
+  (`crates/retcon-core/src/event.rs`)
+- [x] **P1** Bounded terminal output channel (`try_send`)
+  (`crates/retcon-core/src/spikes/terminal.rs`)
+- [x] **P1** Browser reader generation ID (don't clear a newer proc)
   (`crates/retcon-core/src/spikes/browser.rs`)
-- [x] **P0** Cap RPC frame size on read (`crates/retcon-core/src/frame.rs`,
-  `server.rs`, `spikes/browser.rs`)
-- [x] **P0** Periodic SQLite event retention (`crates/retcon-core/src/event.rs`)
-- [x] **P0** Evict finished jobs from memory + DB (`crates/retcon-core/src/jobs.rs`)
-- [x] **P0** Graceful browser-service shutdown before kill (`spikes/browser.rs`)
-- [x] **P0** Bound Git command output (`crates/retcon-git/src/lib.rs`)
-- [x] **P1** Don't hold event-bus mutex across SQLite insert (`event.rs` writer thread)
-- [x] **P1** Batch / coalesce terminal output events (`spikes/terminal.rs`)
-- [x] **P1** Move SQLite work off Tokio worker threads (`database.rs` `read_async`,
-  `artifacts.rs` async helpers)
-- [x] **P1** Add status indexes for recovery queries (migration `0003`)
-- [x] **P1** Enforce log pagination / tail in `browser.logs` (`browser.ts`)
-- [x] **P1** Default screenshot to viewport (`browser.ts`)
-- [x] **P1** Combine Git status into one process (`retcon-git/src/lib.rs`)
-- [x] **P2** Browser proc lock held across stdin writes — writer actor split (`browser.rs`)
-- [x] **P2** Clear stale `BrowserHandle.proc` + drain pending on reader exit (`browser.rs`)
-- [x] **P2** Artifact retention hash indexes (migration `0003`)
-- [x] **P2** Run artifact disk walks in `spawn_blocking` (`artifacts.rs`)
-- [x] **P2** Skip full rehash on duplicate artifact store (`artifacts.rs`)
-- [x] **P2** Binary-search event replay (`event.rs`)
-- [x] **P2** `Arc<EventEnvelope>` to cut clone cost on emit (`event.rs`)
-- [x] **P2** `prepare_cached` for hot statements (`event.rs`, `jobs.rs`)
-- [x] **P2** `PRAGMA quick_check` on normal open; full check for diagnostics (`database.rs`)
-- [x] **P2** `SQLITE_OPEN_NO_MUTEX` when Rust serializes the connection (`database.rs`)
-- [x] **P2** Tune `cache_size` / `mmap_size` / `wal_autocheckpoint` (`database.rs`)
-- [x] **P2** Debounce job persistence; avoid Debug-format enum names (`jobs.rs`)
-- [x] **P2** Don't hold terminal registry lock while killing (`spikes/terminal.rs`)
-- [x] **P2** Cache / async shell detection (`spikes/terminal.rs`)
-- [x] **P2** Cache agent/provider detection (`retcon-agents`)
-- [x] **P2** Await `child.wait()` instead of 250ms poll (`spikes/agent.rs`)
-- [x] **P2** Cache schema version after open (`state.rs`)
-- [x] **P2** Lazy-load event replay pages from DB at startup (`event.rs`)
-- [x] **P2** Pass browser temp profile dir via `launchPersistentContext` (`browser.ts`)
-- [x] **P2** Stdout backpressure on browser-service event emits (`main.ts`)
-- [x] **P2** Spawn `bun` directly (no `cmd /C` shell) on Windows (`spikes/browser.rs`)
-- [x] **P3** Deduplicate console/network stream vs buffer shipping (`browser.ts` — network
-  responses now land in the ring buffer)
-- [x] **P3** Method-aware concurrency for browser-service stdio RPC (`main.ts`)
-- [x] **P3** Cache log level at module load (`logging.ts`)
-- [x] **P3** Website asset generation: single Sharp pipeline + `Promise.all` for icons
-- [x] **P3** Website CLS: explicit image dimensions; defer Tally iframe (`index.astro`)
-- [x] **P3** CI-generate PWA icons referenced by `site.webmanifest` (`package.json` build)
+- [x] **P1** Project clone/health via capped `retcon_git`; `analyze` in `spawn_blocking`
+  (`crates/retcon-core/src/projects.rs`)
+- [x] **P1** RPC connection cap (64) + outbound frame size guard
+  (`crates/retcon-core/src/server.rs`)
+- [x] **P1** Browser-service: concurrent status/logs, frame caps, intentional-close,
+  text/url truncation, logs default to tail
+  (`apps/browser-service`)
+- [x] **P2** Artifact `UNION ALL` + HashSet dedupe
+  (`crates/retcon-storage/src/artifacts.rs`)
+- [x] **P2** Claude doctor diagnostics timeouts
+  (`crates/retcon-agents/src/lib.rs`)
 
 ---
 
-## Completed schema work
+## Remaining TODO
 
-- [x] **P3** UUID-as-BLOB schema migration (`retcon-storage` migration `0004`)
-  - Rebuilds v1-v3 databases transactionally, converts every UUID column to compact
-    16-byte BLOBs, recreates indexes, and updates active repository/core bindings.
+### P1
+
+- [ ] **Dedicated job-persistence writer actor** — debounce/flush off the async
+  emit path; avoid `block_in_place` assumptions on current-thread runtimes
+  (`crates/retcon-core/src/jobs.rs`)
+- [ ] **Event bus flush on shutdown** — join/drain the persist writer so durable
+  lifecycle/recovery events are not lost on fast exit
+  (`crates/retcon-core/src/event.rs`, `lifecycle.rs`)
+- [ ] **`project.clone` as a supervised cancellable job** — long clones should
+  report progress and support cancel (`projects.rs` + `jobs.rs`)
+- [ ] **Agent stdout/stderr line caps** — `BufReader::lines()` can still buffer an
+  arbitrarily long provider line (`crates/retcon-agents`, `spikes/agent.rs`)
+
+### P2
+
+- [ ] **`jobs.list` / session list SQL pagination** — avoid loading large
+  in-memory snapshots for API callers
+- [ ] **SQL-side `project.list` filter + limit** — currently filters in Rust after
+  loading all projects/settings
+- [ ] **`agent_events(created_at)` index** — speeds retention deletes when the
+  table grows
+- [ ] **Artifact retention streaming** — walk/cleanup without materializing the
+  full referenced-hash set when possible
+- [ ] **Desktop `CoreClient` frame cap** — LineSplitter / unguarded `jsonDecode`
+  (`apps/desktop/lib/src/core_client.dart`)
+- [ ] **Floating panel instance IDs + closed-panel cap + layout save coalesce**
+  (`apps/desktop/lib/src/desktop_shell.dart`, `workspace.dart`)
+- [ ] **Windows PTY `taskkill` off the child mutex**
+  (`crates/retcon-terminal/src/lib.rs`)
+- [ ] **Multi-page Playwright listeners** — only the first page gets
+  console/network hooks today (`apps/browser-service/src/browser.ts`)
+
+### P3
+
+- [ ] **`negotiate_features` de-dupe / HashSet lookup**
+  (`crates/retcon-protocol/src/lib.rs`)
+- [ ] **Website asset short-circuit when outputs are fresh**
+- [ ] **CI Playwright browser cache**
+- [ ] **BLOB-native fresh schema** — skip v1→v4 rebuild path for new installs
+- [ ] **Design-system focus `setState` guard**
 
 ---
 
-## Suggested order of attack (completed)
+## Previously completed (earlier review rounds)
 
-1. Frame-size caps + event retention + job eviction (bounds) ✅
-2. Event writer off async path + terminal coalesce (throughput) ✅
-3. Recovery indexes + Git/browser evidence polish (latency) ✅
-4. Storage pragma / statement-cache tuning (incremental) ✅
+- Frame-size intent, event retention, job eviction, browser ring buffers
+- Terminal output coalesce, SQLite off hot path, recovery indexes (v3)
+- UUID-as-BLOB migration (v4), storage pragma tuning, statement caches
+- Browser writer actor split, artifact hash indexes, Git stdout cap (pre-kill)
+
+---
+
+## Suggested order of attack (remaining)
+
+1. Event flush on shutdown + job writer actor (durability / hot path)
+2. Agent line caps + `project.clone` job (bounds / UX)
+3. Desktop frame caps + floating panel identity (shell stability)
+4. SQL pagination / indexes (scale)

@@ -266,7 +266,10 @@ const fn session_transition_allowed(from: SessionState, to: SessionState) -> boo
 const fn turn_transition_allowed(from: TurnState, to: TurnState) -> bool {
     matches!(
         (from, to),
-        (TurnState::Queued, TurnState::Sending | TurnState::Cancelled)
+        (
+            TurnState::Queued,
+            TurnState::Sending | TurnState::Failed | TurnState::Cancelled,
+        )
             | (
                 TurnState::Sending,
                 TurnState::Running | TurnState::Failed | TurnState::Cancelled
@@ -345,6 +348,10 @@ mod tests {
         ] {
             turn.transition(state).unwrap();
         }
+    #[test]
+    fn turn_allows_queued_to_failed_for_process_recovery() {
+        let mut turn = TurnMachine::new();
+        turn.transition(TurnState::Failed).unwrap();
         assert!(turn.state().is_terminal());
     }
 }
