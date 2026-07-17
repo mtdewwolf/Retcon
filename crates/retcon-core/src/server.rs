@@ -287,18 +287,25 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             | "secrets.scan"
     ) {
         let project_id = permission_project_id(state, &request);
-        if matches!(
+        let missing_dev_server_owner = matches!(
             request.method.as_str(),
             "devServer.start" | "devServer.stop" | "devServer.restart" | "devServer.autoStart.set"
-        ) && project_id.is_none()
-        {
+        ) && project_id.is_none();
+        let missing_browser_owner = request.method.starts_with("browser.")
+            && !matches!(
+                request.method.as_str(),
+                "browser.startService" | "browser.stopService" | "browser.call"
+            )
+            && retcon_permissions::requires_approval(&request.method)
+            && project_id.is_none();
+        if missing_dev_server_owner || missing_browser_owner {
             return Response::error(
                 request.id,
                 &CoreError::new(
                     ErrorCode::NotFound,
                     ErrorSource::Rpc,
-                    "The requested development server information was not found.",
-                    "development server permission owner not found",
+                    "The requested protected resource was not found.",
+                    "permission owner not found",
                 ),
             );
         }
@@ -415,7 +422,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             Some("terminal") => crate::spikes::terminal::handle(state.clone(), request).await,
             Some("git") => crate::git_rpc::handle(state.clone(), request).await,
             Some("agent") => crate::spikes::agent::handle(state.clone(), request).await,
-            Some("browser") => crate::spikes::browser::handle(state.clone(), request).await,
+            Some("browser") => crate::browser_rpc::handle(state.clone(), request).await,
             Some("storage") => crate::storage_rpc::handle(state.clone(), request).await,
             Some("file") => crate::file_rpc::handle(state.clone(), request).await,
             Some("checkpoint") => crate::checkpoints_rpc::handle(state.clone(), request).await,
@@ -448,29 +455,57 @@ fn permission_project_id(state: &CoreState, request: &Request) -> Option<Uuid> {
     {
         return Some(project_id);
     }
-    if !request.method.starts_with("devServer.") {
-        return None;
+    if request.method.starts_with("devServer.") {
+        let repository = state.storage().database().dev_servers();
+        if let Some(config_id) = request
+            .params
+            .get("configId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            return repository
+                .config(config_id)
+                .ok()
+                .flatten()
+                .map(|config| config.project_id);
+        }
+        return request
+            .params
+            .get("instanceId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+            .and_then(|instance_id| repository.instance(instance_id).ok().flatten())
+            .map(|instance| instance.project_id);
     }
-    let repository = state.storage().database().dev_servers();
-    if let Some(config_id) = request
-        .params
-        .get("configId")
-        .and_then(|value| value.as_str())
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-    {
-        return repository
-            .config(config_id)
-            .ok()
-            .flatten()
-            .map(|config| config.project_id);
+    if request.method.starts_with("browser.") {
+        let repository = state.storage().database().durable_browsers();
+        if let Some(session_id) = request
+            .params
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            return repository
+                .session(session_id)
+                .ok()
+                .flatten()
+                .map(|session| session.project_id);
+        }
+        if let Some(tab_id) = request
+            .params
+            .get("tabId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            return repository
+                .tab(tab_id)
+                .ok()
+                .flatten()
+                .and_then(|tab| repository.session(tab.browser_session_id).ok().flatten())
+                .map(|session| session.project_id);
+        }
     }
-    request
-        .params
-        .get("instanceId")
-        .and_then(|value| value.as_str())
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .and_then(|instance_id| repository.instance(instance_id).ok().flatten())
-        .map(|instance| instance.project_id)
+    None
 }
 
 fn invalid_request(technical_message: impl Into<String>) -> CoreError {

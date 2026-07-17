@@ -33,6 +33,28 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
             Some(ApprovalCategory::Terminal)
         }
         "devServer.configure" | "devServer.autoStart.set" => Some(ApprovalCategory::System),
+        "browser.startService"
+        | "browser.stopService"
+        | "browser.call"
+        | "browser.session.start"
+        | "browser.session.stop"
+        | "browser.tab.open"
+        | "browser.tab.close"
+        | "browser.tab.activate"
+        | "browser.navigate"
+        | "browser.back"
+        | "browser.forward"
+        | "browser.reload"
+        | "browser.observation.screenshot"
+        | "browser.observation.snapshot"
+        | "browser.observation.logs"
+        | "browser.observation.trace"
+        | "browser.automation.action"
+        | "browser.automation.script"
+        | "browser.automation.upload"
+        | "browser.automation.download"
+        | "browser.takeover.start"
+        | "browser.takeover.stop" => Some(ApprovalCategory::Browser),
         _ => None,
     }
 }
@@ -74,6 +96,28 @@ pub fn method_summary(method: &str) -> &'static str {
         "devServer.restart" => "Restart a development server",
         "devServer.configure" => "Change development server settings or environment",
         "devServer.autoStart.set" => "Change development server auto-start settings",
+        "browser.session.start" => "Start a managed browser session",
+        "browser.startService" => "Start the legacy managed browser service",
+        "browser.stopService" => "Stop the legacy managed browser service",
+        "browser.call" => "Run a legacy managed browser operation",
+        "browser.session.stop" => "Stop a managed browser session",
+        "browser.tab.open" => "Open a managed browser tab",
+        "browser.tab.close" => "Close a managed browser tab",
+        "browser.tab.activate" => "Activate a managed browser tab",
+        "browser.navigate" => "Navigate the managed browser",
+        "browser.back" => "Navigate the managed browser backward",
+        "browser.forward" => "Navigate the managed browser forward",
+        "browser.reload" => "Reload the managed browser tab",
+        "browser.observation.screenshot" => "Capture a browser screenshot",
+        "browser.observation.snapshot" => "Capture a browser accessibility snapshot",
+        "browser.observation.logs" => "Capture browser console and network logs",
+        "browser.observation.trace" => "Capture a browser trace",
+        "browser.automation.action" => "Run a browser automation action",
+        "browser.automation.script" => "Run a script in the managed browser",
+        "browser.automation.upload" => "Upload project files through the browser",
+        "browser.automation.download" => "Download a browser file into the project",
+        "browser.takeover.start" => "Take manual control of the managed browser",
+        "browser.takeover.stop" => "Release manual control of the managed browser",
         _ => "Perform a protected operation",
     }
 }

@@ -106,6 +106,12 @@ mod tests {
             "devServer.restart",
             "devServer.configure",
             "devServer.autoStart.set",
+            "browser.session.start",
+            "browser.session.stop",
+            "browser.navigate",
+            "browser.automation.script",
+            "browser.automation.upload",
+            "browser.takeover.start",
         ] {
             assert_eq!(
                 check_rpc_method_with_bypass(method, true),
@@ -266,6 +272,28 @@ mod tests {
             "devServer.restart",
             "devServer.configure",
             "devServer.autoStart.set",
+        ] {
+            assert!(matches!(
+                check_rpc_method_with_bypass(method, false),
+                RpcPermission::Denied { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn deny_browser_lifecycle_navigation_automation_and_takeover_by_default() {
+        for method in [
+            "browser.session.start",
+            "browser.session.stop",
+            "browser.tab.open",
+            "browser.navigate",
+            "browser.observation.screenshot",
+            "browser.automation.action",
+            "browser.automation.script",
+            "browser.automation.upload",
+            "browser.automation.download",
+            "browser.takeover.start",
+            "browser.takeover.stop",
         ] {
             assert!(matches!(
                 check_rpc_method_with_bypass(method, false),

@@ -9,6 +9,7 @@ pub enum ApprovalCategory {
     Git,
     Terminal,
     File,
+    Browser,
     System,
 }
 
@@ -23,6 +24,7 @@ impl ApprovalCategory {
             Self::Git => "git",
             Self::Terminal => "terminal",
             Self::File => "file",
+            Self::Browser => "browser",
             Self::System => "system",
         }
     }
@@ -37,6 +39,7 @@ impl ApprovalCategory {
             Self::Git => "Git",
             Self::Terminal => "Terminal",
             Self::File => "Filesystem",
+            Self::Browser => "Browser",
             Self::System => "System",
         }
     }

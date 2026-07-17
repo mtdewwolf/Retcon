@@ -346,6 +346,45 @@ pub struct DevServerPortParams {
     pub approval_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserSessionStartParams {
+    pub project_id: Uuid,
+    #[serde(default)]
+    pub task_id: Option<Uuid>,
+    #[serde(default)]
+    pub dev_server_instance_id: Option<Uuid>,
+    #[serde(default)]
+    pub persistent_profile: bool,
+    #[serde(default = "default_browser_network_policy")]
+    pub network_policy: String,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserSessionParams {
+    pub session_id: Uuid,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserNavigateParams {
+    pub session_id: Uuid,
+    #[serde(default)]
+    pub tab_id: Option<Uuid>,
+    pub url: String,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+}
+
+fn default_browser_network_policy() -> String {
+    "loopback".into()
+}
+
 fn default_dev_server_host() -> String {
     "127.0.0.1".into()
 }
@@ -537,6 +576,32 @@ pub fn method_catalog() -> &'static [(&'static str, &'static [&'static str])] {
                 "browser.startService",
                 "browser.stopService",
                 "browser.call",
+                "browser.session.start",
+                "browser.session.stop",
+                "browser.session.list",
+                "browser.session.status",
+                "browser.session.history",
+                "browser.service.diagnostics",
+                "browser.tab.list",
+                "browser.tab.open",
+                "browser.tab.close",
+                "browser.tab.activate",
+                "browser.navigate",
+                "browser.back",
+                "browser.forward",
+                "browser.reload",
+                "browser.observation.screenshot",
+                "browser.observation.snapshot",
+                "browser.observation.logs",
+                "browser.observation.trace",
+                "browser.observation.list",
+                "browser.automation.action",
+                "browser.automation.script",
+                "browser.automation.upload",
+                "browser.automation.download",
+                "browser.takeover.start",
+                "browser.takeover.stop",
+                "browser.takeover.status",
             ],
         ),
         (
