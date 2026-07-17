@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+import { delimiter } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { ManagedBrowser } from "./browser.ts";
@@ -8,6 +10,18 @@ const VERSION = "0.1.0";
 const MAX_STDOUT_BACKLOG = 64;
 const MAX_REQUEST_BYTES = 1_048_576;
 const MAX_ACTIVE_REQUESTS = 64;
+const PROTOCOL_VERSION = 1;
+const FEATURES = [
+  "sessions",
+  "tabs",
+  "navigation",
+  "observations",
+  "actions",
+  "trace",
+  "video",
+  "takeover",
+  "cancel",
+];
 type RpcRequest = { id: number; method: string; params?: Record<string, unknown> };
 
 function parseArgs(argv: string[]): { health: boolean; stdio: boolean; pipe: string | undefined } {
@@ -54,8 +68,11 @@ function validateRequest(value: unknown): RpcRequest {
   if (!Number.isSafeInteger(request.id) || (request.id as number) < 0) {
     throw new Error("request id must be a non-negative safe integer");
   }
-  if (typeof request.method !== "string" || !/^browser\.[A-Za-z0-9_.-]+$/.test(request.method)) {
-    throw new Error("request method must be a browser.* method");
+  if (
+    typeof request.method !== "string" ||
+    !/^(?:browser|service)\.[A-Za-z0-9_.-]+$/.test(request.method)
+  ) {
+    throw new Error("request method must be a browser.* or service.* method");
   }
   if (
     request.params !== undefined &&
@@ -74,6 +91,8 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
   const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
   const active = new Map<number, AbortController>();
   const pending = new Set<Promise<void>>();
+  const requiredToken = process.env.RETCON_BROWSER_AUTH_TOKEN;
+  let authenticated = !requiredToken;
   let mutationTail = Promise.resolve();
   for await (const line of lines) {
     if (Buffer.byteLength(line) > MAX_REQUEST_BYTES) {
@@ -89,6 +108,67 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
         error: { message: error instanceof Error ? error.message : "malformed JSON" },
       });
       continue;
+    }
+    if (request.method === "service.hello") {
+      const token = typeof request.params?.token === "string" ? request.params.token : "";
+      const suppliedProtocol = request.params?.protocolVersion;
+      const tokenMatches =
+        !requiredToken ||
+        (token.length === requiredToken.length &&
+          timingSafeEqual(Buffer.from(token), Buffer.from(requiredToken)));
+      if (!tokenMatches) {
+        await writeLine({
+          id: request.id,
+          error: { code: "unauthorized", message: "invalid service token" },
+        });
+        continue;
+      }
+      if (suppliedProtocol !== PROTOCOL_VERSION) {
+        await writeLine({
+          id: request.id,
+          error: {
+            code: "protocol_mismatch",
+            message: `browser service protocol ${PROTOCOL_VERSION} does not match ${String(suppliedProtocol)}`,
+          },
+        });
+        continue;
+      }
+      authenticated = true;
+      await writeLine({
+        id: request.id,
+        result: {
+          serviceVersion: VERSION,
+          protocolVersion: PROTOCOL_VERSION,
+          features: FEATURES,
+          healthy: true,
+          pid: process.pid,
+        },
+      });
+      continue;
+    }
+    if (!authenticated) {
+      await writeLine({
+        id: request.id,
+        error: { code: "unauthorized", message: "service handshake required" },
+      });
+      continue;
+    }
+    if (request.method === "service.roots.add") {
+      try {
+        await browser.addInputRoots(request.params?.roots);
+        await writeLine({ id: request.id, result: { approved: true } });
+      } catch (error) {
+        await writeLine({
+          id: request.id,
+          error: { message: error instanceof Error ? error.message : String(error) },
+        });
+      }
+      continue;
+    }
+    if (request.method === "service.shutdown") {
+      await browser.close();
+      await writeLine({ id: request.id, result: { stopped: true } });
+      break;
     }
     if (request.method === "browser.cancel") {
       const target = request.params?.requestId;
@@ -160,7 +240,18 @@ async function main(): Promise<number> {
   const emit = (event: { type: string; payload: Record<string, unknown> }): void => {
     void emitEvent(backlog, event);
   };
-  const browser = new ManagedBrowser(emit);
+  const configuredInputRoots = process.env.RETCON_BROWSER_INPUT_ROOTS?.split(delimiter).filter(
+    (root) => root.length > 0,
+  );
+  const browser = new ManagedBrowser(emit, {
+    ...(process.env.RETCON_BROWSER_ARTIFACT_ROOT
+      ? { artifactRoot: process.env.RETCON_BROWSER_ARTIFACT_ROOT }
+      : {}),
+    ...(process.env.RETCON_BROWSER_PROFILE_ROOT
+      ? { profileRoot: process.env.RETCON_BROWSER_PROFILE_ROOT }
+      : {}),
+    ...(configuredInputRoots?.length ? { inputRoots: configuredInputRoots } : {}),
+  });
   const rpc = args.stdio ? undefined : connect(args.pipe);
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

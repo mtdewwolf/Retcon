@@ -27,6 +27,13 @@ Every request is `{ "id": number, "method": "browser.*", "params": object }`. Mu
 serialized, read-only status/log calls can run concurrently, `browser.cancel` accepts a
 `requestId`, and all operations have bounded timeouts.
 
+When Core sets `RETCON_BROWSER_AUTH_TOKEN`, stdio starts locked. Core must first send
+`service.hello` with the token and protocol version; incompatible or unauthenticated clients are
+rejected before browser state can be touched. Core configures managed artifact/profile roots and
+may approve canonical project input roots after the handshake. Development discovery uses
+`apps/browser-service`; packaged layouts can set `RETCON_BROWSER_SERVICE_DIR` and
+`RETCON_NODE_PATH` explicitly.
+
 - Lifecycle: `installation`, `launch`, `status`, `close`, `kill`, `recover`
 - Sessions and tabs: `tab.new`, `tab.list`, `tab.select`, `tab.close`
 - Navigation: `navigate`, `back`, `forward`, `reload`, `stop`

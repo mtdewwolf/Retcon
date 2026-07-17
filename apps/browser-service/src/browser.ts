@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -169,6 +169,18 @@ export class ManagedBrowser {
 
   async launch(params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     return this.call("browser.launch", params);
+  }
+
+  async addInputRoots(rawRoots: unknown): Promise<void> {
+    if (!Array.isArray(rawRoots) || rawRoots.length === 0 || rawRoots.length > 64) {
+      throw new Error("roots must contain between 1 and 64 paths");
+    }
+    for (const raw of rawRoots) {
+      const root = resolve(stringParam(raw, "input root", { required: true, max: 4_096 }));
+      const canonical = await realpath(root);
+      if (!(await stat(canonical)).isDirectory()) throw new Error("input root must be a directory");
+      if (!this.inputRoots.includes(canonical)) this.inputRoots.push(canonical);
+    }
   }
 
   async navigate(url: string): Promise<Record<string, unknown>> {

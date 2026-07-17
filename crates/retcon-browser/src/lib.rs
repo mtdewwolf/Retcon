@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+mod node;
+
+pub use node::{NodeBrowserService, NodeBrowserServiceConfig, NodeStdioTransport};
+
 pub const BROWSER_SERVICE_PROTOCOL: u32 = 1;
 pub const MAX_SERVICE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -45,7 +49,11 @@ impl BrowserServiceDiagnostics {
 pub struct BrowserLaunchRequest {
     pub session_id: Uuid,
     pub profile_path: String,
+    #[serde(default)]
+    pub persistent_profile: bool,
     pub network_policy: String,
+    #[serde(default)]
+    pub input_roots: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

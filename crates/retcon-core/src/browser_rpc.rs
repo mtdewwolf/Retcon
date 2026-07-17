@@ -127,7 +127,11 @@ async fn start_session(state: &CoreState, id: u64, params: &Value) -> Response {
     let launch = BrowserLaunchRequest {
         session_id,
         profile_path: input.profile_path,
+        persistent_profile: input.persistent_profile,
         network_policy: input.network_policy,
+        input_roots: project_root(state, &prepared)
+            .map(|root| vec![root.to_string_lossy().into_owned()])
+            .unwrap_or_default(),
     };
     match state.browser_service().launch(&launch).await {
         Ok(started) if !started.service_session_id.trim().is_empty() => {
@@ -418,7 +422,21 @@ fn validate_operation(
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if !matches!(action, "click" | "fill" | "press" | "text" | "select") {
+        if !matches!(
+            action,
+            "click"
+                | "fill"
+                | "type"
+                | "press"
+                | "key"
+                | "text"
+                | "select"
+                | "scroll"
+                | "drag"
+                | "wait"
+                | "dialog"
+                | "popup"
+        ) {
             return Err("unsupported browser automation action".into());
         }
     }
@@ -746,6 +764,10 @@ async fn takeover_start(state: &CoreState, id: u64, params: &Value) -> Response 
     };
     let reason = params.get("reason").and_then(Value::as_str).map(scrub);
     let reason = reason.as_deref();
+    let headed = params
+        .get("headed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let repository = state.storage().database().durable_browsers();
     let takeover = match repository.start_takeover(session_id, ACTOR, reason) {
         Ok(value) => value,
@@ -756,7 +778,7 @@ async fn takeover_start(state: &CoreState, id: u64, params: &Value) -> Response 
         .call(
             session_id,
             "browser.takeover.start",
-            json!({"reason":reason}),
+            json!({"reason":reason,"headed":headed}),
         )
         .await
     {

@@ -17,7 +17,7 @@ use crate::spikes::agent::AgentRegistry;
 use crate::spikes::browser::BrowserHandle;
 use crate::spikes::terminal::TerminalRegistry;
 use crate::verification::{DurableVerificationRunner, VerificationRunner};
-use retcon_browser::{BrowserService, UnavailableBrowserService};
+use retcon_browser::{BrowserService, NodeBrowserService};
 use retcon_filesystem::FilesystemHandle;
 use retcon_permissions::ApprovalEngine;
 use retcon_storage::{RecoveryReport, Storage};
@@ -99,6 +99,8 @@ impl CoreState {
                 events.clone(),
             ))
         });
+        let browser_service = browser_service
+            .unwrap_or_else(|| Arc::new(NodeBrowserService::discover(storage.data_dir())));
         if recovery.changed_state() {
             events.emit(
                 "system.recovery",
@@ -115,8 +117,7 @@ impl CoreState {
                 agents: AgentRegistry::default(),
                 sessions: SessionRegistry::default(),
                 browser: BrowserHandle::default(),
-                browser_service: browser_service
-                    .unwrap_or_else(|| Arc::new(UnavailableBrowserService)),
+                browser_service,
                 storage,
                 filesystem: FilesystemHandle::default(),
                 recovery,
