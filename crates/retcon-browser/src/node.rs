@@ -533,6 +533,7 @@ fn map_call(
     let mut object = params.as_object().cloned().ok_or_else(|| {
         BrowserServiceError::new("validation", "browser params must be an object")
     })?;
+    object.remove("approvalId");
     object.insert("sessionId".into(), Value::String(session_id.to_string()));
     if let Some(service_tab_id) = object.remove("serviceTabId") {
         object.insert("pageId".into(), service_tab_id);
@@ -779,6 +780,25 @@ mod tests {
             request_timeout: Duration::from_secs(30),
             protocol_version: BROWSER_SERVICE_PROTOCOL,
         }
+    }
+
+    #[test]
+    fn call_mapping_strips_approval_tokens_at_the_service_boundary() {
+        let session_id = Uuid::new_v4();
+        let takeovers = SyncMutex::new(HashMap::new());
+        let (_, params) = map_call(
+            session_id,
+            "browser.navigate",
+            json!({
+                "url":"http://127.0.0.1:3000",
+                "approvalId":Uuid::new_v4()
+            }),
+            &takeovers,
+        )
+        .unwrap();
+
+        assert_eq!(params["sessionId"], session_id.to_string());
+        assert!(params.get("approvalId").is_none());
     }
 
     async fn fixture() -> (String, tokio::task::JoinHandle<()>) {
