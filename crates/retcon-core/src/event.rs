@@ -76,7 +76,6 @@ struct PersistJob {
 struct EventBusInner {
     log: Mutex<EventLog>,
     sender: broadcast::Sender<Arc<EventEnvelope>>,
-    database: Database,
     persist_tx: SyncSender<PersistJob>,
     _writer: JoinHandle<()>,
 }
@@ -112,7 +111,6 @@ impl EventBus {
                     next_sequence,
                 }),
                 sender,
-                database,
                 persist_tx,
                 _writer: writer,
             }),

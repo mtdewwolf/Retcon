@@ -44,7 +44,7 @@ fn canonical_directory(path: &str) -> Result<PathBuf, CoreError> {
 pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
     let root = canonical_directory(path)?;
     let root_text = root.to_string_lossy().into_owned();
-    let remote = git_output(&root, &["remote", "get-url", "origin"])
+    let remote = retcon_git::run_git(&root, &["remote", "get-url", "origin"])
         .await
         .ok()
         .filter(|s| !s.is_empty());

@@ -77,4 +77,37 @@ mod tests {
         );
         assert_eq!(db.tasks().get(task.id).unwrap().unwrap().status, "pending");
     }
+
+    #[test]
+    fn recovers_waiting_sessions_and_queued_turns() {
+        let db = Database::open_in_memory().unwrap();
+        let project = db.projects().create(&NewProject::new("Retcon")).unwrap();
+        let mut new_session = NewSession::new(project.id, "Waiting");
+        new_session.status = "waiting_for_approval".into();
+        let session = db.sessions().create(&new_session).unwrap();
+        let turn_id = uuid::Uuid::new_v4();
+        db.execute(
+            "INSERT INTO turns (id,session_id,sequence,status,started_at) VALUES (?1,?2,1,'queued',1)",
+            &[&turn_id.as_bytes() as &dyn rusqlite::ToSql, &session.id.as_bytes()],
+        )
+        .unwrap();
+
+        let report = db.recover_interrupted().unwrap();
+        assert_eq!(report.interrupted_sessions, 1);
+        assert_eq!(report.interrupted_turns, 1);
+        assert_eq!(
+            db.sessions().get(session.id).unwrap().unwrap().status,
+            "disconnected"
+        );
+        let status = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT status FROM turns WHERE id = ?1",
+                    [turn_id.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "failed");
+    }
 }

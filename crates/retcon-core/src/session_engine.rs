@@ -348,6 +348,9 @@ mod tests {
         ] {
             turn.transition(state).unwrap();
         }
+        assert!(turn.state().is_terminal());
+    }
+
     #[test]
     fn turn_allows_queued_to_failed_for_process_recovery() {
         let mut turn = TurnMachine::new();
