@@ -36,8 +36,8 @@ impl Database {
     /// Mark process-owned state left running by a previous core as interrupted or orphaned.
     pub fn recover_interrupted(&self) -> Result<RecoveryReport> {
         self.transaction(|tx| {
-            let interrupted_sessions = tx.execute("UPDATE sessions SET status='interrupted',recovery_state='process_restart',updated_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
-            let interrupted_turns = tx.execute("UPDATE turns SET status='interrupted',completed_at=?1,error_json='{\"reason\":\"process_restart\"}' WHERE status IN ('queued','running')", [now_ms()])? as u64;
+            let interrupted_sessions = tx.execute("UPDATE sessions SET status='disconnected',recovery_state='process_restart',updated_at=?1 WHERE status IN ('starting','running','waiting_for_approval','waiting_for_user')", [now_ms()])? as u64;
+            let interrupted_turns = tx.execute("UPDATE turns SET status='failed',completed_at=?1,error_json='{\"reason\":\"process_restart\"}' WHERE status IN ('queued','sending','running','tool_execution','waiting_for_approval','completing')", [now_ms()])? as u64;
             let orphaned_jobs = tx.execute("UPDATE background_jobs SET status='orphaned',finished_at=?1,failure_class='internal',failure='core process restarted before job completion' WHERE status IN ('queued','running','stuck')", [now_ms()])? as u64;
             let interrupted_terminals = tx.execute("UPDATE terminal_sessions SET status='interrupted',ended_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
             let interrupted_browsers = tx.execute("UPDATE browser_sessions SET status='interrupted',ended_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(report.active_tasks, 1);
         assert_eq!(
             db.sessions().get(session.id).unwrap().unwrap().status,
-            "interrupted"
+            "disconnected"
         );
         assert_eq!(db.tasks().get(task.id).unwrap().unwrap().status, "pending");
     }

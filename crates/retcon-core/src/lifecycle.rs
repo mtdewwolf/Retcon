@@ -317,7 +317,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "interrupted"
+            "disconnected"
         );
         assert_eq!(
             second

@@ -18,6 +18,7 @@ mod projects_rpc;
 mod providers_rpc;
 pub mod rpc;
 pub mod server;
+pub mod session_engine;
 pub mod spikes;
 pub mod state;
 
