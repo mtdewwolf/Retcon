@@ -11,6 +11,7 @@ import 'core_client.dart';
 import 'projects/project_picker.dart';
 import 'projects/project_controller.dart';
 import 'provider_doctor_dialog.dart';
+import 'tasks/tasks.dart';
 import 'window_controller.dart';
 import 'workspace.dart';
 
@@ -152,6 +153,7 @@ class DesktopShell extends StatefulWidget {
     this.projectTitle = 'No project open',
     this.branch = '—',
     this.provider = 'Provider offline',
+    this.taskRepository,
     this.onCommand,
   });
 
@@ -161,6 +163,7 @@ class DesktopShell extends StatefulWidget {
   final String projectTitle;
   final String branch;
   final String provider;
+  final TaskRepository? taskRepository;
   final ValueChanged<ShellCommand>? onCommand;
 
   @override
@@ -233,7 +236,11 @@ class _DesktopShellState extends State<DesktopShell> {
       case ShellCommand.diagnostics:
         await _showDiagnosticsDialog();
       case ShellCommand.taskBoard:
-        await _showTaskBoardStub();
+        await TaskBoardDialog.show(
+          context,
+          repository: widget.taskRepository ?? InMemoryTaskRepository.demo(),
+          projectId: widget.projectController?.current?.id,
+        );
       case ShellCommand.fullScreen:
         await widget.windowController.toggleFullScreen();
       case ShellCommand.exit:
@@ -366,29 +373,6 @@ class _DesktopShellState extends State<DesktopShell> {
       ),
     );
   }
-
-  Future<void> _showTaskBoardStub() => showDialog<void>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Task board'),
-      content: const SizedBox(
-        width: 420,
-        height: 220,
-        child: Center(
-          child: Text(
-            'Task board UI arrives in a later phase. Sessions and approvals will appear here.',
-            textAlign: TextAlign.center,
-          ),
-        ),
-      ),
-      actions: [
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Close'),
-        ),
-      ],
-    ),
-  );
 
   Future<void> _showCommandPalette() => showDialog<void>(
     context: context,

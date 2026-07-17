@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/main.dart';
 import 'package:retcon_desktop/src/core_client.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
+import 'package:retcon_desktop/src/tasks/tasks.dart';
 import 'package:retcon_desktop/src/window_controller.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
@@ -74,6 +75,35 @@ void main() {
     expect(find.text('Search commands'), findsOneWidget);
     expect(find.text('Open terminal'), findsOneWidget);
     expect(find.text('Approval center'), findsOneWidget);
+  });
+
+  testWidgets('task board command opens the Phase 21 board', (tester) async {
+    await setDesktopSize(tester);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: testCore(),
+          taskRepository: InMemoryTaskRepository(
+            tasks: const [
+              RoadmapTask(
+                id: 'shell-task',
+                title: 'Shell task board integration',
+                status: TaskStatus.planned,
+              ),
+            ],
+          ),
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('View'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Task board').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Shell task board integration'), findsAtLeastNWidgets(1));
+    expect(find.byTooltip('Close task board'), findsOneWidget);
   });
 
   testWidgets('F11 routes to native fullscreen control', (tester) async {
