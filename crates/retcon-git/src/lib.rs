@@ -57,6 +57,7 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         .current_dir(repo)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| GitError {
             command: command_label.clone(),
@@ -76,39 +77,26 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
     })?;
 
     let stdout_task = tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 8192];
-        loop {
-            let read = stdout
-                .read(&mut chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            if read == 0 {
-                break;
-            }
-            if buffer.len().saturating_add(read) > max_bytes {
-                return Err(format!("git output exceeded {max_bytes} bytes"));
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        Ok(buffer)
+        read_capped_stream(&mut stdout, max_bytes).await
+    });
+    let stderr_task = tokio::spawn(async move {
+        read_capped_stream(&mut stderr, max_bytes).await
     });
 
-    let stderr_task = tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 1024];
-        loop {
-            let read = stderr
-                .read(&mut chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            if read == 0 {
-                break;
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        Ok(buffer)
-    });
+    let (stdout_join, stderr_join) = tokio::join!(stdout_task, stderr_task);
+    let stdout_result = stdout_join.map_err(|e| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: format!("stdout reader failed: {e}"),
+    })?;
+    let stderr_result = stderr_join.map_err(|e| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: format!("stderr reader failed: {e}"),
+    })?;
+    if stdout_result.is_err() || stderr_result.is_err() {
+        let _ = child.kill().await;
+    }
 
     let status = child.wait().await.map_err(|e| GitError {
         command: command_label.clone(),
@@ -116,30 +104,16 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         stderr: format!("failed to wait for git: {e}"),
     })?;
 
-    let stdout_bytes = stdout_task
-        .await
-        .map_err(|e| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: format!("stdout reader failed: {e}"),
-        })?
-        .map_err(|message| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: message,
-        })?;
-    let stderr_bytes = stderr_task
-        .await
-        .map_err(|e| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: format!("stderr reader failed: {e}"),
-        })?
-        .map_err(|message| GitError {
-            command: command_label.clone(),
-            exit_code: status.code(),
-            stderr: message,
-        })?;
+    let stdout_bytes = stdout_result.map_err(|message| GitError {
+        command: command_label.clone(),
+        exit_code: status.code(),
+        stderr: message,
+    })?;
+    let stderr_bytes = stderr_result.map_err(|message| GitError {
+        command: command_label.clone(),
+        exit_code: status.code(),
+        stderr: message,
+    })?;
 
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout_bytes).trim_end().to_owned())
@@ -150,6 +124,36 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
             stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
         })
     }
+}
+
+async fn read_capped_stream(
+    stream: &mut (impl AsyncReadExt + Unpin),
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut overflowed = false;
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if overflowed {
+            continue;
+        }
+        if buffer.len().saturating_add(read) > max_bytes {
+            overflowed = true;
+            continue;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    if overflowed {
+        return Err(format!("git output exceeded {max_bytes} bytes"));
+    }
+    Ok(buffer)
 }
 
 /// One entry from `git status --porcelain`.
@@ -409,8 +413,17 @@ async fn apply_patch(repo: &Path, patch: &str, prefix: &[&str]) -> Result<(), Gi
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
+    if patch.len() > MAX_GIT_OUTPUT_BYTES {
+        return Err(GitError {
+            command: prefix.join(" "),
+            exit_code: None,
+            stderr: format!("patch exceeds {MAX_GIT_OUTPUT_BYTES} bytes"),
+        });
+    }
+
     let mut args: Vec<&str> = prefix.to_vec();
     args.push("-");
+    let command_label = args.join(" ");
 
     let mut child = Command::new("git")
         .args(&args)
@@ -418,9 +431,10 @@ async fn apply_patch(repo: &Path, patch: &str, prefix: &[&str]) -> Result<(), Gi
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| GitError {
-            command: args.join(" "),
+            command: command_label.clone(),
             exit_code: None,
             stderr: format!("failed to launch git: {e}"),
         })?;
@@ -430,25 +444,69 @@ async fn apply_patch(repo: &Path, patch: &str, prefix: &[&str]) -> Result<(), Gi
             .write_all(patch.as_bytes())
             .await
             .map_err(|e| GitError {
-                command: args.join(" "),
+                command: command_label.clone(),
                 exit_code: None,
                 stderr: format!("failed to write patch: {e}"),
             })?;
+        drop(stdin);
     }
 
-    let output = child.wait_with_output().await.map_err(|e| GitError {
-        command: args.join(" "),
+    let mut stdout = child.stdout.take().ok_or_else(|| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: "git process has no stdout".into(),
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: "git process has no stderr".into(),
+    })?;
+
+    let stdout_task = tokio::spawn(async move {
+        read_capped_stream(&mut stdout, MAX_GIT_OUTPUT_BYTES).await
+    });
+    let stderr_task = tokio::spawn(async move {
+        read_capped_stream(&mut stderr, MAX_GIT_OUTPUT_BYTES).await
+    });
+    let (stdout_join, stderr_join) = tokio::join!(stdout_task, stderr_task);
+    let stdout_result = stdout_join.map_err(|e| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: format!("stdout reader failed: {e}"),
+    })?;
+    let stderr_result = stderr_join.map_err(|e| GitError {
+        command: command_label.clone(),
+        exit_code: None,
+        stderr: format!("stderr reader failed: {e}"),
+    })?;
+    if stdout_result.is_err() || stderr_result.is_err() {
+        let _ = child.kill().await;
+    }
+
+    let status = child.wait().await.map_err(|e| GitError {
+        command: command_label.clone(),
         exit_code: None,
         stderr: format!("failed to wait for git: {e}"),
     })?;
 
-    if output.status.success() {
+    let _ = stdout_result.map_err(|message| GitError {
+        command: command_label.clone(),
+        exit_code: status.code(),
+        stderr: message,
+    })?;
+    let stderr_bytes = stderr_result.map_err(|message| GitError {
+        command: command_label.clone(),
+        exit_code: status.code(),
+        stderr: message,
+    })?;
+
+    if status.success() {
         Ok(())
     } else {
         Err(GitError {
-            command: args.join(" "),
-            exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            command: command_label,
+            exit_code: status.code(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
         })
     }
 }

@@ -256,7 +256,7 @@ enum ReadHalfInner {
     #[cfg(windows)]
     PipeClient(tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeClient>),
     #[cfg(unix)]
-    Unix(tokio::io::ReadHalf<tokio::net::UnixStream>),
+    Unix(tokio::net::unix::OwnedReadHalf),
 }
 
 /// Read half of a transport stream.
@@ -287,7 +287,7 @@ enum WriteHalfInner {
     #[cfg(windows)]
     PipeClient(tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeClient>),
     #[cfg(unix)]
-    Unix(tokio::io::WriteHalf<tokio::net::UnixStream>),
+    Unix(tokio::net::unix::OwnedWriteHalf),
 }
 
 /// Write half of a transport stream.
