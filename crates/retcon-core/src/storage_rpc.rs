@@ -104,7 +104,9 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let layout_id = params.get("layoutId").and_then(Value::as_str);
             match layout_id {
                 Some(layout_id) => match state.storage().database().layouts().get(layout_id) {
-                    Ok(layout) => Response::ok(id, json!({"layout": layout.map(|l| layout_to_json(&l))})),
+                    Ok(layout) => {
+                        Response::ok(id, json!({"layout": layout.map(|l| layout_to_json(&l))}))
+                    }
                     Err(error) => failed(id, error.into()),
                 },
                 None => {
@@ -114,7 +116,9 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                         .layouts()
                         .get_active(workspace_id)
                     {
-                        Ok(layout) => Response::ok(id, json!({"layout": layout.map(|l| layout_to_json(&l))})),
+                        Ok(layout) => {
+                            Response::ok(id, json!({"layout": layout.map(|l| layout_to_json(&l))}))
+                        }
                         Err(error) => failed(id, error.into()),
                     }
                 }

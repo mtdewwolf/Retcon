@@ -62,18 +62,39 @@ fn pattern_rules() -> &'static [PatternRule] {
     static RULES: OnceLock<Vec<PatternRule>> = OnceLock::new();
     RULES.get_or_init(|| {
         let specs: &[(&str, &str)] = &[
-            (r"(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*\S+", "assignment"),
-            (r"(?i)\b(?:password|passwd|pwd)\s*[:=]\s*\S+", "password assignment"),
-            (r"(?i)\b(?:token|secret|authorization)\s*[:=]\s*\S+", "credential assignment"),
+            (
+                r"(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*\S+",
+                "assignment",
+            ),
+            (
+                r"(?i)\b(?:password|passwd|pwd)\s*[:=]\s*\S+",
+                "password assignment",
+            ),
+            (
+                r"(?i)\b(?:token|secret|authorization)\s*[:=]\s*\S+",
+                "credential assignment",
+            ),
             (r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*", "bearer token"),
-            (r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "private key"),
+            (
+                r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+                "private key",
+            ),
             (r"\bAKIA[0-9A-Z]{16}\b", "AWS access key"),
             (r"\b(?:ASIA)[0-9A-Z]{16}\b", "AWS session key"),
             (r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b", "GitHub token"),
             (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", "Slack token"),
-            (r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b", "Stripe secret key"),
-            (r"\brk_(?:live|test)_[A-Za-z0-9]{16,}\b", "Stripe restricted key"),
-            (r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]{10,}\b", "JWT"),
+            (
+                r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b",
+                "Stripe secret key",
+            ),
+            (
+                r"\brk_(?:live|test)_[A-Za-z0-9]{16,}\b",
+                "Stripe restricted key",
+            ),
+            (
+                r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]{10,}\b",
+                "JWT",
+            ),
             (
                 r"(?i)(?:postgres|mysql|mongodb|redis)://[^\s/:@]+:[^\s/@]+@",
                 "database URL with password",
@@ -82,7 +103,9 @@ fn pattern_rules() -> &'static [PatternRule] {
         specs
             .iter()
             .filter_map(|(pattern, label)| {
-                Regex::new(pattern).ok().map(|regex| PatternRule { regex, label })
+                Regex::new(pattern)
+                    .ok()
+                    .map(|regex| PatternRule { regex, label })
             })
             .collect()
     })
@@ -127,12 +150,18 @@ fn scan_entropy(text: &str) -> Vec<SecretFinding> {
     let mut findings = Vec::new();
     for token in text.split_whitespace() {
         let trimmed = token.trim_matches(|c: char| {
-            matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}')
+            matches!(
+                c,
+                '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+            )
         });
         if trimmed.len() < 20 || trimmed.len() > 256 {
             continue;
         }
-        if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+' | '/')) {
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+' | '/'))
+        {
             continue;
         }
         if trimmed.chars().all(|c| c.is_ascii_digit()) {
@@ -177,7 +206,12 @@ mod tests {
     fn detects_common_api_key_assignment() {
         let result = scan_text("export API_KEY=example_api_key");
         assert!(!result.is_clean());
-        assert!(result.findings.iter().any(|f| f.label.contains("assignment")));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.label.contains("assignment"))
+        );
     }
 
     #[test]

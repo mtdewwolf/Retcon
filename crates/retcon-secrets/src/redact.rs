@@ -9,10 +9,14 @@ static INLINE_SECRET: OnceLock<Regex> = OnceLock::new();
 
 fn inline_secret_regex() -> &'static Regex {
     INLINE_SECRET.get_or_init(|| {
-        Regex::new(
-            r"(?i)(\b(?:token|password|secret|authorization|api[_-]?key|access[_-]?key|auth)\s*[:=]\s*)(\S+)",
-        )
-        .expect("inline secret regex")
+        // Pattern is a compile-time constant; failure would be a programmer error.
+        #[allow(clippy::expect_used)]
+        {
+            Regex::new(
+                r"(?i)(\b(?:token|password|secret|authorization|api[_-]?key|access[_-]?key|auth)\s*[:=]\s*)(\S+)",
+            )
+            .expect("inline secret regex")
+        }
     })
 }
 
@@ -117,14 +121,18 @@ pub fn scrub_string_fields(value: Value, extra_keys: &[&str]) -> Value {
                 })
                 .collect(),
         ),
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(|v| scrub_string_fields(v, extra_keys)).collect())
-        }
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|v| scrub_string_fields(v, extra_keys))
+                .collect(),
+        ),
         other => other,
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -145,9 +153,11 @@ mod tests {
         }));
         assert_eq!(scrubbed["request"]["token"], "[REDACTED]");
         assert_eq!(scrubbed["prompt"], "[REDACTED]");
-        assert!(scrubbed["request"]["note"]
-            .as_str()
-            .unwrap()
-            .contains("[REDACTED]"));
+        assert!(
+            scrubbed["request"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("[REDACTED]")
+        );
     }
 }

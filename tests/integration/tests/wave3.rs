@@ -1,6 +1,8 @@
 //! Wave 3 integration checkpoint: session lifecycle, event replay, terminal cleanup.
 
-use retcon_integration::harness::{assert_ok, default_shell, RpcClient, TestCore};
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use retcon_integration::harness::{RpcClient, TestCore, assert_ok, default_shell};
 use serde_json::Value;
 use serde_json::json;
 use serial_test::serial;

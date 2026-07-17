@@ -1,5 +1,6 @@
 //! Directory listing, reading, and writing within a project root.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -28,7 +29,7 @@ pub struct FileEntry {
     pub is_directory: bool,
     /// File size in bytes (zero for directories).
     pub size: u64,
-    /// Optional git status badge (stub until Agent N lands).
+    /// Optional git status badge derived from porcelain (`modified` / `added` / `deleted`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_status: Option<String>,
 }
@@ -61,7 +62,14 @@ pub struct FileService;
 
 impl FileService {
     /// Lists a single directory level under `root`.
-    pub fn list(&self, root: &Path, path: Option<&str>) -> Result<Vec<FileEntry>, FilesystemError> {
+    ///
+    /// When `root` is inside a Git work tree, each entry's `git_status` reflects
+    /// real porcelain status (directories inherit a badge if any child is dirty).
+    pub async fn list(
+        &self,
+        root: &Path,
+        path: Option<&str>,
+    ) -> Result<Vec<FileEntry>, FilesystemError> {
         let directory = resolve_within_root(root, path.unwrap_or(""))?;
         if !directory.is_dir() {
             return Err(FilesystemError::InvalidRequest(format!(
@@ -69,6 +77,9 @@ impl FileService {
                 directory.display()
             )));
         }
+
+        let git_index = load_git_status_index(root).await;
+        let root_canon = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
         let mut entries = Vec::new();
         for entry in fs::read_dir(&directory)? {
@@ -87,22 +98,24 @@ impl FileService {
             } else {
                 entry.metadata().map(|meta| meta.len()).unwrap_or(0)
             };
+            let is_directory = file_type.is_dir();
+            let git_status = git_status_for_path(&root_canon, &path, is_directory, &git_index);
             entries.push(FileEntry {
                 name,
                 path: path.to_string_lossy().into_owned(),
-                is_directory: file_type.is_dir(),
+                is_directory,
                 size,
-                git_status: stub_git_status(&path),
+                git_status,
             });
         }
 
-        entries.sort_by(|left, right| {
-            match (left.is_directory, right.is_directory) {
+        entries.sort_by(
+            |left, right| match (left.is_directory, right.is_directory) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-            }
-        });
+            },
+        );
         Ok(entries)
     }
 
@@ -142,10 +155,7 @@ impl FileService {
         let (content, content_base64) = if binary {
             (None, Some(base64_encode(&bytes)))
         } else {
-            (
-                Some(String::from_utf8_lossy(&bytes).into_owned()),
-                None,
-            )
+            (Some(String::from_utf8_lossy(&bytes).into_owned()), None)
         };
 
         Ok(FileReadResult {
@@ -265,9 +275,7 @@ fn is_probably_binary(bytes: &[u8]) -> bool {
     let sample = bytes.len().min(8192);
     let non_text = bytes[..sample]
         .iter()
-        .filter(|byte| {
-            matches!(**byte, 0..=8 | 14..=31)
-        })
+        .filter(|byte| matches!(**byte, 0..=8 | 14..=31))
         .count();
     non_text * 10 > sample
 }
@@ -293,12 +301,130 @@ fn language_for_path(path: &Path) -> String {
     .to_owned()
 }
 
-fn stub_git_status(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_string_lossy();
-    if name == "Cargo.toml" || name == "pubspec.yaml" {
-        Some("modified".to_owned())
+async fn load_git_status_index(root: &Path) -> HashMap<String, String> {
+    match retcon_git::status(root).await {
+        Ok(status) => build_git_status_index(&status.entries),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn build_git_status_index(entries: &[retcon_git::StatusEntry]) -> HashMap<String, String> {
+    let mut index: HashMap<String, String> = HashMap::new();
+    for entry in entries {
+        let Some(badge) = porcelain_code_to_badge(&entry.code) else {
+            continue;
+        };
+        let path = entry.path.trim_end_matches('/').replace('\\', "/");
+        if path.is_empty() {
+            continue;
+        }
+        match index.get_mut(&path) {
+            Some(existing) => {
+                *existing = merge_git_badge(existing, badge).to_owned();
+            }
+            None => {
+                index.insert(path, badge.to_owned());
+            }
+        }
+    }
+    index
+}
+
+fn git_status_for_path(
+    root: &Path,
+    path: &Path,
+    is_directory: bool,
+    index: &HashMap<String, String>,
+) -> Option<String> {
+    if index.is_empty() {
+        return None;
+    }
+    let abs = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let rel = abs.strip_prefix(root).ok()?;
+    let key = path_to_git_key(rel);
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(badge) = index.get(&key) {
+        return Some(badge.clone());
+    }
+    // Git collapses untracked directories to `?? dir/`; children inherit that badge.
+    let mut ancestor = key.as_str();
+    while let Some((parent, _)) = ancestor.rsplit_once('/') {
+        if let Some(badge) = index.get(parent) {
+            return Some(badge.clone());
+        }
+        ancestor = parent;
+    }
+    if !is_directory {
+        return None;
+    }
+    let prefix = format!("{key}/");
+    let mut best: Option<&str> = None;
+    for (path, badge) in index {
+        if path.starts_with(&prefix) {
+            best = Some(match best {
+                Some(current) => merge_git_badge(current, badge),
+                None => badge.as_str(),
+            });
+        }
+    }
+    best.map(str::to_owned)
+}
+
+fn path_to_git_key(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Map a two-character porcelain code onto explorer badge labels.
+fn porcelain_code_to_badge(code: &str) -> Option<&'static str> {
+    let bytes = code.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let left = porcelain_char_to_badge(bytes[0]);
+    let right = porcelain_char_to_badge(bytes[1]);
+    match (left, right) {
+        (Some(a), Some(b)) => Some(merge_git_badge(a, b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn porcelain_char_to_badge(code: u8) -> Option<&'static str> {
+    match code {
+        b'M' | b'R' | b'C' | b'U' => Some("modified"),
+        b'A' | b'?' => Some("added"),
+        b'D' => Some("deleted"),
+        _ => None,
+    }
+}
+
+fn merge_git_badge(left: &str, right: &str) -> &'static str {
+    fn rank(badge: &str) -> u8 {
+        match badge {
+            "deleted" => 0,
+            "modified" => 1,
+            "added" => 2,
+            _ => 3,
+        }
+    }
+    let winner = if rank(left) <= rank(right) {
+        left
     } else {
-        None
+        right
+    };
+    match winner {
+        "deleted" => "deleted",
+        "added" => "added",
+        _ => "modified",
     }
 }
 
@@ -327,11 +453,12 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn list_and_read_round_trip() {
+    #[tokio::test]
+    async fn list_and_read_round_trip() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         fs::write(root.join("README.md"), "# hello").unwrap();
@@ -339,21 +466,27 @@ mod tests {
         fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
 
         let service = FileService;
-        let entries = service.list(root, None).unwrap();
+        let entries = service.list(root, None).await.unwrap();
         assert!(entries.iter().any(|entry| entry.name == "README.md"));
-        assert!(entries.iter().any(|entry| entry.name == "src" && entry.is_directory));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "src" && entry.is_directory)
+        );
+        assert!(entries.iter().all(|entry| entry.git_status.is_none()));
 
         let read = service.read(root, "README.md", DEFAULT_READ_LIMIT).unwrap();
         assert_eq!(read.content.as_deref(), Some("# hello"));
         assert_eq!(read.language, "markdown");
     }
 
-    #[test]
-    fn rejects_paths_outside_root() {
+    #[tokio::test]
+    async fn rejects_paths_outside_root() {
         let temp = tempfile::tempdir().unwrap();
         let service = FileService;
         let error = service
             .list(temp.path(), Some("../outside"))
+            .await
             .expect_err("should reject traversal");
         assert!(matches!(error, FilesystemError::OutsideRoot(_)));
     }
@@ -366,7 +499,9 @@ mod tests {
             .write(temp.path(), "notes.txt", "updated", DEFAULT_WRITE_LIMIT)
             .unwrap();
         assert_eq!(result.size, 7);
-        let read = service.read(temp.path(), "notes.txt", DEFAULT_READ_LIMIT).unwrap();
+        let read = service
+            .read(temp.path(), "notes.txt", DEFAULT_READ_LIMIT)
+            .unwrap();
         assert_eq!(read.content.as_deref(), Some("updated"));
     }
 
@@ -380,5 +515,104 @@ mod tests {
         assert!(read.truncated);
         assert_eq!(read.content.as_deref(), Some("xxxxxxxx"));
         assert_eq!(read.size, 32);
+    }
+
+    #[test]
+    fn porcelain_codes_map_to_badges() {
+        assert_eq!(porcelain_code_to_badge(" M"), Some("modified"));
+        assert_eq!(porcelain_code_to_badge("M "), Some("modified"));
+        assert_eq!(porcelain_code_to_badge("A "), Some("added"));
+        assert_eq!(porcelain_code_to_badge("??"), Some("added"));
+        assert_eq!(porcelain_code_to_badge(" D"), Some("deleted"));
+        assert_eq!(porcelain_code_to_badge("AD"), Some("deleted"));
+        assert_eq!(porcelain_code_to_badge("!!"), None);
+    }
+
+    #[test]
+    fn status_index_matches_files_and_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        fs::write(root.join("clean.txt"), "clean\n").unwrap();
+        let root = fs::canonicalize(root).unwrap();
+
+        let entries = [
+            retcon_git::StatusEntry {
+                code: " M".into(),
+                path: "src/main.rs".into(),
+            },
+            retcon_git::StatusEntry {
+                code: "??".into(),
+                path: "notes.txt".into(),
+            },
+        ];
+        let index = build_git_status_index(&entries);
+        assert_eq!(
+            git_status_for_path(&root, &root.join("notes.txt"), false, &index).as_deref(),
+            Some("added")
+        );
+        assert_eq!(
+            git_status_for_path(&root, &root.join("src"), true, &index).as_deref(),
+            Some("modified")
+        );
+        assert_eq!(
+            git_status_for_path(&root, &root.join("src/main.rs"), false, &index).as_deref(),
+            Some("modified")
+        );
+        assert_eq!(
+            git_status_for_path(&root, &root.join("clean.txt"), false, &index),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn list_uses_real_git_porcelain() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        retcon_git::run_git(root, &["init", "-b", "main"])
+            .await
+            .unwrap();
+        retcon_git::run_git(root, &["config", "user.email", "retcon@example.invalid"])
+            .await
+            .unwrap();
+        retcon_git::run_git(root, &["config", "user.name", "Retcon Test"])
+            .await
+            .unwrap();
+        fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        retcon_git::run_git(root, &["add", "."]).await.unwrap();
+        retcon_git::run_git(root, &["commit", "-m", "initial"])
+            .await
+            .unwrap();
+        fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        fs::write(root.join("fresh.txt"), "new\n").unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/nested.txt"), "nested\n").unwrap();
+
+        let service = FileService;
+        let entries = service.list(root, None).await.unwrap();
+        let tracked = entries.iter().find(|entry| entry.name == "tracked.txt");
+        assert_eq!(
+            tracked.and_then(|entry| entry.git_status.as_deref()),
+            Some("modified")
+        );
+        let fresh = entries.iter().find(|entry| entry.name == "fresh.txt");
+        assert_eq!(
+            fresh.and_then(|entry| entry.git_status.as_deref()),
+            Some("added")
+        );
+        let src = entries.iter().find(|entry| entry.name == "src");
+        assert_eq!(
+            src.and_then(|entry| entry.git_status.as_deref()),
+            Some("added")
+        );
+
+        let nested = service.list(root, Some("src")).await.unwrap();
+        let nested_file = nested.iter().find(|entry| entry.name == "nested.txt");
+        assert_eq!(
+            nested_file.and_then(|entry| entry.git_status.as_deref()),
+            Some("added")
+        );
     }
 }

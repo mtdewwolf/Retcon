@@ -132,7 +132,7 @@ class FileExplorerController extends ChangeNotifier {
   }
 }
 
-/// Explorer panel with lazy directory tree and git badge stubs.
+/// Explorer panel with lazy directory tree and git status badges.
 class FileExplorerPanel extends StatefulWidget {
   const FileExplorerPanel({
     required this.service,

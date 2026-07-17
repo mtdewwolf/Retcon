@@ -59,7 +59,10 @@ fn main() -> ExitCode {
         };
         match Storage::recover_offline(&data_dir, action, None) {
             Ok(report) => {
-                println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
                 ExitCode::SUCCESS
             }
             Err(error) => {

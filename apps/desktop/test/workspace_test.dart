@@ -41,6 +41,41 @@ void main() {
     expect(presets.toSet().length, LayoutPreset.values.length);
   });
 
+  test('selectTab activates an existing panel in a tab group', () async {
+    final store = _MemoryStore();
+    final controller = WorkspaceController(store: store);
+    await controller.applyPreset(LayoutPreset.checkpoints);
+    await controller.openPanel(PanelDefinition.browser);
+
+    final root = controller.layout.root as SplitGroup;
+    final second = root.second as SplitGroup;
+    final tabs = second.second as TabGroup;
+    expect(tabs.panels.map((panel) => panel.id), [
+      'checkpoints',
+      'browser',
+    ]);
+    expect(tabs.active.id, 'browser');
+
+    await controller.selectTab('checkpoints');
+    final activated =
+        ((controller.layout.root as SplitGroup).second as SplitGroup).second
+            as TabGroup;
+    expect(activated.active.id, 'checkpoints');
+  });
+
+  test('openPanel activates a panel that is already open', () async {
+    final store = _MemoryStore();
+    final controller = WorkspaceController(store: store);
+    await controller.applyPreset(LayoutPreset.review);
+    await controller.selectTab('browser');
+    await controller.openPanel(PanelDefinition.checkpoints);
+
+    final tabs =
+        ((controller.layout.root as SplitGroup).second as SplitGroup).second
+            as TabGroup;
+    expect(tabs.active.id, 'checkpoints');
+  });
+
   test('monitor recovery keeps floating panels inside the viewport', () async {
     final store = _MemoryStore();
     final controller = WorkspaceController(store: store);

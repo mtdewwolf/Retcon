@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { ManagedBrowser, type LogQuery, type ScreenshotOptions } from "./browser";
+import { type LogQuery, ManagedBrowser, type ScreenshotOptions } from "./browser";
 import { logger } from "./logging";
 import { connect } from "./rpc";
 
@@ -74,23 +74,32 @@ async function serveStdio(browser: ManagedBrowser): Promise<void> {
         case "browser.navigate":
           result = await browser.navigate(String(params.url ?? ""));
           break;
-        case "browser.screenshot":
-          result = await browser.screenshot({
+        case "browser.screenshot": {
+          const screenshotOpts: ScreenshotOptions = {
             path: String(params.path ?? ""),
             fullPage: Boolean(params.fullPage),
             type: params.type === "jpeg" ? "jpeg" : "png",
-            quality: typeof params.quality === "number" ? params.quality : undefined,
-          } satisfies ScreenshotOptions);
+          };
+          if (typeof params.quality === "number") {
+            screenshotOpts.quality = params.quality;
+          }
+          result = await browser.screenshot(screenshotOpts);
           break;
+        }
         case "browser.action":
           result = await browser.action(params);
           break;
-        case "browser.logs":
-          result = browser.logs({
-            offset: typeof params.offset === "number" ? params.offset : undefined,
-            limit: typeof params.limit === "number" ? params.limit : undefined,
-          } satisfies LogQuery);
+        case "browser.logs": {
+          const logQuery: LogQuery = {};
+          if (typeof params.offset === "number") {
+            logQuery.offset = params.offset;
+          }
+          if (typeof params.limit === "number") {
+            logQuery.limit = params.limit;
+          }
+          result = browser.logs(logQuery);
           break;
+        }
         case "browser.status":
           result = browser.status();
           break;

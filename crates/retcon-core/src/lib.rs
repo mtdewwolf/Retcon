@@ -8,27 +8,27 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+mod checkpoints_rpc;
 pub mod error;
 pub mod event;
+mod file_rpc;
 pub mod frame;
+mod git_rpc;
 pub mod jobs;
 pub mod lifecycle;
-pub mod projects;
 mod permissions_rpc;
-mod secrets_rpc;
+pub mod projects;
 mod projects_rpc;
 mod providers_rpc;
-mod storage_rpc;
-mod session_rpc;
-mod file_rpc;
-mod git_rpc;
-mod checkpoints_rpc;
-mod tasks_rpc;
 pub mod rpc;
+mod secrets_rpc;
 pub mod server;
 pub mod session_engine;
+mod session_rpc;
 pub mod spikes;
 pub mod state;
+mod storage_rpc;
+mod tasks_rpc;
 
 pub use error::{CoreError, ErrorCode, ErrorSource};
 pub use lifecycle::{CoreConfig, CoreRuntime};

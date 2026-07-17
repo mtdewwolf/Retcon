@@ -2,7 +2,7 @@
 
 Flutter file explorer and viewer for Retcon Phase 15:
 
-- Lazy project tree with git badge stubs
+- Lazy project tree with git status badges from `file.list`
 - Syntax-highlighted preview with large-file guard
 - Lightweight edit and save via `file.write` RPC
 

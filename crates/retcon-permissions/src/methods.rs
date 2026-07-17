@@ -17,23 +17,14 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
             Some(ApprovalCategory::Session)
         }
         "turn.send" | "turn.cancel" => Some(ApprovalCategory::Turn),
-        "git.branchCreate"
-            | "git.branchDelete"
-            | "git.checkout"
-            | "git.worktreeAdd"
-            | "git.worktreeRemove"
-            | "git.worktreeAssign"
-            | "git.stage"
-            | "git.unstage"
-            | "git.stageHunk"
-            | "git.discardHunk"
-            | "git.commit"
-            | "git.push" => Some(ApprovalCategory::Git),
+        "git.branchCreate" | "git.branchDelete" | "git.checkout" | "git.worktreeAdd"
+        | "git.worktreeRemove" | "git.worktreeAssign" | "git.stage" | "git.unstage"
+        | "git.stageHunk" | "git.discardHunk" | "git.commit" | "git.push" => {
+            Some(ApprovalCategory::Git)
+        }
         "terminal.start" | "terminal.input" => Some(ApprovalCategory::Terminal),
         "file.write" => Some(ApprovalCategory::File),
-        "task.acceptance.override" | "task.acceptance.delete" => {
-            Some(ApprovalCategory::System)
-        }
+        "task.acceptance.override" | "task.acceptance.delete" => Some(ApprovalCategory::System),
         _ => None,
     }
 }

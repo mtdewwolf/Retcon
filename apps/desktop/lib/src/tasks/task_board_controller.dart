@@ -134,6 +134,18 @@ class TaskBoardController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> createTask(String title) async {
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) return;
+    final created = await _repository.createTask(
+      trimmed,
+      projectId: projectId,
+    );
+    _tasks = [created, ..._tasks.where((item) => item.id != created.id)];
+    _selectedTaskId = created.id;
+    notifyListeners();
+  }
+
   Future<void> setTaskStatus(TaskStatus status) async {
     final task = selectedTask;
     if (task == null || (status == TaskStatus.complete && !task.canComplete)) {

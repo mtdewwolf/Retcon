@@ -100,12 +100,10 @@ impl CoreRuntime {
         if let Err(error) = self.state.storage().database().maintain() {
             tracing::warn!(%error, "database maintenance failed during shutdown");
         }
-        match self
-            .state
-            .storage()
-            .artifacts()
-            .cleanup_referenced(self.state.storage().database(), Duration::from_secs(30 * 24 * 60 * 60))
-        {
+        match self.state.storage().artifacts().cleanup_referenced(
+            self.state.storage().database(),
+            Duration::from_secs(30 * 24 * 60 * 60),
+        ) {
             Ok(report) if report.removed_files > 0 => tracing::info!(
                 removed_files = report.removed_files,
                 removed_bytes = report.removed_bytes,

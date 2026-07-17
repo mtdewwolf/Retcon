@@ -260,7 +260,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("retcon.db");
         std::fs::write(&db_path, b"not sqlite").unwrap();
-        let report = Storage::recover_offline(directory.path(), RecoverAction::Reset, None).unwrap();
+        let report =
+            Storage::recover_offline(directory.path(), RecoverAction::Reset, None).unwrap();
         assert_eq!(report.action, "reset");
         assert!(report.healthy);
         assert!(db_path.exists());

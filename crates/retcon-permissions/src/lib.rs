@@ -65,9 +65,7 @@ pub fn check_rpc_method_with_bypass(method: &str, bypass: bool) -> RpcPermission
 
     if requires_approval(method) {
         return RpcPermission::Denied {
-            user_message: format!(
-                "Retcon blocked {method} because it needs explicit approval."
-            ),
+            user_message: format!("Retcon blocked {method} because it needs explicit approval."),
             technical_message: format!(
                 "permission denied for {method}: approval engine unavailable (set RETCON_PERMISSIONS_BYPASS=1 for dev)"
             ),

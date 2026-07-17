@@ -155,7 +155,10 @@ impl CheckpointService {
         change.git_checkpoint_id = Some(snapshot.checkpoint_id);
         change.before_artifact_hash = snapshot.before_artifact_hash;
         change.after_artifact_hash = after_artifact_hash;
-        self.database.file_changes().create(&change).map_err(Into::into)
+        self.database
+            .file_changes()
+            .create(&change)
+            .map_err(Into::into)
     }
 
     pub fn get(&self, checkpoint_id: Uuid) -> Result<Option<GitCheckpoint>, CheckpointError> {
@@ -218,8 +221,7 @@ impl CheckpointService {
         force: bool,
     ) -> Result<RestoreReport, CheckpointError> {
         let preview = self.preview_rollback(root, checkpoint_id)?;
-        let selected: std::collections::HashSet<&str> =
-            paths.iter().map(String::as_str).collect();
+        let selected: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
         let mut restored = Vec::new();
         let mut skipped = Vec::new();
         let conflicts: Vec<String> = preview
@@ -276,7 +278,10 @@ impl CheckpointService {
         checkpoint.turn_id = turn_id;
         checkpoint.base_oid = base_oid;
         checkpoint.patch_artifact_hash = patch_artifact_hash;
-        self.database.git_checkpoints().create(&checkpoint).map_err(Into::into)
+        self.database
+            .git_checkpoints()
+            .create(&checkpoint)
+            .map_err(Into::into)
     }
 
     fn resolve_worktree(&self, root: &Path) -> Result<Uuid, CheckpointError> {
@@ -323,7 +328,10 @@ impl CheckpointService {
             (Some(current), Some(before), None) => current != before,
             _ => false,
         };
-        let action = match (&change.before_artifact_hash, change.after_artifact_hash.as_deref()) {
+        let action = match (
+            &change.before_artifact_hash,
+            change.after_artifact_hash.as_deref(),
+        ) {
             (None, Some(_)) => "delete",
             (Some(_), _) => "restore",
             (None, None) => "skip",
@@ -384,9 +392,12 @@ fn resolve_within_root(root: &Path, relative_path: &str) -> Result<PathBuf, Chec
     })?;
     let requested = Path::new(relative_path);
     if !requested.is_absolute()
-        && requested
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        && requested.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err(CheckpointError::OutsideRoot(relative_path.to_owned()));
     }
@@ -447,10 +458,8 @@ mod tests {
             .projects()
             .add_location(project.id, &canonical, None)
             .unwrap();
-        let service = CheckpointService::new(
-            storage.database().clone(),
-            storage.artifacts().clone(),
-        );
+        let service =
+            CheckpointService::new(storage.database().clone(), storage.artifacts().clone());
         (temp, service, root)
     }
 
@@ -458,9 +467,7 @@ mod tests {
     fn file_write_checkpoint_round_trip() {
         let (_temp, service, root) = setup();
         fs::write(root.join("note.txt"), "before").unwrap();
-        let snapshot = service
-            .begin_file_write(&root, "note.txt", None)
-            .unwrap();
+        let snapshot = service.begin_file_write(&root, "note.txt", None).unwrap();
         fs::write(root.join("note.txt"), "after").unwrap();
         service.finish_file_write(&root, snapshot).unwrap();
         let checkpoints = service.list_for_root(&root, 10).unwrap();
@@ -476,16 +483,14 @@ mod tests {
     fn selective_restore_reverts_modified_file() {
         let (_temp, service, root) = setup();
         fs::write(root.join("note.txt"), "before").unwrap();
-        let snapshot = service
-            .begin_file_write(&root, "note.txt", None)
-            .unwrap();
+        let snapshot = service.begin_file_write(&root, "note.txt", None).unwrap();
         fs::write(root.join("note.txt"), "after").unwrap();
         let change = service.finish_file_write(&root, snapshot).unwrap();
         let report = service
             .restore_selective(
                 &root,
                 change.git_checkpoint_id.unwrap(),
-                &[change.path.clone()],
+                std::slice::from_ref(&change.path),
                 false,
             )
             .unwrap();
@@ -497,9 +502,7 @@ mod tests {
     fn unrelated_user_edits_block_restore_without_force() {
         let (_temp, service, root) = setup();
         fs::write(root.join("note.txt"), "before").unwrap();
-        let snapshot = service
-            .begin_file_write(&root, "note.txt", None)
-            .unwrap();
+        let snapshot = service.begin_file_write(&root, "note.txt", None).unwrap();
         fs::write(root.join("note.txt"), "after").unwrap();
         let change = service.finish_file_write(&root, snapshot).unwrap();
         fs::write(root.join("note.txt"), "user-edit").unwrap();
@@ -507,7 +510,7 @@ mod tests {
             .restore_selective(
                 &root,
                 change.git_checkpoint_id.unwrap(),
-                &[change.path.clone()],
+                std::slice::from_ref(&change.path),
                 false,
             )
             .unwrap_err();
@@ -544,7 +547,10 @@ mod tests {
 
         assert!(matches!(error, CheckpointError::Conflicts(_)));
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "after-a");
-        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "user-edit-b");
+        assert_eq!(
+            fs::read_to_string(root.join("b.txt")).unwrap(),
+            "user-edit-b"
+        );
     }
 
     #[test]

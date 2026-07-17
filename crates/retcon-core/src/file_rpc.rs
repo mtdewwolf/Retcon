@@ -8,9 +8,7 @@ use serde_json::{Value, json};
 use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
-use retcon_filesystem::{
-    DEFAULT_READ_LIMIT, DEFAULT_WRITE_LIMIT, FilesystemError, new_watch_id,
-};
+use retcon_filesystem::{DEFAULT_READ_LIMIT, DEFAULT_WRITE_LIMIT, FilesystemError, new_watch_id};
 
 fn failed(id: u64, error: CoreError) -> Response {
     Response::error(id, &error)
@@ -74,17 +72,14 @@ fn root_param(params: &Value) -> Result<PathBuf, CoreError> {
 }
 
 fn path_param(params: &Value) -> Result<&str, CoreError> {
-    params
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            CoreError::new(
-                ErrorCode::InvalidRequest,
-                ErrorSource::Rpc,
-                "The file request is missing a path.",
-                "missing 'path' parameter",
-            )
-        })
+    params.get("path").and_then(Value::as_str).ok_or_else(|| {
+        CoreError::new(
+            ErrorCode::InvalidRequest,
+            ErrorSource::Rpc,
+            "The file request is missing a path.",
+            "missing 'path' parameter",
+        )
+    })
 }
 
 pub async fn handle(state: CoreState, request: Request) -> Response {
@@ -97,7 +92,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Err(error) => return failed(id, error),
             };
             let path = params.get("path").and_then(Value::as_str);
-            match service.list(&root, path) {
+            match service.list(&root, path).await {
                 Ok(entries) => Response::ok(id, json!({"entries": entries})),
                 Err(error) => failed(id, map_error(error)),
             }
@@ -223,6 +218,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::fs;

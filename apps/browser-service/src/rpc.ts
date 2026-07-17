@@ -2,7 +2,7 @@
  * Local transport client for retcon-core using generated protocol v1 types.
  */
 
-import { connect as netConnect, type Socket } from "node:net";
+import { type Socket, connect as netConnect } from "node:net";
 import { createInterface } from "node:readline";
 
 import type {
@@ -22,10 +22,7 @@ const CLIENT_FEATURES = ["ping", "events.replay", "request.cancel"];
 
 export interface RpcClient {
   readonly connected: boolean;
-  request(
-    method: string,
-    params?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
+  request(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }

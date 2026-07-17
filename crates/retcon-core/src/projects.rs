@@ -49,32 +49,36 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
         .await
         .ok()
         .filter(|s| !s.is_empty());
-    let project = match state.storage().database().projects().find_by_path(&root_text)? {
-        Some(project) => project,
-        None => {
-            let project = state
-                .storage()
-                .database()
-                .projects()
-                .create(&retcon_storage::NewProject::new(
-                    root.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Project"),
-                ))?;
-            state
-                .storage()
-                .database()
-                .projects()
-                .add_location(project.id, &root_text, remote.as_deref())?;
-            project
-        }
-    };
+    let project =
+        match state
+            .storage()
+            .database()
+            .projects()
+            .find_by_path(&root_text)?
+        {
+            Some(project) => project,
+            None => {
+                let project = state.storage().database().projects().create(
+                    &retcon_storage::NewProject::new(
+                        root.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("Project"),
+                    ),
+                )?;
+                state.storage().database().projects().add_location(
+                    project.id,
+                    &root_text,
+                    remote.as_deref(),
+                )?;
+                project
+            }
+        };
     // A reopened project may have gained an origin or moved between remotes.
-    state
-        .storage()
-        .database()
-        .projects()
-        .add_location(project.id, &root_text, remote.as_deref())?;
+    state.storage().database().projects().add_location(
+        project.id,
+        &root_text,
+        remote.as_deref(),
+    )?;
     let current = metadata(state, project.id)?;
     let defaults = json!({
         "name": project.name, "repositoryPath": root_text, "remoteUrl": remote,

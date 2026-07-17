@@ -313,9 +313,13 @@ Future<void> showProjectPickerFlow(
   required ProjectController controller,
   bool cloneFirst = false,
 }) async {
-  final OpenProjectResult? opened = cloneFirst
-      ? await ProjectCloneDialog.show(context, controller: controller)
-      : await ProjectPickerDialog.show(context, controller: controller);
-  if (opened == null || !context.mounted) return;
+  if (!context.mounted) return;
+  final OpenProjectResult? opened;
+  if (cloneFirst) {
+    opened = await ProjectCloneDialog.show(context, controller: controller);
+  } else {
+    opened = await ProjectPickerDialog.show(context, controller: controller);
+  }
+  if (!context.mounted || opened == null) return;
   await showProjectHealthDialog(context, project: opened);
 }

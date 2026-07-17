@@ -48,12 +48,7 @@ fn worktree_fail(id: u64, error: WorktreeError) -> Response {
     };
     failed(
         id,
-        CoreError::new(
-            code,
-            ErrorSource::Rpc,
-            user_message,
-            error.to_string(),
-        ),
+        CoreError::new(code, ErrorSource::Rpc, user_message, error.to_string()),
     )
 }
 
@@ -97,16 +92,14 @@ fn parse_diff_mode(params: &Value) -> DiffMode {
 
 fn parse_session_id(params: &Value) -> Result<Option<Uuid>, CoreError> {
     match optional_str_param(params, "sessionId") {
-        Some(raw) => Uuid::parse_str(raw)
-            .map(Some)
-            .map_err(|error| {
-                CoreError::new(
-                    ErrorCode::InvalidRequest,
-                    ErrorSource::Rpc,
-                    "The session ID is invalid.",
-                    error.to_string(),
-                )
-            }),
+        Some(raw) => Uuid::parse_str(raw).map(Some).map_err(|error| {
+            CoreError::new(
+                ErrorCode::InvalidRequest,
+                ErrorSource::Rpc,
+                "The session ID is invalid.",
+                error.to_string(),
+            )
+        }),
         None => Ok(None),
     }
 }
@@ -287,7 +280,9 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let path = optional_str_param(&params, "path");
             let mode = parse_diff_mode(&params);
             match retcon_git::diff(&repo, path, mode).await {
-                Ok(diff) => Response::ok(id, json!({ "diff": diff, "mode": diff_mode_label(mode) })),
+                Ok(diff) => {
+                    Response::ok(id, json!({ "diff": diff, "mode": diff_mode_label(mode) }))
+                }
                 Err(error) => git_fail(id, error),
             }
         }
@@ -313,10 +308,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(session_id) => session_id,
                 Err(error) => return failed(id, error),
             };
-            match worktrees(&state)
-                .add(&repo, path, branch, session_id)
-                .await
-            {
+            match worktrees(&state).add(&repo, path, branch, session_id).await {
                 Ok(record) => Response::ok(id, json!(StoredWorktreeResponse::from(record))),
                 Err(error) => worktree_fail(id, error),
             }
@@ -450,6 +442,10 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::PermissionDenied);
         assert!(error.user_message.contains("blocked the commit"));
-        assert!(!error.technical_message.contains("not-a-real-secret-for-testing"));
+        assert!(
+            !error
+                .technical_message
+                .contains("not-a-real-secret-for-testing")
+        );
     }
 }

@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use retcon_agents::{AgentEvent, ClaudeCodeProvider, StartTurnRequest, normalize_claude_stream_event};
+use retcon_agents::{
+    AgentEvent, ClaudeCodeProvider, StartTurnRequest, normalize_claude_stream_event,
+};
 use retcon_storage::{NewSession, NewTurn, Session, Turn};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -174,12 +176,19 @@ fn transition_error(id: u64, transition: InvalidTransition<SessionState>) -> Res
             ErrorCode::InvalidRequest,
             ErrorSource::Rpc,
             "That session cannot move to the requested state.",
-            format!("invalid session transition {:?} -> {:?}", transition.from, transition.to),
+            format!(
+                "invalid session transition {:?} -> {:?}",
+                transition.from, transition.to
+            ),
         ),
     )
 }
 
-fn persist_session_status(state: &CoreState, session_id: Uuid, status: SessionState) -> Result<(), CoreError> {
+fn persist_session_status(
+    state: &CoreState,
+    session_id: Uuid,
+    status: SessionState,
+) -> Result<(), CoreError> {
     state
         .storage()
         .database()
@@ -228,7 +237,9 @@ fn transition_session(
     machine: &mut SessionMachine,
     to: SessionState,
 ) -> Result<SessionState, Response> {
-    machine.transition(to).map_err(|error| transition_error(id, error))?;
+    machine
+        .transition(to)
+        .map_err(|error| transition_error(id, error))?;
     persist_session_status(state, session.id, to).map_err(|error| failed(id, error))?;
     Ok(to)
 }
@@ -304,7 +315,11 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
 
 fn create_session(state: &CoreState, id: u64, params: &Value) -> Response {
     let Some(project_raw) = params.get("projectId").and_then(Value::as_str) else {
-        return invalid(id, "Creating a session requires a project ID.", "missing 'projectId'");
+        return invalid(
+            id,
+            "Creating a session requires a project ID.",
+            "missing 'projectId'",
+        );
     };
     let project_id = match parse_uuid(id, "project ID", project_raw) {
         Ok(value) => value,
@@ -366,7 +381,11 @@ fn create_session(state: &CoreState, id: u64, params: &Value) -> Response {
 
 fn list_sessions(state: &CoreState, id: u64, params: &Value) -> Response {
     let Some(project_raw) = params.get("projectId").and_then(Value::as_str) else {
-        return invalid(id, "Listing sessions requires a project ID.", "missing 'projectId'");
+        return invalid(
+            id,
+            "Listing sessions requires a project ID.",
+            "missing 'projectId'",
+        );
     };
     let project_id = match parse_uuid(id, "project ID", project_raw) {
         Ok(value) => value,
@@ -391,7 +410,11 @@ fn list_sessions(state: &CoreState, id: u64, params: &Value) -> Response {
 
 async fn start_session(state: CoreState, id: u64, params: &Value) -> Response {
     let Some(session_raw) = params.get("sessionId").and_then(Value::as_str) else {
-        return invalid(id, "Starting a session requires a session ID.", "missing 'sessionId'");
+        return invalid(
+            id,
+            "Starting a session requires a session ID.",
+            "missing 'sessionId'",
+        );
     };
     let session_id = match parse_uuid(id, "session ID", session_raw) {
         Ok(value) => value,
@@ -460,7 +483,11 @@ async fn start_session(state: CoreState, id: u64, params: &Value) -> Response {
     let mut machine = SessionMachine::from_state(current);
     let steps = match current {
         SessionState::Created | SessionState::Paused => {
-            vec![SessionState::Preparing, SessionState::Starting, SessionState::Running]
+            vec![
+                SessionState::Preparing,
+                SessionState::Starting,
+                SessionState::Running,
+            ]
         }
         SessionState::Disconnected => vec![SessionState::Recovering, SessionState::Running],
         SessionState::Recovering => vec![SessionState::Running],
@@ -549,7 +576,9 @@ async fn pause_session(state: CoreState, id: u64, params: &Value) -> Response {
     }
     let current = parse_session_state(&session.status).unwrap_or(SessionState::Running);
     let mut machine = SessionMachine::from_state(current);
-    if let Err(response) = transition_session(&state, id, &session, &mut machine, SessionState::Paused) {
+    if let Err(response) =
+        transition_session(&state, id, &session, &mut machine, SessionState::Paused)
+    {
         return response;
     }
     emit_session_state(&state, session_id, SessionState::Paused);
@@ -649,12 +678,7 @@ async fn send_turn(state: CoreState, id: u64, params: &Value) -> Response {
         .sessions()
         .upsert(session_id, cwd.clone(), provider_id.clone());
 
-    let sequence = match state
-        .storage()
-        .database()
-        .turns()
-        .next_sequence(session_id)
-    {
+    let sequence = match state.storage().database().turns().next_sequence(session_id) {
         Ok(sequence) => sequence,
         Err(error) => return failed(id, CoreError::from(error)),
     };
@@ -684,7 +708,9 @@ async fn send_turn(state: CoreState, id: u64, params: &Value) -> Response {
         );
     }
     let mut turn_machine = TurnMachine::from_state(TurnState::Queued);
-    if let Err(response) = transition_turn(&state, id, turn.id, &mut turn_machine, TurnState::Sending) {
+    if let Err(response) =
+        transition_turn(&state, id, turn.id, &mut turn_machine, TurnState::Sending)
+    {
         return response;
     }
     emit_turn_state(&state, session_id, turn.id, TurnState::Sending);
@@ -698,18 +724,15 @@ async fn send_turn(state: CoreState, id: u64, params: &Value) -> Response {
     let turn_id = turn.id;
     let event_state = state.clone();
     let provider = ClaudeCodeProvider;
-    let spawned = provider.start_turn(
-        &request,
-        move |line| {
-            let event = normalize_claude_stream_event(&provider_id, &line);
-            if let Some(native) = event.native_session_id.clone() {
-                event_state
-                    .sessions()
-                    .set_native_session_id(session_id, Some(native));
-            }
-            emit_agent_event(&event_state, session_id, turn_id, &event);
-        },
-    );
+    let spawned = provider.start_turn(&request, move |line| {
+        let event = normalize_claude_stream_event(&provider_id, &line);
+        if let Some(native) = event.native_session_id.clone() {
+            event_state
+                .sessions()
+                .set_native_session_id(session_id, Some(native));
+        }
+        emit_agent_event(&event_state, session_id, turn_id, &event);
+    });
 
     let agent_turn = match spawned {
         Ok(turn) => turn,
@@ -728,7 +751,9 @@ async fn send_turn(state: CoreState, id: u64, params: &Value) -> Response {
         }
     };
 
-    if let Err(response) = transition_turn(&state, id, turn.id, &mut turn_machine, TurnState::Running) {
+    if let Err(response) =
+        transition_turn(&state, id, turn.id, &mut turn_machine, TurnState::Running)
+    {
         return response;
     }
     emit_turn_state(&state, session_id, turn.id, TurnState::Running);
@@ -757,12 +782,8 @@ async fn send_turn(state: CoreState, id: u64, params: &Value) -> Response {
                 TurnState::Completing,
             );
             emit_turn_state(&watch_state, session_id, turn_id, TurnState::Completing);
-            let _ = transition_turn_internal(
-                &watch_state,
-                turn_id,
-                &mut machine,
-                TurnState::Completed,
-            );
+            let _ =
+                transition_turn_internal(&watch_state, turn_id, &mut machine, TurnState::Completed);
             TurnState::Completed
         } else {
             let _ =
@@ -869,7 +890,13 @@ async fn cancel_turn(state: CoreState, id: u64, params: &Value) -> Response {
         .unwrap_or(TurnState::Running);
     let mut machine = TurnMachine::from_state(current);
     if !current.is_terminal() {
-        let _ = transition_turn(&state, id, active.turn_id, &mut machine, TurnState::Cancelled);
+        let _ = transition_turn(
+            &state,
+            id,
+            active.turn_id,
+            &mut machine,
+            TurnState::Cancelled,
+        );
     }
     emit_turn_state(&state, session_id, active.turn_id, TurnState::Cancelled);
     Response::ok(
@@ -886,7 +913,13 @@ fn session_id_param(id: u64, params: &Value) -> Result<Uuid, Response> {
     let raw = params
         .get("sessionId")
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid(id, "The session request is missing a session ID.", "missing 'sessionId'"))?;
+        .ok_or_else(|| {
+            invalid(
+                id,
+                "The session request is missing a session ID.",
+                "missing 'sessionId'",
+            )
+        })?;
     parse_uuid(id, "session ID", raw)
 }
 

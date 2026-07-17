@@ -11,12 +11,12 @@ use crate::error::{PermissionError, Result};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::RpcPermission;
 use crate::audit::AuditRecord;
 use crate::category::ApprovalCategory;
 use crate::decision::{ApprovalDecision, RememberScope, RuleEffect};
 use crate::methods::{category_for_method, method_summary, requires_approval};
 use crate::rules::evaluate_rules;
-use crate::RpcPermission;
 
 /// Well-known project/session used for RPC approvals without an explicit session id.
 pub const SYSTEM_PROJECT_ID: Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
@@ -75,7 +75,9 @@ impl ApprovalEngine {
                     user_message: format!(
                         "Retcon blocked {method} because a permission rule denied it."
                     ),
-                    technical_message: format!("permission denied for {method}: matching deny rule"),
+                    technical_message: format!(
+                        "permission denied for {method}: matching deny rule"
+                    ),
                 },
                 audit: Vec::new(),
             };
@@ -87,43 +89,46 @@ impl ApprovalEngine {
             };
         }
 
-        if let Some(approval_id) = params.get("approvalId").and_then(Value::as_str) {
-            if let Ok(id) = Uuid::parse_str(approval_id) {
-                match self.database.approvals().get(id) {
-                    Ok(Some(approval)) if approval.status == "approved" && approval_matches(&approval, method, params) => {
-                        return PermissionCheck {
-                            permission: RpcPermission::Allowed,
-                            audit: Vec::new(),
-                        };
-                    }
-                    Ok(Some(_)) | Ok(None) => {}
-                    Err(error) => {
-                        return PermissionCheck {
-                            permission: RpcPermission::Denied {
-                                user_message: format!(
-                                    "Retcon could not verify approval for {method}."
-                                ),
-                                technical_message: error.to_string(),
-                            },
-                            audit: Vec::new(),
-                        };
-                    }
+        if let Some(approval_id) = params.get("approvalId").and_then(Value::as_str)
+            && let Ok(id) = Uuid::parse_str(approval_id)
+        {
+            match self.database.approvals().get(id) {
+                Ok(Some(approval))
+                    if approval.status == "approved"
+                        && approval_matches(&approval, method, params) =>
+                {
+                    return PermissionCheck {
+                        permission: RpcPermission::Allowed,
+                        audit: Vec::new(),
+                    };
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) => {
+                    return PermissionCheck {
+                        permission: RpcPermission::Denied {
+                            user_message: format!("Retcon could not verify approval for {method}."),
+                            technical_message: error.to_string(),
+                        },
+                        audit: Vec::new(),
+                    };
                 }
             }
         }
 
         let fingerprint = request_fingerprint(method, params);
-        if let Ok(Some(existing)) = self.database.approvals().find_pending_by_fingerprint(&fingerprint) {
+        if let Ok(Some(existing)) = self
+            .database
+            .approvals()
+            .find_pending_by_fingerprint(&fingerprint)
+        {
             return PermissionCheck {
                 permission: denied_pending(method, existing.id),
                 audit: Vec::new(),
             };
         }
 
-        let session_id = extract_session_id(params).unwrap_or_else(|| {
-            self.ensure_system_session()
-                .unwrap_or(SYSTEM_SESSION_ID)
-        });
+        let session_id = extract_session_id(params)
+            .unwrap_or_else(|| self.ensure_system_session().unwrap_or(SYSTEM_SESSION_ID));
         let category = category_for_method(method).unwrap_or(ApprovalCategory::System);
         let request = approval_request(method, params, project_id, &fingerprint);
         let approval = match self.database.approvals().create(&NewApproval {
@@ -165,10 +170,7 @@ impl ApprovalEngine {
         session_id: Option<Uuid>,
         limit: usize,
     ) -> Result<Vec<Approval>> {
-        Ok(self
-            .database
-            .approvals()
-            .list(status, session_id, limit)?)
+        Ok(self.database.approvals().list(status, session_id, limit)?)
     }
 
     pub fn decide(
@@ -198,11 +200,10 @@ impl ApprovalEngine {
             "decision": decision.as_str(),
             "remember": remember.as_str(),
         });
-        let updated = self.database.approvals().decide(
-            approval_id,
-            status,
-            &decision_payload,
-        )?;
+        let updated = self
+            .database
+            .approvals()
+            .decide(approval_id, status, &decision_payload)?;
 
         let mut audit = vec![AuditRecord::approval_decided(
             approval_id,
@@ -238,17 +239,16 @@ impl ApprovalEngine {
     }
 
     pub fn list_rules(&self, project_id: Uuid) -> Result<Vec<PermissionRule>> {
-        Ok(self.database.permission_rules().list_for_project(project_id)?)
+        Ok(self
+            .database
+            .permission_rules()
+            .list_for_project(project_id)?)
     }
 
     pub fn create_rule(&self, rule: &NewPermissionRule) -> Result<(PermissionRule, AuditRecord)> {
         let created = self.database.permission_rules().create(rule)?;
         let effect = RuleEffect::parse(&created.effect).unwrap_or(RuleEffect::Deny);
-        let audit = AuditRecord::permission_rule_created(
-            created.id,
-            effect,
-            &created.matcher,
-        );
+        let audit = AuditRecord::permission_rule_created(created.id, effect, &created.matcher);
         Ok((created, audit))
     }
 
@@ -297,9 +297,7 @@ impl ApprovalEngine {
 
 fn denied_pending(method: &str, approval_id: Uuid) -> RpcPermission {
     RpcPermission::Denied {
-        user_message: format!(
-            "Retcon blocked {method} because it needs explicit approval."
-        ),
+        user_message: format!("Retcon blocked {method} because it needs explicit approval."),
         technical_message: format!(
             "permission denied for {method}: pending approval {approval_id}"
         ),
@@ -327,10 +325,7 @@ fn approval_request(
 
 fn approval_matches(approval: &Approval, method: &str, params: &Value) -> bool {
     approval.request.get("method").and_then(Value::as_str) == Some(method)
-        && approval
-            .request
-            .get("fingerprint")
-            .and_then(Value::as_str)
+        && approval.request.get("fingerprint").and_then(Value::as_str)
             == Some(request_fingerprint(method, params).as_str())
 }
 
@@ -358,10 +353,10 @@ fn request_fingerprint(method: &str, params: &Value) -> String {
 
 fn extract_session_id(params: &Value) -> Option<Uuid> {
     for key in ["sessionId", "session_id"] {
-        if let Some(raw) = params.get(key).and_then(Value::as_str) {
-            if let Ok(id) = Uuid::parse_str(raw) {
-                return Some(id);
-            }
+        if let Some(raw) = params.get(key).and_then(Value::as_str)
+            && let Ok(id) = Uuid::parse_str(raw)
+        {
+            return Some(id);
         }
     }
     None
@@ -379,6 +374,7 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use retcon_storage::Storage;

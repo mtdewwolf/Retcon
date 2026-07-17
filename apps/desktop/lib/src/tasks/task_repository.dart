@@ -5,13 +5,13 @@ import 'task_models.dart';
 abstract interface class TaskRepository {
   Stream<void> get changes;
   Future<List<RoadmapTask>> listTasks({String? projectId});
+  Future<RoadmapTask> createTask(String title, {String? projectId});
   Future<RoadmapTask> saveTask(RoadmapTask task, {String? projectId});
   Future<List<TaskSavedView>> listSavedViews({String? projectId});
   Future<TaskSavedView> saveView(TaskSavedView view, {String? projectId});
 }
 
-/// Deterministic repository used by widget tests and while the core adapter is
-/// implemented in parallel.
+/// Deterministic repository used by widget tests and while core is offline.
 class InMemoryTaskRepository implements TaskRepository {
   InMemoryTaskRepository({
     List<RoadmapTask> tasks = const [],
@@ -27,6 +27,21 @@ class InMemoryTaskRepository implements TaskRepository {
 
   @override
   Future<List<RoadmapTask>> listTasks({String? projectId}) async => [..._tasks];
+
+  @override
+  Future<RoadmapTask> createTask(String title, {String? projectId}) async {
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError('Task title cannot be empty.');
+    }
+    final task = RoadmapTask(
+      id: 'task-${DateTime.now().microsecondsSinceEpoch}',
+      title: trimmed,
+      status: TaskStatus.backlog,
+    );
+    _tasks.add(task);
+    return task;
+  }
 
   @override
   Future<RoadmapTask> saveTask(RoadmapTask task, {String? projectId}) async {

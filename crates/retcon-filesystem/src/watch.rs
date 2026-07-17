@@ -61,42 +61,43 @@ impl WatchRegistry {
 
         let watch_id_for_callback = watch_id.clone();
         let registry = self.inner.clone();
-        let mut watcher = notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            let Ok(event) = result else {
-                return;
-            };
-            let Some(path) = event.paths.first().cloned() else {
-                return;
-            };
-            let change = classify_change(&event.kind);
-            let should_emit = {
-                let Ok(mut watches) = registry.lock() else {
+        let mut watcher =
+            notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
+                let Ok(event) = result else {
                     return;
                 };
-                let Some(state) = watches.get_mut(&watch_id_for_callback) else {
+                let Some(path) = event.paths.first().cloned() else {
                     return;
                 };
-                if !path.starts_with(&state.root) {
-                    return;
-                }
-                let now = Instant::now();
-                match state.last_emit.get(&path) {
-                    Some(previous) if now.duration_since(*previous) < DEBOUNCE => false,
-                    _ => {
-                        state.last_emit.insert(path.clone(), now);
-                        true
+                let change = classify_change(&event.kind);
+                let should_emit = {
+                    let Ok(mut watches) = registry.lock() else {
+                        return;
+                    };
+                    let Some(state) = watches.get_mut(&watch_id_for_callback) else {
+                        return;
+                    };
+                    if !path.starts_with(&state.root) {
+                        return;
                     }
+                    let now = Instant::now();
+                    match state.last_emit.get(&path) {
+                        Some(previous) if now.duration_since(*previous) < DEBOUNCE => false,
+                        _ => {
+                            state.last_emit.insert(path.clone(), now);
+                            true
+                        }
+                    }
+                };
+                if should_emit {
+                    emit(FileChangeEvent {
+                        watch_id: watch_id_for_callback.clone(),
+                        path: path.to_string_lossy().into_owned(),
+                        change,
+                    });
                 }
-            };
-            if should_emit {
-                emit(FileChangeEvent {
-                    watch_id: watch_id_for_callback.clone(),
-                    path: path.to_string_lossy().into_owned(),
-                    change,
-                });
-            }
-        })
-        .map_err(|error| FilesystemError::Watch(error.to_string()))?;
+            })
+            .map_err(|error| FilesystemError::Watch(error.to_string()))?;
 
         watcher
             .watch(&directory, RecursiveMode::Recursive)
@@ -175,6 +176,7 @@ fn classify_change(kind: &EventKind) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

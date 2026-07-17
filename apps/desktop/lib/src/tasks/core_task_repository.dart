@@ -64,6 +64,22 @@ class CoreTaskRepository implements TaskRepository {
   }
 
   @override
+  Future<RoadmapTask> createTask(String title, {String? projectId}) async {
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError('Task title cannot be empty.');
+    }
+    final result = await _rpc.request(
+      'task.create',
+      params: {
+        'title': trimmed,
+        'projectId': ?projectId,
+      },
+    );
+    return _decodeTask(_map(result['task']));
+  }
+
+  @override
   Future<RoadmapTask> saveTask(RoadmapTask task, {String? projectId}) async {
     final before = await _getDetails(task.id);
     final persisted = _decodeTask(before);

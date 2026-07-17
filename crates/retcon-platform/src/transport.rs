@@ -98,9 +98,8 @@ impl TransportListener {
             #[cfg(unix)]
             TransportKind::UnixSocket => {
                 if endpoint.path.exists() {
-                    std::fs::remove_file(&endpoint.path).map_err(|source| {
-                        TransportError::io("remove stale unix socket", source)
-                    })?;
+                    std::fs::remove_file(&endpoint.path)
+                        .map_err(|source| TransportError::io("remove stale unix socket", source))?;
                 }
                 if let Some(parent) = endpoint.path.parent() {
                     std::fs::create_dir_all(parent)

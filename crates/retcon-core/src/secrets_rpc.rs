@@ -37,10 +37,7 @@ pub async fn handle(_state: CoreState, request: Request) -> Response {
                 return Response::ok(id, scan_result_json(&scan_text(text)));
             }
             if let Some(texts) = params.get("texts").and_then(Value::as_array) {
-                let blobs = texts
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>();
+                let blobs = texts.iter().filter_map(Value::as_str).collect::<Vec<_>>();
                 if blobs.is_empty() {
                     return failed(
                         id,
@@ -83,6 +80,7 @@ pub fn scan_prompt(prompt: &str) -> ScanResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -101,10 +99,7 @@ mod tests {
         .await;
         let result = response.result.unwrap();
         assert_eq!(result["clean"], false);
-        assert!(result["summary"]
-            .as_str()
-            .unwrap()
-            .contains("finding"));
+        assert!(result["summary"].as_str().unwrap().contains("finding"));
         assert!(!result["summary"].as_str().unwrap().contains("hunter2"));
     }
 }

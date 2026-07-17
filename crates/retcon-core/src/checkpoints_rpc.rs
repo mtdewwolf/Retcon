@@ -88,16 +88,14 @@ fn root_param(params: &Value) -> Result<PathBuf, CoreError> {
 
 fn parse_uuid_param(params: &Value, key: &str) -> Result<Option<Uuid>, CoreError> {
     match params.get(key).and_then(Value::as_str) {
-        Some(raw) => Uuid::parse_str(raw)
-            .map(Some)
-            .map_err(|error| {
-                CoreError::new(
-                    ErrorCode::InvalidRequest,
-                    ErrorSource::Rpc,
-                    "A checkpoint identifier is invalid.",
-                    format!("invalid {key}: {error}"),
-                )
-            }),
+        Some(raw) => Uuid::parse_str(raw).map(Some).map_err(|error| {
+            CoreError::new(
+                ErrorCode::InvalidRequest,
+                ErrorSource::Rpc,
+                "A checkpoint identifier is invalid.",
+                format!("invalid {key}: {error}"),
+            )
+        }),
         None => Ok(None),
     }
 }
@@ -184,10 +182,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(root) => root,
                 Err(error) => return failed(id, error),
             };
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(50) as usize;
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
             if let Some(turn_id) = match parse_uuid_param(&params, "turnId") {
                 Ok(turn_id) => turn_id,
                 Err(error) => return failed(id, error),

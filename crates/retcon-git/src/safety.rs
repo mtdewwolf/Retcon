@@ -33,7 +33,11 @@ impl ProtectedOperation {
 
 /// Returns `Some(user_message)` when `branch` is protected for `operation`.
 #[must_use]
-pub fn check_default_branch(branch: &str, default_branch: &str, operation: ProtectedOperation) -> Option<String> {
+pub fn check_default_branch(
+    branch: &str,
+    default_branch: &str,
+    operation: ProtectedOperation,
+) -> Option<String> {
     if branches_equal(branch, default_branch) {
         Some(operation.message(branch))
     } else {
@@ -44,7 +48,8 @@ pub fn check_default_branch(branch: &str, default_branch: &str, operation: Prote
 /// Returns an error when committing directly to the default branch.
 pub async fn ensure_commit_allowed(repo: &Path, branch: &str) -> Result<(), GitError> {
     let default = default_branch(repo).await?;
-    if let Some(message) = check_default_branch(branch, &default, ProtectedOperation::DirectCommit) {
+    if let Some(message) = check_default_branch(branch, &default, ProtectedOperation::DirectCommit)
+    {
         return Err(GitError {
             command: "commit".into(),
             exit_code: None,
@@ -57,7 +62,8 @@ pub async fn ensure_commit_allowed(repo: &Path, branch: &str) -> Result<(), GitE
 /// Returns an error when deleting the default branch.
 pub async fn ensure_branch_delete_allowed(repo: &Path, branch: &str) -> Result<(), GitError> {
     let default = default_branch(repo).await?;
-    if let Some(message) = check_default_branch(branch, &default, ProtectedOperation::BranchDelete) {
+    if let Some(message) = check_default_branch(branch, &default, ProtectedOperation::BranchDelete)
+    {
         return Err(GitError {
             command: "branch delete".into(),
             exit_code: None,
@@ -68,11 +74,7 @@ pub async fn ensure_branch_delete_allowed(repo: &Path, branch: &str) -> Result<(
 }
 
 /// Returns an error when force-pushing to the default branch.
-pub async fn ensure_push_allowed(
-    repo: &Path,
-    branch: &str,
-    force: bool,
-) -> Result<(), GitError> {
+pub async fn ensure_push_allowed(repo: &Path, branch: &str, force: bool) -> Result<(), GitError> {
     if !force {
         return Ok(());
     }

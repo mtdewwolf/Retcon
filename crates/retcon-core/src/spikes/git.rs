@@ -93,10 +93,12 @@ pub async fn handle(request: Request) -> Response {
                 Err(e) => git_fail(id, e),
             }
         }
-        "git.diff" => match retcon_git::diff(&repo, param_str(&params, "path"), DiffMode::Unstaged).await {
-            Ok(d) => Response::ok(id, json!({ "diff": d })),
-            Err(e) => git_fail(id, e),
-        },
+        "git.diff" => {
+            match retcon_git::diff(&repo, param_str(&params, "path"), DiffMode::Unstaged).await {
+                Ok(d) => Response::ok(id, json!({ "diff": d })),
+                Err(e) => git_fail(id, e),
+            }
+        }
         other => fail(
             id,
             ErrorCode::NotFound,

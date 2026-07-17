@@ -28,10 +28,17 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind(state: CoreState, token: String, data_dir: &std::path::Path) -> Result<Self, CoreError> {
-        let listener = TransportListener::bind(data_dir)
-            .await
-            .map_err(|error| CoreError::io("bind core RPC listener", std::io::Error::other(error.to_string())))?;
+    pub async fn bind(
+        state: CoreState,
+        token: String,
+        data_dir: &std::path::Path,
+    ) -> Result<Self, CoreError> {
+        let listener = TransportListener::bind(data_dir).await.map_err(|error| {
+            CoreError::io(
+                "bind core RPC listener",
+                std::io::Error::other(error.to_string()),
+            )
+        })?;
         Ok(Self {
             listener,
             token,
@@ -122,7 +129,10 @@ async fn serve_connection(
         )));
     }
 
-    let server_features: Vec<String> = SERVER_FEATURES.iter().map(|feature| (*feature).to_owned()).collect();
+    let server_features: Vec<String> = SERVER_FEATURES
+        .iter()
+        .map(|feature| (*feature).to_owned())
+        .collect();
     let negotiated = retcon_protocol::negotiate_features(&client_hello.features, &server_features);
     let server_hello = ServerHello {
         kind: ServerHelloKind::Hello,
@@ -209,14 +219,18 @@ async fn write_json_line(
     writer: &mut retcon_platform::TransportWriteHalf,
     value: &impl serde::Serialize,
 ) -> Result<(), CoreError> {
-    write_json_value(writer, serde_json::to_value(value).map_err(|error| {
-        CoreError::new(
-            ErrorCode::Internal,
-            ErrorSource::Rpc,
-            "Retcon could not encode a response.",
-            error.to_string(),
-        )
-    })?).await
+    write_json_value(
+        writer,
+        serde_json::to_value(value).map_err(|error| {
+            CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::Rpc,
+                "Retcon could not encode a response.",
+                error.to_string(),
+            )
+        })?,
+    )
+    .await
 }
 
 async fn write_json_value(
@@ -241,7 +255,10 @@ async fn write_json_value(
 
 async fn dispatch(request: Request, state: &CoreState) -> Response {
     if request.method == "turn.send"
-        && let Some(prompt) = request.params.get("prompt").and_then(|value| value.as_str())
+        && let Some(prompt) = request
+            .params
+            .get("prompt")
+            .and_then(|value| value.as_str())
     {
         let scan = retcon_secrets::scan_text(prompt);
         if !scan.is_clean() {
@@ -260,7 +277,15 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
         }
     }
 
-    if !matches!(request.method.as_str(), "approval.list" | "approval.decide" | "permission.rules.list" | "permission.rules.create" | "permission.rules.delete" | "secrets.scan") {
+    if !matches!(
+        request.method.as_str(),
+        "approval.list"
+            | "approval.decide"
+            | "permission.rules.list"
+            | "permission.rules.create"
+            | "permission.rules.delete"
+            | "secrets.scan"
+    ) {
         let project_id = request
             .params
             .get("projectId")
@@ -373,7 +398,9 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
         None => match request.method.split('.').next() {
             Some("project") => crate::projects_rpc::handle(state.clone(), request).await,
             Some("provider") => crate::providers_rpc::handle(request).await,
-            Some("session") | Some("turn") => crate::session_rpc::handle(state.clone(), request).await,
+            Some("session") | Some("turn") => {
+                crate::session_rpc::handle(state.clone(), request).await
+            }
             Some("terminal") => crate::spikes::terminal::handle(state.clone(), request).await,
             Some("git") => crate::git_rpc::handle(state.clone(), request).await,
             Some("agent") => crate::spikes::agent::handle(state.clone(), request).await,
@@ -409,7 +436,13 @@ fn invalid_request(technical_message: impl Into<String>) -> CoreError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, unused_mut)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    unused_mut,
+    unsafe_code
+)]
 mod tests {
     use super::*;
     use retcon_platform::TransportStream;
@@ -478,9 +511,14 @@ mod tests {
         let server_task = tokio::spawn(server.run());
 
         let (_reader, mut writer) = connect_client(&endpoint, &token).await;
-        write_json_line(&mut writer, &Ping { kind: PingKind::Ping })
-            .await
-            .unwrap();
+        write_json_line(
+            &mut writer,
+            &Ping {
+                kind: PingKind::Ping,
+            },
+        )
+        .await
+        .unwrap();
 
         let directory2 = directory.path().to_owned();
         let token2 = token.clone();
@@ -527,6 +565,8 @@ mod tests {
     #[tokio::test]
     async fn blocked_rpc_methods_return_permission_denied() {
         // Ensure dev bypass is off even when the outer test harness sets it.
+        // SAFETY: test-only env mutation; this suite does not share the process with parallel env toggles.
+        #[allow(unsafe_code)]
         unsafe {
             std::env::remove_var("RETCON_PERMISSIONS_BYPASS");
         }

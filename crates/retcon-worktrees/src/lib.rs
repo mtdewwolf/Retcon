@@ -63,7 +63,11 @@ impl WorktreeManager {
     }
 
     /// Assign a worktree path to an agent session.
-    pub fn assign_session(&self, path: &str, session_id: Uuid) -> Result<GitWorktree, WorktreeError> {
+    pub fn assign_session(
+        &self,
+        path: &str,
+        session_id: Uuid,
+    ) -> Result<GitWorktree, WorktreeError> {
         let repos = &self.database;
         let Some(record) = repos.git_worktrees().find_by_path(path)? else {
             return Err(WorktreeError::NotFound(path.to_owned()));
@@ -183,13 +187,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        retcon_git::run_git(&repo, &["init", "-b", "main"]).await.unwrap();
-        retcon_git::run_git(
-            &repo,
-            &["config", "user.email", "retcon@example.invalid"],
-        )
-        .await
-        .unwrap();
+        retcon_git::run_git(&repo, &["init", "-b", "main"])
+            .await
+            .unwrap();
+        retcon_git::run_git(&repo, &["config", "user.email", "retcon@example.invalid"])
+            .await
+            .unwrap();
         retcon_git::run_git(&repo, &["config", "user.name", "Retcon Test"])
             .await
             .unwrap();
@@ -201,8 +204,15 @@ mod tests {
 
         let storage = Storage::open(dir.path()).unwrap();
         let canonical = repo.canonicalize().unwrap().to_string_lossy().into_owned();
-        let project = storage.database().projects().create(&NewProject::new("demo")).unwrap();
-        storage.database().projects().add_location(project.id, &canonical, None)
+        let project = storage
+            .database()
+            .projects()
+            .create(&NewProject::new("demo"))
+            .unwrap();
+        storage
+            .database()
+            .projects()
+            .add_location(project.id, &canonical, None)
             .unwrap();
         let session = storage
             .database()
@@ -223,6 +233,9 @@ mod tests {
             .unwrap();
         assert_eq!(record.session_id, Some(session.id));
         assert_eq!(manager.list_stored(&repo).unwrap().len(), 1);
-        manager.remove(&repo, wt_path.to_str().unwrap()).await.unwrap();
+        manager
+            .remove(&repo, wt_path.to_str().unwrap())
+            .await
+            .unwrap();
     }
 }

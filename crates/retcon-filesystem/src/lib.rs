@@ -8,8 +8,8 @@ pub mod watch;
 
 pub use error::FilesystemError;
 pub use service::{
-    FileEntry, FileReadResult, FileService, FileWriteResult, DEFAULT_READ_LIMIT,
-    DEFAULT_WRITE_LIMIT, LIST_MAX_ENTRIES, resolve_within_root,
+    DEFAULT_READ_LIMIT, DEFAULT_WRITE_LIMIT, FileEntry, FileReadResult, FileService,
+    FileWriteResult, LIST_MAX_ENTRIES, resolve_within_root,
 };
 pub use watch::{FileChangeEvent, FileWatchHandle, WatchRegistry, new_watch_id};
 

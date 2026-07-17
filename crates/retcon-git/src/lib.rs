@@ -177,20 +177,43 @@ pub struct RepoStatus {
 /// Returns a [`GitError`] if the directory is not a repository or Git fails.
 pub async fn status(repo: &Path) -> Result<RepoStatus, GitError> {
     let raw = run_git(repo, &["status", "--porcelain=v1", "--branch"]).await?;
+    Ok(parse_status_output(&raw))
+}
+
+/// Parse `git status --porcelain=v1 --branch` stdout into a [`RepoStatus`].
+#[must_use]
+pub fn parse_status_output(raw: &str) -> RepoStatus {
     let mut lines = raw.lines();
     let branch = lines
         .next()
         .and_then(|line| line.strip_prefix("## "))
         .map(parse_branch_header)
         .unwrap_or_else(|| "HEAD".to_owned());
-    let entries = lines
-        .filter(|line| line.len() > 3)
-        .map(|line| StatusEntry {
-            code: line[..2].to_owned(),
-            path: line[3..].to_owned(),
-        })
-        .collect();
-    Ok(RepoStatus { branch, entries })
+    let entries = lines.filter_map(parse_porcelain_line).collect();
+    RepoStatus { branch, entries }
+}
+
+fn parse_porcelain_line(line: &str) -> Option<StatusEntry> {
+    if line.len() < 4 {
+        return None;
+    }
+    let code = line[..2].to_owned();
+    let path = parse_porcelain_path(&line[3..]);
+    if path.is_empty() {
+        return None;
+    }
+    Some(StatusEntry { code, path })
+}
+
+/// Normalize a porcelain path field (handles renames and trailing slashes).
+fn parse_porcelain_path(rest: &str) -> String {
+    let path = rest
+        .split_once(" -> ")
+        .map(|(_, new)| new)
+        .unwrap_or(rest)
+        .trim()
+        .trim_matches('"');
+    path.trim_end_matches('/').replace('\\', "/")
 }
 
 fn parse_branch_header(header: &str) -> String {
@@ -340,9 +363,7 @@ pub async fn branch_create(repo: &Path, branch: &str) -> Result<(), GitError> {
 pub async fn branch_delete(repo: &Path, branch: &str, force: bool) -> Result<(), GitError> {
     safety::ensure_branch_delete_allowed(repo, branch).await?;
     let flag = if force { "-D" } else { "-d" };
-    run_git(repo, &["branch", flag, branch])
-        .await
-        .map(|_| ())
+    run_git(repo, &["branch", flag, branch]).await.map(|_| ())
 }
 
 /// Check out a branch.
@@ -405,11 +426,14 @@ async fn apply_patch(repo: &Path, patch: &str, prefix: &[&str]) -> Result<(), Gi
         })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(patch.as_bytes()).await.map_err(|e| GitError {
-            command: args.join(" "),
-            exit_code: None,
-            stderr: format!("failed to write patch: {e}"),
-        })?;
+        stdin
+            .write_all(patch.as_bytes())
+            .await
+            .map_err(|e| GitError {
+                command: args.join(" "),
+                exit_code: None,
+                stderr: format!("failed to write patch: {e}"),
+            })?;
     }
 
     let output = child.wait_with_output().await.map_err(|e| GitError {
@@ -493,6 +517,20 @@ pub async fn submodules(repo: &Path) -> Result<Vec<String>, GitError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_status_output_handles_branch_and_renames() {
+        let status = parse_status_output(
+            "## main...origin/main\n M src/a.rs\n?? notes.txt\nR  old.txt -> new.txt\n",
+        );
+        assert_eq!(status.branch, "main");
+        assert_eq!(status.entries.len(), 3);
+        assert_eq!(status.entries[0].code, " M");
+        assert_eq!(status.entries[0].path, "src/a.rs");
+        assert_eq!(status.entries[1].path, "notes.txt");
+        assert_eq!(status.entries[2].code, "R ");
+        assert_eq!(status.entries[2].path, "new.txt");
+    }
+
     #[tokio::test]
     async fn status_branch_diff_and_worktree_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -514,10 +552,12 @@ mod tests {
         branch_create(dir.path(), "review").await.unwrap();
         std::fs::write(dir.path().join("hello.txt"), "two\n").unwrap();
         assert_eq!(status(dir.path()).await.unwrap().branch, "main");
-        assert!(diff(dir.path(), None, DiffMode::Unstaged)
-            .await
-            .unwrap()
-            .contains("+two"));
+        assert!(
+            diff(dir.path(), None, DiffMode::Unstaged)
+                .await
+                .unwrap()
+                .contains("+two")
+        );
         let worktree = dir.path().join("worktree");
         worktree_add(dir.path(), worktree.to_str().unwrap(), "spike")
             .await

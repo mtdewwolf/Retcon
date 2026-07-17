@@ -94,11 +94,8 @@ mod tests {
 
     #[test]
     fn wildcard_rule_matches_prefix() {
-        let created = NewPermissionRule::new(
-            "rpc",
-            "deny",
-            serde_json::json!({"methods": ["git.*"]}),
-        );
+        let created =
+            NewPermissionRule::new("rpc", "deny", serde_json::json!({"methods": ["git.*"]}));
         let rule = PermissionRule {
             id: created.id,
             project_id: created.project_id,

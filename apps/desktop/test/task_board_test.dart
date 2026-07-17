@@ -56,6 +56,15 @@ void main() {
 
     tearDown(() => controller.dispose());
 
+    test('creates a backlog task and selects it', () async {
+      await controller.refresh();
+      await controller.createTask('Ship checkpoints UI');
+
+      expect(controller.tasks.first.title, 'Ship checkpoints UI');
+      expect(controller.tasks.first.status, TaskStatus.backlog);
+      expect(controller.selectedTask?.title, 'Ship checkpoints UI');
+    });
+
     test('filters, groups, and restores a saved view', () async {
       await controller.refresh();
       controller.setQuery('desktop');

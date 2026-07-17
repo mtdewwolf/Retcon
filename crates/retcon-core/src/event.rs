@@ -98,6 +98,8 @@ impl Clone for EventBus {
 
 impl Drop for EventBus {
     fn drop(&mut self) {
+        // Take ownership of the Arc so we can join the writer when we are the last clone.
+        #[allow(unsafe_code)]
         let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
         if let Ok(inner) = Arc::try_unwrap(inner) {
             drop(inner.persist_tx);

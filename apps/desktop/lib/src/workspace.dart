@@ -8,10 +8,11 @@ import 'package:retcon_design_system/retcon_design_system.dart';
 import 'package:retcon_file_viewer/retcon_file_viewer.dart';
 import 'package:retcon_terminal_view/retcon_terminal_view.dart';
 
+import 'approvals/approval_center.dart';
+import 'browser/browser.dart';
+import 'checkpoints/checkpoints.dart';
 import 'conversation/conversation_panel.dart';
 import 'core_client.dart';
-import 'approvals/approval_center.dart';
-import 'checkpoints/checkpoints.dart';
 
 /// Persistent, versioned workspace layout.  This stays deliberately independent
 /// of widgets so a project layout can be restored before the desktop is drawn.
@@ -302,7 +303,8 @@ enum LayoutPreset {
   focus('Focus'),
   build('Build'),
   review('Review'),
-  browser('Browser');
+  browser('Browser'),
+  checkpoints('Checkpoints');
 
   const LayoutPreset(this.label);
   final String label;
@@ -331,7 +333,12 @@ enum LayoutPreset {
             second: const TabGroup(panels: [PanelDefinition.review]),
             fraction: .55,
           ),
-          second: const TabGroup(panels: [PanelDefinition.browser]),
+          second: const TabGroup(
+            panels: [
+              PanelDefinition.browser,
+              PanelDefinition.checkpoints,
+            ],
+          ),
           fraction: .58,
         ),
         fraction: .22,
@@ -342,6 +349,17 @@ enum LayoutPreset {
         first: const TabGroup(panels: [PanelDefinition.browser]),
         second: const TabGroup(panels: [PanelDefinition.workspace]),
         fraction: .62,
+      ),
+    ),
+    LayoutPreset.checkpoints => WorkspaceLayout(
+      root: SplitGroup.horizontal(
+        first: const TabGroup(panels: [PanelDefinition.explorer]),
+        second: SplitGroup.vertical(
+          first: const TabGroup(panels: [PanelDefinition.workspace]),
+          second: const TabGroup(panels: [PanelDefinition.checkpoints]),
+          fraction: .55,
+        ),
+        fraction: .22,
       ),
     ),
   };
@@ -402,7 +420,7 @@ class WorkspaceController extends ChangeNotifier {
 
   Future<void> openPanel(PanelDefinition panel) async {
     if (_containsPanel(_layout.root, panel.id)) {
-      notifyListeners();
+      await selectTab(panel.id);
       return;
     }
     _layout = WorkspaceLayout(
@@ -411,6 +429,17 @@ class WorkspaceController extends ChangeNotifier {
       closedPanels: _layout.closedPanels
           .where((item) => item.id != panel.id)
           .toList(),
+    );
+    await _save();
+  }
+
+  /// Activates the tab that hosts [panelId] within the docking tree.
+  Future<void> selectTab(String panelId) async {
+    if (!_containsPanel(_layout.root, panelId)) return;
+    _layout = WorkspaceLayout(
+      root: _activate(_layout.root, panelId),
+      floatingPanels: _layout.floatingPanels,
+      closedPanels: _layout.closedPanels,
     );
     await _save();
   }
@@ -536,12 +565,30 @@ class WorkspaceController extends ChangeNotifier {
           fraction: split.fraction,
         ),
       };
-  WorkspaceNode _remove(WorkspaceNode node, String id) => switch (node) {
-    TabGroup group => TabGroup(
-      panels: group.panels.where((panel) => panel.id != id).toList().isEmpty
-          ? const [PanelDefinition.workspace]
-          : group.panels.where((panel) => panel.id != id).toList(),
+
+  WorkspaceNode _activate(WorkspaceNode node, String id) => switch (node) {
+    TabGroup group => () {
+      final index = group.panels.indexWhere((panel) => panel.id == id);
+      if (index < 0) return group;
+      return TabGroup(panels: group.panels, activeIndex: index);
+    }(),
+    SplitGroup split => SplitGroup(
+      axis: split.axis,
+      first: _activate(split.first, id),
+      second: _activate(split.second, id),
+      fraction: split.fraction,
     ),
+  };
+
+  WorkspaceNode _remove(WorkspaceNode node, String id) => switch (node) {
+    TabGroup group => () {
+      final panels = group.panels.where((panel) => panel.id != id).toList();
+      if (panels.isEmpty) {
+        return const TabGroup(panels: [PanelDefinition.workspace]);
+      }
+      final activeIndex = group.activeIndex.clamp(0, panels.length - 1);
+      return TabGroup(panels: panels, activeIndex: activeIndex);
+    }(),
     SplitGroup split => SplitGroup(
       axis: split.axis,
       first: _remove(split.first, id),
@@ -557,10 +604,12 @@ class DockingWorkspace extends StatefulWidget {
     required this.controller,
     this.core,
     this.workingDirectory,
+    this.projectId,
   });
   final WorkspaceController controller;
   final CoreClient? core;
   final String? workingDirectory;
+  final String? projectId;
   @override
   State<DockingWorkspace> createState() => _DockingWorkspaceState();
 }
@@ -599,6 +648,7 @@ class _DockingWorkspaceState extends State<DockingWorkspace> {
                 workspaceSize: viewport,
                 core: widget.core,
                 workingDirectory: widget.workingDirectory,
+                projectId: widget.projectId,
               ),
             ),
             for (final floating in widget.controller.layout.floatingPanels)
@@ -608,6 +658,7 @@ class _DockingWorkspaceState extends State<DockingWorkspace> {
                 workspaceSize: viewport,
                 core: widget.core,
                 workingDirectory: widget.workingDirectory,
+                projectId: widget.projectId,
               ),
           ],
         );
@@ -623,12 +674,14 @@ class _NodeView extends StatelessWidget {
     required this.workspaceSize,
     this.core,
     this.workingDirectory,
+    this.projectId,
   });
   final WorkspaceNode node;
   final WorkspaceController controller;
   final Size workspaceSize;
   final CoreClient? core;
   final String? workingDirectory;
+  final String? projectId;
   @override
   Widget build(BuildContext context) => switch (node) {
     TabGroup group => _TabGroupView(
@@ -637,6 +690,7 @@ class _NodeView extends StatelessWidget {
       workspaceSize: workspaceSize,
       core: core,
       workingDirectory: workingDirectory,
+      projectId: projectId,
     ),
     SplitGroup split => Flex(
       direction: split.axis == SplitAxis.horizontal
@@ -651,6 +705,7 @@ class _NodeView extends StatelessWidget {
             workspaceSize: workspaceSize,
             core: core,
             workingDirectory: workingDirectory,
+            projectId: projectId,
           ),
         ),
         const SizedBox(width: RetconSpacing.xs, height: RetconSpacing.xs),
@@ -662,6 +717,7 @@ class _NodeView extends StatelessWidget {
             workspaceSize: workspaceSize,
             core: core,
             workingDirectory: workingDirectory,
+            projectId: projectId,
           ),
         ),
       ],
@@ -676,12 +732,14 @@ class _TabGroupView extends StatelessWidget {
     required this.workspaceSize,
     this.core,
     this.workingDirectory,
+    this.projectId,
   });
   final TabGroup group;
   final WorkspaceController controller;
   final Size workspaceSize;
   final CoreClient? core;
   final String? workingDirectory;
+  final String? projectId;
   @override
   Widget build(BuildContext context) {
     final panel = group.active;
@@ -704,7 +762,13 @@ class _TabGroupView extends StatelessWidget {
                           Padding(
                             padding: const EdgeInsets.only(left: 2),
                             child: TextButton.icon(
-                              onPressed: () {},
+                              onPressed: () =>
+                                  unawaited(controller.selectTab(item.id)),
+                              style: TextButton.styleFrom(
+                                foregroundColor: item.id == panel.id
+                                    ? Theme.of(context).colorScheme.primary
+                                    : null,
+                              ),
                               icon: Icon(
                                 _icon(item.icon),
                                 size: RetconIconSizes.small,
@@ -745,6 +809,7 @@ class _TabGroupView extends StatelessWidget {
               panel: panel,
               core: core,
               workingDirectory: workingDirectory,
+              projectId: projectId,
             ),
           ),
         ],
@@ -760,12 +825,14 @@ class _FloatingView extends StatefulWidget {
     required this.workspaceSize,
     this.core,
     this.workingDirectory,
+    this.projectId,
   });
   final FloatingPanel floating;
   final WorkspaceController controller;
   final Size workspaceSize;
   final CoreClient? core;
   final String? workingDirectory;
+  final String? projectId;
 
   @override
   State<_FloatingView> createState() => _FloatingViewState();
@@ -844,6 +911,7 @@ class _FloatingViewState extends State<_FloatingView> {
                   panel: floating.panel,
                   core: widget.core,
                   workingDirectory: widget.workingDirectory,
+                  projectId: widget.projectId,
                 ),
               ),
             ],
@@ -859,10 +927,12 @@ class _PanelBody extends StatelessWidget {
     required this.panel,
     this.core,
     this.workingDirectory,
+    this.projectId,
   });
   final PanelDefinition panel;
   final CoreClient? core;
   final String? workingDirectory;
+  final String? projectId;
   @override
   Widget build(BuildContext context) {
     if (panel.id == 'workspace' && core != null) {
@@ -880,7 +950,10 @@ class _PanelBody extends StatelessWidget {
       );
     }
     if (panel.id == 'approvals' && core != null) {
-      return ApprovalCenterPanel(core: core!);
+      return ApprovalCenterPanel(core: core!, projectId: projectId);
+    }
+    if (panel.id == 'browser' && core != null) {
+      return BrowserPanel(core: core!);
     }
     if (panel.id == 'explorer' && core != null && workingDirectory != null) {
       return FileWorkspacePanel(
@@ -930,7 +1003,7 @@ String _message(String id) => switch (id) {
   'explorer' => 'Open a project to begin.',
   'workspace' => 'Agent conversation appears here when Core is connected.',
   'terminal' => 'Terminal sessions appear here.',
-  'browser' => 'Browser sessions appear here.',
+  'browser' => 'Connect to Retcon Core to start the browser service.',
   'approvals' => 'Pending approvals appear here when Core is connected.',
   'review' => 'Diff review appears here when a project is open.',
   'checkpoints' => 'Checkpoint history appears here when a project is open.',

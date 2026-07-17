@@ -20,6 +20,7 @@ enum ShellCommand {
   openProject('Open project', Icons.folder_open),
   commandPalette('Command palette', Icons.search),
   approvals('Approval center', Icons.verified_user),
+  checkpoints('Checkpoints', Icons.history),
   terminal('Open terminal', Icons.terminal),
   browser('Open browser', Icons.language),
   taskBoard('Task board', Icons.view_kanban),
@@ -231,10 +232,12 @@ class _DesktopShellState extends State<DesktopShell> {
     switch (command) {
       case ShellCommand.approvals:
         await _workspace.openPanel(PanelDefinition.approvals);
+      case ShellCommand.checkpoints:
+        await _workspace.openPanel(PanelDefinition.checkpoints);
       case ShellCommand.terminal:
         await _workspace.float(PanelDefinition.terminal, const Size(900, 600));
       case ShellCommand.browser:
-        await _workspace.float(PanelDefinition.browser, const Size(900, 600));
+        await _workspace.openPanel(PanelDefinition.browser);
       case ShellCommand.commandPalette:
         await _showCommandPalette();
       case ShellCommand.settings:
@@ -288,7 +291,8 @@ class _DesktopShellState extends State<DesktopShell> {
     builder: (context) => AlertDialog(
       title: const Text('New project'),
       content: const Text(
-        'Project creation flows arrive in Phase 9. Use Open project to register an existing folder for now.',
+        'Blank project creation (project.init) is not available yet. '
+        'Use Clone repository or Open project to register an existing folder.',
       ),
       actions: [
         FilledButton(
@@ -449,8 +453,12 @@ class _DesktopShellState extends State<DesktopShell> {
                       child: _Workspace(
                         controller: _workspace,
                         core: widget.core,
-                        workingDirectory:
-                            widget.projectController?.current?.metadata.repositoryPath,
+                        workingDirectory: widget
+                            .projectController
+                            ?.current
+                            ?.metadata
+                            .repositoryPath,
+                        projectId: widget.projectController?.current?.id,
                       ),
                     ),
                     _Taskbar(
@@ -614,7 +622,11 @@ class _ApplicationMenu extends StatelessWidget {
         ShellCommand.exit,
       ]),
       _menu('Edit', [ShellCommand.commandPalette]),
-      _menu('View', [ShellCommand.fullScreen, ShellCommand.taskBoard]),
+      _menu('View', [
+        ShellCommand.fullScreen,
+        ShellCommand.taskBoard,
+        ShellCommand.checkpoints,
+      ]),
       _menu('Agents', [ShellCommand.approvals, ShellCommand.commandPalette]),
       _menu('Git', [ShellCommand.commandPalette]),
       _menu('Browser', [ShellCommand.browser]),
@@ -646,10 +658,12 @@ class _Workspace extends StatelessWidget {
     required this.controller,
     this.core,
     this.workingDirectory,
+    this.projectId,
   });
   final WorkspaceController controller;
   final CoreClient? core;
   final String? workingDirectory;
+  final String? projectId;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -686,6 +700,7 @@ class _Workspace extends StatelessWidget {
             controller: controller,
             core: core,
             workingDirectory: workingDirectory,
+            projectId: projectId,
           ),
         ),
       ],

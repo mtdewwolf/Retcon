@@ -1,8 +1,6 @@
 //! RPC adapter for approvals and permission rules.
 
-use retcon_permissions::{
-    ApprovalDecision, PermissionError, RememberScope, RuleEffect,
-};
+use retcon_permissions::{ApprovalDecision, PermissionError, RememberScope, RuleEffect};
 use retcon_storage::{Approval, NewPermissionRule, PermissionRule};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -98,7 +96,10 @@ fn parse_uuid_param(id: u64, params: &Value, key: &str) -> Result<Uuid, Response
     }
 }
 
-fn emit_audit(state: &CoreState, records: impl IntoIterator<Item = retcon_permissions::AuditRecord>) {
+fn emit_audit(
+    state: &CoreState,
+    records: impl IntoIterator<Item = retcon_permissions::AuditRecord>,
+) {
     for record in records {
         state.emit(&record.kind, record.payload);
     }
@@ -141,10 +142,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 },
                 None => None,
             };
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(100) as usize;
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
             match engine.list_approvals(status, session_id, limit) {
                 Ok(approvals) => Response::ok(
                     id,
@@ -265,10 +263,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 },
                 None => None,
             };
-            let scope = params
-                .get("scope")
-                .and_then(Value::as_str)
-                .unwrap_or("rpc");
+            let scope = params.get("scope").and_then(Value::as_str).unwrap_or("rpc");
             let effect = match params.get("effect").and_then(Value::as_str) {
                 Some(raw) => raw,
                 None => {
@@ -334,7 +329,9 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(true) => {
                     emit_audit(
                         &state,
-                        [retcon_permissions::AuditRecord::permission_rule_deleted(rule_id)],
+                        [retcon_permissions::AuditRecord::permission_rule_deleted(
+                            rule_id,
+                        )],
                     );
                     Response::ok(id, json!({"deleted": true}))
                 }
@@ -400,7 +397,9 @@ mod tests {
         .await;
         assert!(decide.result.is_some());
         assert_eq!(
-            decide.result.unwrap()["approval"]["status"].as_str().unwrap(),
+            decide.result.unwrap()["approval"]["status"]
+                .as_str()
+                .unwrap(),
             "approved"
         );
     }

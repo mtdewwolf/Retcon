@@ -50,8 +50,8 @@ fn scan_paths(paths: &[String]) -> Result<(), String> {
     }
     let mut combined = ScanResult::default();
     for path in paths {
-        let content = fs::read_to_string(path)
-            .map_err(|error| format!("failed to read {path}: {error}"))?;
+        let content =
+            fs::read_to_string(path).map_err(|error| format!("failed to read {path}: {error}"))?;
         combined = combined.merge(scan_text(&content));
         if !combined.is_clean() {
             eprintln!("secret scan failed for {path}: {}", combined.summary());
@@ -88,6 +88,7 @@ fn report(result: ScanResult, label: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

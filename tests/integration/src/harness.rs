@@ -1,5 +1,7 @@
 //! Minimal helpers to drive an in-process `CoreRuntime` over the local transport.
 
+#![allow(unsafe_code, clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::path::PathBuf;
 
 use retcon_core::{CoreConfig, CoreRuntime};
@@ -85,7 +87,9 @@ pub struct RpcClient {
 impl RpcClient {
     /// Connect and complete the auth + client hello handshake.
     pub async fn connect(endpoint: &LocalEndpoint, token: &str) -> Self {
-        let stream = TransportStream::connect(endpoint).await.expect("connect transport");
+        let stream = TransportStream::connect(endpoint)
+            .await
+            .expect("connect transport");
         let (reader, mut writer) = stream.into_split();
         writer
             .write_all(format!("{{\"auth\":\"{token}\"}}\n").as_bytes())
@@ -150,11 +154,7 @@ impl RpcClient {
 
 /// Default shell executable for the current platform.
 pub fn default_shell() -> &'static str {
-    if cfg!(windows) {
-        "cmd.exe"
-    } else {
-        "/bin/sh"
-    }
+    if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }
 }
 
 /// Assert an RPC envelope succeeded and return its `result` object.

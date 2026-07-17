@@ -104,7 +104,7 @@ class ApprovalController extends ChangeNotifier {
           'approvalId': approvalId,
           'decision': decision,
           'remember': remember,
-          if (projectId != null) 'projectId': projectId,
+          'projectId': ?projectId,
         },
       );
       await refresh();

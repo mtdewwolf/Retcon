@@ -6,6 +6,29 @@ import 'package:retcon_desktop/src/tasks/tasks.dart';
 
 void main() {
   group('CoreTaskRepository', () {
+    test('creates tasks through task.create', () async {
+      final rpc = FakeTaskRpcClient((method, params) async {
+        if (method == 'task.create') {
+          expect(params['title'], 'New roadmap item');
+          expect(params['projectId'], projectId);
+          return {
+            'task': _details(status: 'backlog'),
+          };
+        }
+        throw StateError('Unexpected request: $method');
+      });
+      final repository = CoreTaskRepository(rpc);
+
+      final created = await repository.createTask(
+        'New roadmap item',
+        projectId: projectId,
+      );
+
+      expect(rpc.calls.single.method, 'task.create');
+      expect(created.title, 'Phase 21');
+      expect(created.status, TaskStatus.backlog);
+    });
+
     test('loads task details and maps backend wire states', () async {
       final rpc = FakeTaskRpcClient((method, params) async {
         if (method == 'task.list') {

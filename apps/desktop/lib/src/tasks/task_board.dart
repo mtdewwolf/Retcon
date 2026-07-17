@@ -227,6 +227,11 @@ class _TaskToolbar extends StatelessWidget {
             ),
           ),
         TextButton.icon(
+          onPressed: () => _createTask(context),
+          icon: const Icon(Icons.add),
+          label: const Text('New task'),
+        ),
+        TextButton.icon(
           onPressed: () => _saveView(context),
           icon: const Icon(Icons.bookmark_add_outlined),
           label: const Text('Save view'),
@@ -239,6 +244,15 @@ class _TaskToolbar extends StatelessWidget {
       ],
     ),
   );
+
+  Future<void> _createTask(BuildContext context) async {
+    final title = await _prompt(
+      context,
+      title: 'New task',
+      label: 'Task title',
+    );
+    if (title != null) await controller.createTask(title);
+  }
 
   Future<void> _saveView(BuildContext context) async {
     final name = await _prompt(
