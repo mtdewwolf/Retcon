@@ -261,7 +261,8 @@ fn referenced_hashes(database: &Database) -> Result<HashSet<String>> {
              UNION SELECT report_artifact_hash FROM test_runs WHERE report_artifact_hash IS NOT NULL
              UNION SELECT artifact_hash FROM diagnostics WHERE artifact_hash IS NOT NULL
              UNION SELECT artifact_hash FROM verification_artifacts
-             UNION SELECT log_artifact_hash FROM dev_server_instances WHERE log_artifact_hash IS NOT NULL",
+             UNION SELECT log_artifact_hash FROM dev_server_instances WHERE log_artifact_hash IS NOT NULL
+             UNION SELECT artifact_hash FROM browser_observations",
         )?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?

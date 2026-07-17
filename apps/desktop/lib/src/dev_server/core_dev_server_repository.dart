@@ -298,7 +298,11 @@ class CoreDevServerRepository implements DevServerRepository {
       url: url,
       port: _int(response['port'], snapshot.config.port),
       status: _status(response['status'], startedAt: snapshot.startedAt),
-      metadata: _map(response['preview']),
+      metadata: {
+        ..._map(response['preview']),
+        if (response['instanceId'] != null)
+          'devServerInstanceId': response['instanceId'].toString(),
+      },
     );
   }
 

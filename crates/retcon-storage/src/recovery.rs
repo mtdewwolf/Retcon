@@ -16,6 +16,7 @@ pub struct RecoveryReport {
     pub orphaned_jobs: u64,
     pub interrupted_terminals: u64,
     pub interrupted_browsers: u64,
+    pub orphaned_browser_profiles: u64,
     pub interrupted_verifications: u64,
     pub orphaned_dev_servers: u64,
     pub stale_port_leases: u64,
@@ -31,6 +32,7 @@ impl RecoveryReport {
             + self.orphaned_jobs
             + self.interrupted_terminals
             + self.interrupted_browsers
+            + self.orphaned_browser_profiles
             + self.interrupted_verifications
             + self.orphaned_dev_servers
             + self.stale_port_leases
@@ -46,8 +48,12 @@ impl Database {
             let interrupted_turns = tx.execute("UPDATE turns SET status='failed',completed_at=?1,error_json='{\"reason\":\"process_restart\"}' WHERE status IN ('queued','sending','running','tool_execution','waiting_for_approval','completing')", [now_ms()])? as u64;
             let orphaned_jobs = tx.execute("UPDATE background_jobs SET status='orphaned',finished_at=?1,failure_class='internal',failure='core process restarted before job completion' WHERE status IN ('queued','running','stuck')", [now_ms()])? as u64;
             let interrupted_terminals = tx.execute("UPDATE terminal_sessions SET status='interrupted',ended_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
-            let interrupted_browsers = tx.execute("UPDATE browser_sessions SET status='interrupted',ended_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
             let recovered_at = now_ms();
+            let interrupted_browsers = tx.query_row("SELECT count(*) FROM browser_sessions WHERE status IN ('starting','running','stopping')", [], |row| row.get::<_,u64>(0))?;
+            tx.execute("INSERT INTO browser_history(browser_session_id,project_id,kind,actor,payload_json,created_at) SELECT id,project_id,'interrupted','system','{\"reason\":\"process_restart\"}',?1 FROM browser_sessions WHERE project_id IS NOT NULL AND status IN ('starting','running','stopping')", [recovered_at])?;
+            tx.execute("UPDATE browser_sessions SET status='interrupted',failure='core process restarted',updated_at=?1,ended_at=?1 WHERE status IN ('starting','running','stopping')", [recovered_at])?;
+            tx.execute("UPDATE browser_takeovers SET ended_at=?1,end_reason='process_restart' WHERE ended_at IS NULL", [recovered_at])?;
+            let orphaned_browser_profiles = tx.execute("UPDATE browser_profiles SET status='orphaned',updated_at=?1,released_at=?1 WHERE status='active'", [recovered_at])? as u64;
             let interrupted_verifications = tx.query_row("SELECT count(*) FROM verification_runs WHERE status='running'", [], |row| row.get::<_,u64>(0))?;
             tx.execute("INSERT INTO verification_events(run_id,task_id,gate_id,kind,actor,payload_json,created_at) SELECT id,task_id,NULL,'interrupted','system','{\"reason\":\"process_restart\"}',?1 FROM verification_runs WHERE status='running'", [recovered_at])?;
             tx.execute("UPDATE verification_gates SET status='error',completed_at=?1,summary_json='{\"reason\":\"process_restart\"}' WHERE run_id IN (SELECT id FROM verification_runs WHERE status='running') AND status IN ('pending','running')", [recovered_at])?;
@@ -59,7 +65,7 @@ impl Database {
             let stale_port_leases = tx.execute("UPDATE dev_server_port_leases SET status='stale',released_at=?1 WHERE status='active' AND instance_id IS NOT NULL", [recovered_at])? as u64;
             let pending_approvals = tx.query_row("SELECT count(*) FROM approvals WHERE status='pending'", [], |row| row.get::<_,u64>(0))?;
             let active_tasks = tx.query_row("SELECT count(*) FROM tasks WHERE status NOT IN ('completed','cancelled','failed')", [], |row| row.get::<_,u64>(0))?;
-            Ok(RecoveryReport { recovered_at, interrupted_sessions, interrupted_turns, orphaned_jobs, interrupted_terminals, interrupted_browsers, interrupted_verifications, orphaned_dev_servers, stale_port_leases, pending_approvals, active_tasks })
+            Ok(RecoveryReport { recovered_at, interrupted_sessions, interrupted_turns, orphaned_jobs, interrupted_terminals, interrupted_browsers, orphaned_browser_profiles, interrupted_verifications, orphaned_dev_servers, stale_port_leases, pending_approvals, active_tasks })
         })
     }
 }

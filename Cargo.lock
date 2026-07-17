@@ -745,6 +745,14 @@ dependencies = [
 [[package]]
 name = "retcon-browser"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "retcon-checkpoints"
@@ -776,6 +784,7 @@ dependencies = [
  "clap",
  "fs2",
  "retcon-agents",
+ "retcon-browser",
  "retcon-checkpoints",
  "retcon-devserver",
  "retcon-filesystem",

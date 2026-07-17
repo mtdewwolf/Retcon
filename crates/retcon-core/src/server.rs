@@ -287,18 +287,25 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             | "secrets.scan"
     ) {
         let project_id = permission_project_id(state, &request);
-        if matches!(
+        let missing_dev_server_owner = matches!(
             request.method.as_str(),
             "devServer.start" | "devServer.stop" | "devServer.restart" | "devServer.autoStart.set"
-        ) && project_id.is_none()
-        {
+        ) && project_id.is_none();
+        let missing_browser_owner = request.method.starts_with("browser.")
+            && !matches!(
+                request.method.as_str(),
+                "browser.startService" | "browser.stopService" | "browser.call"
+            )
+            && retcon_permissions::requires_approval(&request.method)
+            && project_id.is_none();
+        if missing_dev_server_owner || missing_browser_owner {
             return Response::error(
                 request.id,
                 &CoreError::new(
                     ErrorCode::NotFound,
                     ErrorSource::Rpc,
-                    "The requested development server information was not found.",
-                    "development server permission owner not found",
+                    "The requested protected resource was not found.",
+                    "permission owner not found",
                 ),
             );
         }
@@ -415,7 +422,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             Some("terminal") => crate::spikes::terminal::handle(state.clone(), request).await,
             Some("git") => crate::git_rpc::handle(state.clone(), request).await,
             Some("agent") => crate::spikes::agent::handle(state.clone(), request).await,
-            Some("browser") => crate::spikes::browser::handle(state.clone(), request).await,
+            Some("browser") => crate::browser_rpc::handle(state.clone(), request).await,
             Some("storage") => crate::storage_rpc::handle(state.clone(), request).await,
             Some("file") => crate::file_rpc::handle(state.clone(), request).await,
             Some("checkpoint") => crate::checkpoints_rpc::handle(state.clone(), request).await,
@@ -440,37 +447,95 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
 }
 
 fn permission_project_id(state: &CoreState, request: &Request) -> Option<Uuid> {
-    if let Some(project_id) = request
+    if request.method.starts_with("devServer.") {
+        let repository = state.storage().database().dev_servers();
+        if request.method == "devServer.configure" {
+            return request
+                .params
+                .get("projectId")
+                .and_then(|value| value.as_str())
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .filter(|project_id| {
+                    state
+                        .storage()
+                        .database()
+                        .projects()
+                        .get(*project_id)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                });
+        }
+        if let Some(config_id) = request
+            .params
+            .get("configId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            return repository
+                .config(config_id)
+                .ok()
+                .flatten()
+                .map(|config| config.project_id);
+        }
+        return request
+            .params
+            .get("instanceId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+            .and_then(|instance_id| repository.instance(instance_id).ok().flatten())
+            .map(|instance| instance.project_id);
+    }
+    if request.method.starts_with("browser.") {
+        let repository = state.storage().database().durable_browsers();
+        if let Some(session_id) = request
+            .params
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            return repository
+                .session(session_id)
+                .ok()
+                .flatten()
+                .map(|session| session.project_id);
+        }
+        if retcon_permissions::requires_approval(&request.method)
+            && request.method != "browser.session.start"
+        {
+            // Every protected durable operation except session creation is owned by
+            // its stored session. Never let a caller-supplied projectId override it.
+            return None;
+        }
+        if let Some(tab_id) = request
+            .params
+            .get("tabId")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            return repository
+                .tab(tab_id)
+                .ok()
+                .flatten()
+                .and_then(|tab| repository.session(tab.browser_session_id).ok().flatten())
+                .map(|session| session.project_id);
+        }
+    }
+    request
         .params
         .get("projectId")
         .and_then(|value| value.as_str())
         .and_then(|raw| Uuid::parse_str(raw).ok())
-    {
-        return Some(project_id);
-    }
-    if !request.method.starts_with("devServer.") {
-        return None;
-    }
-    let repository = state.storage().database().dev_servers();
-    if let Some(config_id) = request
-        .params
-        .get("configId")
-        .and_then(|value| value.as_str())
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-    {
-        return repository
-            .config(config_id)
-            .ok()
-            .flatten()
-            .map(|config| config.project_id);
-    }
-    request
-        .params
-        .get("instanceId")
-        .and_then(|value| value.as_str())
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .and_then(|instance_id| repository.instance(instance_id).ok().flatten())
-        .map(|instance| instance.project_id)
+        .filter(|project_id| {
+            state
+                .storage()
+                .database()
+                .projects()
+                .get(*project_id)
+                .ok()
+                .flatten()
+                .is_some()
+        })
 }
 
 fn invalid_request(technical_message: impl Into<String>) -> CoreError {
@@ -656,6 +721,65 @@ mod tests {
                 id: 1,
                 method: "devServer.start".into(),
                 params: json!({"configId":Uuid::new_v4()}),
+            },
+            &state,
+        )
+        .await;
+        assert!(response.error.is_some());
+        assert_eq!(state.permissions().pending_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn browser_permission_scope_uses_durable_owner_not_supplied_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = CoreState::new(directory.path()).unwrap();
+        let owner = state
+            .storage()
+            .database()
+            .projects()
+            .create(&retcon_storage::NewProject::new("Owner"))
+            .unwrap();
+        let spoofed = state
+            .storage()
+            .database()
+            .projects()
+            .create(&retcon_storage::NewProject::new("Spoofed"))
+            .unwrap();
+        let session = state
+            .storage()
+            .database()
+            .durable_browsers()
+            .prepare_session(
+                &retcon_storage::NewDurableBrowserSession::new(
+                    owner.id,
+                    directory.path().join("profile").to_string_lossy(),
+                ),
+                "test",
+            )
+            .unwrap();
+        let request = Request {
+            id: 1,
+            method: "browser.session.stop".into(),
+            params: json!({"sessionId":session.id,"projectId":spoofed.id}),
+        };
+        assert_eq!(permission_project_id(&state, &request), Some(owner.id));
+    }
+
+    #[tokio::test]
+    async fn missing_browser_session_cannot_use_supplied_project_for_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = CoreState::new(directory.path()).unwrap();
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&retcon_storage::NewProject::new("Web"))
+            .unwrap();
+        let response = dispatch(
+            Request {
+                id: 1,
+                method: "browser.session.stop".into(),
+                params: json!({"sessionId":Uuid::new_v4(),"projectId":project.id}),
             },
             &state,
         )

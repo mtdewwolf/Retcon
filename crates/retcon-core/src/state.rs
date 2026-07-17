@@ -17,6 +17,7 @@ use crate::spikes::agent::AgentRegistry;
 use crate::spikes::browser::BrowserHandle;
 use crate::spikes::terminal::TerminalRegistry;
 use crate::verification::{DurableVerificationRunner, VerificationRunner};
+use retcon_browser::{BrowserService, NodeBrowserService};
 use retcon_filesystem::FilesystemHandle;
 use retcon_permissions::ApprovalEngine;
 use retcon_storage::{RecoveryReport, Storage};
@@ -35,6 +36,7 @@ struct Inner {
     agents: AgentRegistry,
     sessions: SessionRegistry,
     browser: BrowserHandle,
+    browser_service: Arc<dyn BrowserService>,
     storage: Storage,
     filesystem: FilesystemHandle,
     recovery: RecoveryReport,
@@ -48,7 +50,7 @@ impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, None)
+        Self::from_storage(storage, verification_runner, None, None)
     }
 
     pub fn new_with_verification_runner(
@@ -56,7 +58,7 @@ impl CoreState {
         verification_runner: Arc<dyn VerificationRunner>,
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
-        Self::from_storage(storage, verification_runner, None)
+        Self::from_storage(storage, verification_runner, None, None)
     }
 
     pub fn new_with_dev_server_runtime(
@@ -65,13 +67,23 @@ impl CoreState {
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, Some(dev_server_runtime))
+        Self::from_storage(storage, verification_runner, Some(dev_server_runtime), None)
+    }
+
+    pub fn new_with_browser_service(
+        data_dir: &std::path::Path,
+        browser_service: Arc<dyn BrowserService>,
+    ) -> Result<Self, CoreError> {
+        let storage = Storage::open(data_dir)?;
+        let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
+        Self::from_storage(storage, verification_runner, None, Some(browser_service))
     }
 
     fn from_storage(
         storage: Storage,
         verification_runner: Arc<dyn VerificationRunner>,
         dev_server_runtime: Option<Arc<dyn DevServerRuntime>>,
+        browser_service: Option<Arc<dyn BrowserService>>,
     ) -> Result<Self, CoreError> {
         let (shutdown, _) = watch::channel(false);
         let schema_version = storage.database().schema_version().ok();
@@ -87,6 +99,8 @@ impl CoreState {
                 events.clone(),
             ))
         });
+        let browser_service = browser_service
+            .unwrap_or_else(|| Arc::new(NodeBrowserService::discover(storage.data_dir())));
         if recovery.changed_state() {
             events.emit(
                 "system.recovery",
@@ -103,6 +117,7 @@ impl CoreState {
                 agents: AgentRegistry::default(),
                 sessions: SessionRegistry::default(),
                 browser: BrowserHandle::default(),
+                browser_service,
                 storage,
                 filesystem: FilesystemHandle::default(),
                 recovery,
@@ -145,6 +160,9 @@ impl CoreState {
     pub fn browser(&self) -> &BrowserHandle {
         &self.inner.browser
     }
+    pub fn browser_service(&self) -> &dyn BrowserService {
+        self.inner.browser_service.as_ref()
+    }
     pub fn storage(&self) -> &Storage {
         &self.inner.storage
     }
@@ -169,6 +187,9 @@ impl CoreState {
         self.inner.agents.shutdown().await;
         self.inner.sessions.shutdown().await;
         self.inner.browser.shutdown().await;
+        if let Err(error) = self.inner.browser_service.shutdown().await {
+            tracing::warn!(%error, "browser-service cleanup failed during shutdown");
+        }
         self.inner.filesystem.shutdown();
         if let Err(error) = self.inner.dev_server_runtime.shutdown().await {
             tracing::warn!(%error, "development-server cleanup failed during shutdown");
@@ -215,11 +236,13 @@ impl CoreState {
             "acceptance_gates": true,
             "durable_verification": true,
             "durable_dev_servers": true,
+            "durable_browser": true,
         })
     }
 
     pub async fn diagnostics(&self) -> Value {
         let artifact_bytes = self.inner.storage.artifacts().disk_usage_async().await.ok();
+        let browser_service = self.inner.browser_service.diagnostics().ok();
         json!({
             "process_id": std::process::id(),
             "os": std::env::consts::OS,
@@ -231,6 +254,13 @@ impl CoreState {
                 "artifact_bytes": artifact_bytes,
                 "recovery": self.inner.recovery,
             },
+            "browser_service": browser_service.as_ref().map(|diagnostics| json!({
+                "service_version": diagnostics.service_version,
+                "protocol_version": diagnostics.protocol_version,
+                "compatible": diagnostics.compatible(),
+                "healthy": diagnostics.healthy,
+                "features": diagnostics.features,
+            })),
         })
     }
 }

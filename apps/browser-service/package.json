@@ -8,13 +8,16 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "health": "bun run src/main.ts --health",
+    "browser:install": "playwright install chromium",
+    "browser:verify": "node scripts/verify-browser.ts",
     "test": "bun test",
+    "test:e2e": "node scripts/e2e.ts",
     "typecheck": "tsc --noEmit",
     "lint": "bunx @biomejs/biome check src",
     "format": "bunx @biomejs/biome format --write src"
   },
   "dependencies": {
-    "playwright": "1.50.1"
+    "playwright": "1.61.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

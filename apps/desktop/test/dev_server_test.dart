@@ -19,7 +19,7 @@ void main() {
           projectId: projectId,
           worktreePath: worktree,
           maxLogCharacters: 48,
-          onOpenPreview: (url) async => navigated.add(url),
+          onOpenPreview: (preview) async => navigated.add(preview.url),
         );
         addTearDown(controller.dispose);
 
@@ -177,12 +177,14 @@ void main() {
           'ready': [failedRun],
         },
       );
+      final previews = <DevServerPreviewMetadata>[];
       await tester.pumpWidget(
         _app(
           TaskBoardPanel(
             repository: InMemoryTaskRepository(tasks: const [readyTask]),
             verificationRepository: verification,
             devServerRepository: devServers,
+            onOpenPreview: (preview) async => previews.add(preview),
           ),
         ),
       );
@@ -195,6 +197,9 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(devServers.openedPreviews, ['http://127.0.0.1:3000']);
+      expect(previews, hasLength(1));
+      expect(previews.single.url, 'http://127.0.0.1:3000');
+      expect(previews.single.metadata['devServerInstanceId'], isNotEmpty);
       expect(
         tester
             .widget<FilledButton>(find.byKey(const Key('complete-task')))

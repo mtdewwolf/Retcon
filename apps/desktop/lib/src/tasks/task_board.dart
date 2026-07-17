@@ -23,7 +23,7 @@ class TaskBoardDialog extends StatelessWidget {
   final TaskRepository repository;
   final VerificationRepository verificationRepository;
   final DevServerRepository? devServerRepository;
-  final Future<void> Function(String url)? onOpenPreview;
+  final Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview;
   final String? projectId;
   final String? projectPath;
 
@@ -32,7 +32,7 @@ class TaskBoardDialog extends StatelessWidget {
     required TaskRepository repository,
     required VerificationRepository verificationRepository,
     DevServerRepository? devServerRepository,
-    Future<void> Function(String url)? onOpenPreview,
+    Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview,
     String? projectId,
     String? projectPath,
   }) => showDialog<void>(
@@ -107,7 +107,7 @@ class TaskBoardPanel extends StatefulWidget {
   final TaskRepository repository;
   final VerificationRepository? verificationRepository;
   final DevServerRepository? devServerRepository;
-  final Future<void> Function(String url)? onOpenPreview;
+  final Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview;
   final String? projectId;
   final String? projectPath;
 

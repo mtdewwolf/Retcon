@@ -46,7 +46,10 @@ void main() {
         expect(snapshot.history.single.kind, 'started');
         expect(logs, 'ready\n');
         expect(preview?.url, 'http://127.0.0.1:5173');
-        expect(preview?.metadata, {'title': 'Preview'});
+        expect(preview?.metadata, {
+          'title': 'Preview',
+          'devServerInstanceId': instanceId,
+        });
       },
     );
 

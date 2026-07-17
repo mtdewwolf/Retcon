@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/main.dart';
+import 'package:retcon_desktop/src/browser/browser.dart';
 import 'package:retcon_desktop/src/core_client.dart';
 import 'package:retcon_desktop/src/dev_server/dev_server.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
@@ -189,6 +190,48 @@ void main() {
     expect(devServers.openedPreviews, ['http://127.0.0.1:5173']);
   });
 
+  testWidgets('dev preview opens shared browser with inspection metadata', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final browser = InMemoryBrowserRepository();
+    final devServers = InMemoryDevServerRepository(
+      configs: const {
+        'local-project': DevServerConfig(
+          projectId: 'local-project',
+          framework: 'Vite',
+          startupCommand: 'npm run dev',
+          port: 5173,
+          worktreePath: r'C:\projects\preview',
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: testCore(),
+          browserRepository: browser,
+          devServerRepository: devServers,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Browser').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev server center').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('server-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('server-open-preview')));
+    await tester.pumpAndSettle();
+
+    final snapshot = await browser.load();
+    expect(snapshot.session!.activeTab!.url, 'http://127.0.0.1:5173');
+    expect(snapshot.session!.previewMetadata['source'], 'dev-server-preview');
+    expect(snapshot.session!.previewMetadata['port'], 5173);
+  });
+
   testWidgets('connected shell uses Core dev servers and browser navigation', (
     tester,
   ) async {
@@ -215,12 +258,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(core.methods, contains('devServer.openPreview'));
-    expect(core.methods, contains('browser.startService'));
+    expect(core.methods, contains('browser.session.start'));
     expect(
       core.requests.where(
         (request) =>
-            request.method == 'browser.call' &&
-            request.params['method'] == 'browser.navigate',
+            request.method == 'browser.navigate' &&
+            request.params['url'] == 'http://127.0.0.1:5173',
       ),
       hasLength(1),
     );
@@ -419,6 +462,7 @@ class FakeConnectedCoreClient extends CoreClient {
   final methods = <String>[];
   final requests = <_CoreRequest>[];
   final _fakeEvents = StreamController<Map<String, dynamic>>.broadcast();
+  bool _browserRunning = false;
 
   @override
   CoreConnectionStatus get status => CoreConnectionStatus.connected;
@@ -487,10 +531,36 @@ class FakeConnectedCoreClient extends CoreClient {
           'preview': {'title': 'Core preview'},
         };
       }
-      if (method == 'browser.startService') {
-        return const {'alreadyRunning': false};
+      if (method == 'browser.session.list') {
+        return {
+          'sessions': _browserRunning ? [_shellBrowserSession] : <Object>[],
+        };
       }
-      if (method == 'browser.call') return const {};
+      if (method == 'browser.session.start') {
+        _browserRunning = true;
+        return const {
+          'session': _shellBrowserSession,
+          'initialTab': _shellBrowserTab,
+        };
+      }
+      if (method == 'browser.session.status') {
+        return const {
+          'session': _shellBrowserSession,
+          'tabs': [_shellBrowserTab],
+          'takeover': null,
+        };
+      }
+      if (method == 'browser.session.history') return const {'events': []};
+      if (method == 'browser.observation.list') {
+        return const {'observations': [], 'console': [], 'network': []};
+      }
+      if (method == 'browser.navigate') {
+        return const {
+          'result': {'url': 'http://127.0.0.1:5173', 'title': 'Core preview'},
+          'artifacts': [],
+          'tab': _shellBrowserTab,
+        };
+      }
     }
     return const {};
   }
@@ -530,4 +600,25 @@ const _shellDevServerInstance = <String, dynamic>{
   'preview': {'title': 'Core preview'},
   'createdAt': 1000,
   'startedAt': 2000,
+};
+
+const _shellBrowserSession = <String, dynamic>{
+  'id': '77777777-7777-4777-8777-777777777777',
+  'projectId': 'local-project',
+  'profileId': '88888888-8888-4888-8888-888888888888',
+  'devServerInstanceId': '33333333-3333-4333-8333-333333333333',
+  'status': 'running',
+  'networkPolicy': 'loopback',
+  'startedAt': 1000,
+};
+
+const _shellBrowserTab = <String, dynamic>{
+  'id': '99999999-9999-4999-8999-999999999999',
+  'browserSessionId': '77777777-7777-4777-8777-777777777777',
+  'serviceTabId': 'service-tab',
+  'url': 'http://127.0.0.1:5173',
+  'title': 'Core preview',
+  'status': 'open',
+  'createdAt': 1000,
+  'updatedAt': 1000,
 };

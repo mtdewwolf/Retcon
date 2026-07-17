@@ -127,8 +127,14 @@ impl ApprovalEngine {
             };
         }
 
-        let session_id = extract_session_id(params)
-            .unwrap_or_else(|| self.ensure_system_session().unwrap_or(SYSTEM_SESSION_ID));
+        let session_id = if method.starts_with("browser.") {
+            // Durable browser session IDs belong to browser_sessions, not sessions.
+            // Approval rows must retain their sessions foreign-key owner.
+            self.ensure_system_session().unwrap_or(SYSTEM_SESSION_ID)
+        } else {
+            extract_session_id(params)
+                .unwrap_or_else(|| self.ensure_system_session().unwrap_or(SYSTEM_SESSION_ID))
+        };
         let category = category_for_method(method).unwrap_or(ApprovalCategory::System);
         let request = approval_request(method, params, project_id, &fingerprint);
         let approval = match self.database.approvals().create(&NewApproval {
@@ -332,6 +338,17 @@ fn approval_request(
 
 fn scrub_rpc_params(method: &str, params: Value) -> Value {
     let mut scrubbed = retcon_secrets::scrub_json(params);
+    if matches!(
+        method,
+        "browser.call" | "browser.automation.script" | "browser.automation.action"
+    ) {
+        scrubbed = retcon_secrets::scrub_string_fields(
+            scrubbed,
+            &[
+                "script", "arg", "value", "text", "cookie", "cookies", "headers",
+            ],
+        );
+    }
     if method == "devServer.configure"
         && let Some(environment) = scrubbed
             .as_object_mut()
@@ -505,6 +522,54 @@ mod tests {
                 .check_rpc("devServer.start", &params, Some(other_project))
                 .permission
                 .is_allowed()
+        );
+    }
+
+    #[test]
+    fn browser_approval_never_persists_script_or_form_secrets() {
+        let engine = engine();
+        let check = engine.check_rpc(
+            "browser.automation.script",
+            &json!({
+                "script": "document.cookie = 'plain-cookie-value'",
+                "arg": {"value": "plain-form-value"}
+            }),
+            Some(Uuid::new_v4()),
+        );
+        let encoded = check.audit[0].payload.to_string();
+        assert!(!encoded.contains("plain-cookie-value"));
+        assert!(!encoded.contains("plain-form-value"));
+        assert!(encoded.contains("[REDACTED]"));
+
+        let legacy = engine.check_rpc(
+            "browser.call",
+            &json!({
+                "method":"browser.cookies.set",
+                "params":{"cookies":[{"name":"session","value":"legacy-cookie-value"}]}
+            }),
+            None,
+        );
+        assert!(
+            !legacy.audit[0]
+                .payload
+                .to_string()
+                .contains("legacy-cookie-value")
+        );
+    }
+
+    #[test]
+    fn browser_session_id_is_not_used_as_approval_session_foreign_key() {
+        let engine = engine();
+        let browser_session_id = Uuid::new_v4();
+        let check = engine.check_rpc(
+            "browser.navigate",
+            &json!({"sessionId":browser_session_id,"url":"http://127.0.0.1:3000"}),
+            Some(Uuid::new_v4()),
+        );
+        assert_eq!(check.audit.len(), 1);
+        assert_eq!(
+            check.audit[0].payload["sessionId"],
+            SYSTEM_SESSION_ID.to_string()
         );
     }
 }

@@ -8,6 +8,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+mod browser_rpc;
 mod checkpoints_rpc;
 pub mod dev_servers;
 mod dev_servers_rpc;

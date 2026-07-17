@@ -1,6 +1,7 @@
 //! Durable SQLite persistence and content-addressed artifact storage for Retcon.
 
 mod artifacts;
+mod browser;
 mod database;
 mod dev_servers;
 mod error;
@@ -12,6 +13,10 @@ mod task_planning;
 mod verification;
 
 pub use artifacts::{Artifact, ArtifactCleanup, ArtifactStore};
+pub use browser::{
+    BrowserHistoryEvent, BrowserObservation, BrowserProfile, BrowserRepository, BrowserTab,
+    BrowserTakeover, DurableBrowserSession, NewDurableBrowserSession,
+};
 pub use database::{Database, IntegrityReport, MaintenanceReport};
 pub use dev_servers::{
     DevServerConfig, DevServerEvent, DevServerInstance, DevServerLaunchConfig, DevServerPortLease,
