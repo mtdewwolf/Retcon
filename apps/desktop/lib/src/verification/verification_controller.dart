@@ -29,6 +29,7 @@ class VerificationController extends ChangeNotifier {
   List<VerificationGate> gates = const [];
   List<VerificationRun> history = const [];
   VerificationRun? activeRun;
+  VerificationCompletionReport? report;
   bool loading = false;
   bool loaded = false;
   String? error;
@@ -86,12 +87,15 @@ class VerificationController extends ChangeNotifier {
           projectId: projectId,
           projectPath: projectPath,
         ),
-        _repository.loadGates(taskId),
+        _repository.loadGates(taskId, projectId: projectId),
         _repository.listHistory(taskId),
       ]);
       commands = values[0] as List<ProjectCommand>;
       gates = values[1] as List<VerificationGate>;
       history = (values[2] as List<VerificationRun>).map(_boundRun).toList();
+      report = latestRun == null
+          ? null
+          : await _repository.loadReport(latestRun!.id);
       selectedOutputGateId = latestRun?.gates.firstOrNull?.gateId;
       loaded = true;
     } on Object catch (caught) {
@@ -129,8 +133,11 @@ class VerificationController extends ChangeNotifier {
         id: command.id,
         label: command.label,
         command: command.command,
+        kind: command.kind,
+        cwd: command.cwd,
+        timeout: command.timeout,
       ),
-    ]);
+    ], projectId: projectId);
     notifyListeners();
   }
 
@@ -138,6 +145,7 @@ class VerificationController extends ChangeNotifier {
     gates = await _repository.saveGates(
       taskId,
       gates.map((item) => item.id == gate.id ? gate : item).toList(),
+      projectId: projectId,
     );
     notifyListeners();
   }
@@ -146,6 +154,7 @@ class VerificationController extends ChangeNotifier {
     gates = await _repository.saveGates(
       taskId,
       gates.where((gate) => gate.id != gateId).toList(),
+      projectId: projectId,
     );
     notifyListeners();
   }
@@ -157,19 +166,31 @@ class VerificationController extends ChangeNotifier {
     final reordered = [...gates];
     final gate = reordered.removeAt(oldIndex);
     reordered.insert(newIndex, gate);
-    gates = await _repository.saveGates(taskId, reordered);
+    gates = await _repository.saveGates(
+      taskId,
+      reordered,
+      projectId: projectId,
+    );
     notifyListeners();
   }
 
   Future<void> runAll() => _start();
 
   Future<void> rerunFailed() async {
-    final failed = latestRun?.gates
-        .where((gate) => gate.status == GateStatus.failed)
-        .map((gate) => gate.gateId)
-        .toSet();
-    if (failed == null || failed.isEmpty) return;
-    await _start(gateIds: failed);
+    final latest = latestRun;
+    if (latest == null ||
+        !latest.gates.any((gate) => gate.status == GateStatus.failed) ||
+        running) {
+      return;
+    }
+    error = null;
+    try {
+      activeRun = await _repository.rerunRun(latest.id);
+      selectedOutputGateId = activeRun?.gates.firstOrNull?.gateId;
+    } on Object catch (caught) {
+      error = caught.toString();
+    }
+    notifyListeners();
   }
 
   Future<void> _start({Set<String>? gateIds}) async {
@@ -203,6 +224,14 @@ class VerificationController extends ChangeNotifier {
   }
 
   void _onEvent(VerificationEvent event) {
+    if (event is RunUpdated) {
+      activeRun = _boundRun(event.run);
+      if (event.run.status != VerificationRunStatus.running) {
+        unawaited(_refreshHistory());
+      }
+      notifyListeners();
+      return;
+    }
     final run = activeRun;
     if (run == null || run.id != event.runId) {
       if (event is RunFinished) unawaited(_refreshHistory());
@@ -249,6 +278,8 @@ class VerificationController extends ChangeNotifier {
       case RunFinished(:final run):
         activeRun = _boundRun(run);
         unawaited(_refreshHistory());
+      case RunUpdated():
+        break;
     }
     notifyListeners();
   }
@@ -270,6 +301,9 @@ class VerificationController extends ChangeNotifier {
 
   Future<void> _refreshHistory() async {
     history = (await _repository.listHistory(taskId)).map(_boundRun).toList();
+    report = latestRun == null
+        ? null
+        : await _repository.loadReport(latestRun!.id);
     notifyListeners();
   }
 

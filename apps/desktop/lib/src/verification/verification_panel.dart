@@ -681,6 +681,7 @@ class CompletionReportPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final run = controller.latestRun;
+    final report = controller.report;
     final completeSteps = task.steps
         .where((step) => step.status == PlanStepStatus.complete)
         .length;
@@ -747,6 +748,33 @@ class CompletionReportPanel extends StatelessWidget {
                 run == null ? '—' : _duration(run.duration),
               ],
             ),
+            if (report != null) ...[
+              RetconTableRow(
+                cells: [
+                  'Files changed',
+                  report.filesChanged.isEmpty
+                      ? 'None recorded'
+                      : report.filesChanged.join(', '),
+                ],
+              ),
+              RetconTableRow(
+                cells: [
+                  'Approvals',
+                  '${report.approvalsApproved} approved, '
+                      '${report.approvalsDenied} denied '
+                      '(${report.approvalsTotal} total)',
+                ],
+              ),
+              RetconTableRow(cells: ['Cost', _reportCost(report)]),
+              RetconTableRow(
+                cells: [
+                  'Report limitations',
+                  report.limitations.isEmpty
+                      ? 'None'
+                      : report.limitations.join('; '),
+                ],
+              ),
+            ],
           ],
         ),
       ],
@@ -805,6 +833,17 @@ String _duration(Duration duration) => duration.inSeconds >= 1
     : '${duration.inMilliseconds} ms';
 
 String _signed(int value) => value > 0 ? '+$value' : '$value';
+
+String _reportCost(VerificationCompletionReport report) {
+  final actual = report.actualCostMicros;
+  final estimated = report.estimatedCostMicros;
+  if (actual == null && estimated == null) return 'Not recorded';
+  String amount(int value) =>
+      '${report.currency} ${(value / 1000000).toStringAsFixed(2)}';
+  if (actual == null) return '${amount(estimated!)} estimated';
+  if (estimated == null) return '${amount(actual)} actual';
+  return '${amount(actual)} actual / ${amount(estimated)} estimated';
+}
 
 String _gateLabel(GateStatus status) => switch (status) {
   GateStatus.queued => 'Queued',

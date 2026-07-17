@@ -14,7 +14,8 @@ import 'package:retcon_design_system/retcon_design_system.dart';
 
 CoreClient? _sharedCore;
 
-CoreClient testCore() => _sharedCore ??= CoreClient(dataDirectory: Directory.systemTemp);
+CoreClient testCore() =>
+    _sharedCore ??= CoreClient(dataDirectory: Directory.systemTemp);
 
 void main() {
   tearDownAll(() {
@@ -54,7 +55,10 @@ void main() {
       expect(find.text(menu), findsAtLeastNWidgets(1));
     }
     expect(find.text('start'), findsOneWidget);
-    expect(find.text('Send a message to start an agent session.'), findsOneWidget);
+    expect(
+      find.text('Send a message to start an agent session.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('command palette is available from Ctrl+Shift+P', (tester) async {
@@ -145,6 +149,57 @@ void main() {
     expect(core.methods, contains('task.list'));
   });
 
+  testWidgets('connected core selects the RPC verification repository', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final core = FakeConnectedCoreClient(includeTask: true);
+    addTearDown(core.dispose);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: core,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('View'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Task board').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Core verification task'), findsAtLeastNWidgets(1));
+    expect(core.methods, contains('verification.list'));
+  });
+
+  testWidgets('explicit verification injection wins while core is connected', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final core = FakeConnectedCoreClient(includeTask: true);
+    addTearDown(core.dispose);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: core,
+          verificationRepository: InMemoryVerificationRepository(),
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('View'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Task board').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      core.methods.where((method) => method.startsWith('verification.')),
+      isEmpty,
+    );
+  });
+
   testWidgets('F11 routes to native fullscreen control', (tester) async {
     await setDesktopSize(tester);
     final window = FakeWindowController();
@@ -186,7 +241,10 @@ void main() {
   testWidgets('application still boots through RetconApp', (tester) async {
     await setDesktopSize(tester);
     await tester.pumpWidget(const RetconApp());
-    expect(find.text('Send a message to start an agent session.'), findsOneWidget);
+    expect(
+      find.text('Send a message to start an agent session.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('shell remains usable at the minimum window size', (
@@ -246,6 +304,9 @@ class FakeWindowController implements RetconWindowController {
 }
 
 class FakeConnectedCoreClient extends CoreClient {
+  FakeConnectedCoreClient({this.includeTask = false});
+
+  final bool includeTask;
   final methods = <String>[];
   final _fakeEvents = StreamController<Map<String, dynamic>>.broadcast();
 
@@ -262,7 +323,31 @@ class FakeConnectedCoreClient extends CoreClient {
     Duration timeout = const Duration(seconds: 30),
   }) async {
     methods.add(method);
-    if (method == 'task.list') return const {'tasks': []};
+    if (method == 'task.list') {
+      return includeTask
+          ? const {
+              'tasks': [
+                {'id': 'shell-core-task', 'title': 'Core verification task'},
+              ],
+            }
+          : const {'tasks': []};
+    }
+    if (method == 'task.get') {
+      return const {
+        'task': {
+          'task': {
+            'id': 'shell-core-task',
+            'title': 'Core verification task',
+            'status': 'planned',
+          },
+          'steps': [],
+          'acceptanceCriteria': [],
+        },
+      };
+    }
+    if (method == 'verification.list') {
+      return const {'verifications': []};
+    }
     return const {};
   }
 

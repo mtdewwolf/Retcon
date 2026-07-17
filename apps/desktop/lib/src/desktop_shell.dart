@@ -178,14 +178,14 @@ class _DesktopShellState extends State<DesktopShell> {
   late final WorkspaceController _workspace = WorkspaceController();
   late final InMemoryTaskRepository _offlineTasks =
       InMemoryTaskRepository.demo();
+  late final InMemoryVerificationRepository _offlineVerification =
+      InMemoryVerificationRepository.demo();
   CoreTaskRepository? _coreTasks;
-  late VerificationRepository _verificationRepository;
+  CoreVerificationRepository? _coreVerification;
 
   @override
   void initState() {
     super.initState();
-    _verificationRepository =
-        widget.verificationRepository ?? InMemoryVerificationRepository.demo();
     final core = widget.core;
     if (core != null) {
       _workspace.bindRpcStore(
@@ -205,11 +205,7 @@ class _DesktopShellState extends State<DesktopShell> {
     }
     if (oldWidget.core != widget.core) {
       _coreTasks = null;
-    }
-    if (oldWidget.verificationRepository != widget.verificationRepository) {
-      _verificationRepository =
-          widget.verificationRepository ??
-          InMemoryVerificationRepository.demo();
+      _coreVerification = null;
     }
   }
 
@@ -295,6 +291,16 @@ class _DesktopShellState extends State<DesktopShell> {
       return _offlineTasks;
     }
     return _coreTasks ??= CoreTaskRepository.fromCore(core);
+  }
+
+  VerificationRepository get _verificationRepository {
+    final override = widget.verificationRepository;
+    if (override != null) return override;
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      return _offlineVerification;
+    }
+    return _coreVerification ??= CoreVerificationRepository.fromCore(core);
   }
 
   Future<void> _showNewProjectStub() => showDialog<void>(

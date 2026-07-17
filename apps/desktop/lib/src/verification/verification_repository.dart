@@ -12,18 +12,21 @@ abstract interface class VerificationRepository {
     ProjectCommand command, {
     String? projectId,
   });
-  Future<List<VerificationGate>> loadGates(String taskId);
+  Future<List<VerificationGate>> loadGates(String taskId, {String? projectId});
   Future<List<VerificationGate>> saveGates(
     String taskId,
-    List<VerificationGate> gates,
-  );
+    List<VerificationGate> gates, {
+    String? projectId,
+  });
   Future<VerificationRun> startRun(
     String taskId,
     List<VerificationGate> gates, {
     Set<String>? gateIds,
   });
   Future<void> cancelRun(String runId);
+  Future<VerificationRun> rerunRun(String runId);
   Future<List<VerificationRun>> listHistory(String taskId, {int limit = 20});
+  Future<VerificationCompletionReport?> loadReport(String runId);
 }
 
 class ScriptedGateResult {
@@ -102,15 +105,17 @@ class InMemoryVerificationRepository implements VerificationRepository {
   }
 
   @override
-  Future<List<VerificationGate>> loadGates(String taskId) async => [
-    ...?_gates[taskId],
-  ];
+  Future<List<VerificationGate>> loadGates(
+    String taskId, {
+    String? projectId,
+  }) async => [...?_gates[taskId]];
 
   @override
   Future<List<VerificationGate>> saveGates(
     String taskId,
-    List<VerificationGate> gates,
-  ) async {
+    List<VerificationGate> gates, {
+    String? projectId,
+  }) async {
     _gates[taskId] = [...gates];
     return [...gates];
   }
@@ -238,8 +243,35 @@ class InMemoryVerificationRepository implements VerificationRepository {
   }
 
   @override
+  Future<VerificationRun> rerunRun(String runId) async {
+    final previous = _history.values
+        .expand((runs) => runs)
+        .firstWhere((run) => run.id == runId);
+    final failed = previous.gates
+        .where((gate) => gate.status == GateStatus.failed)
+        .map((gate) => gate.gateId)
+        .toSet();
+    return startRun(
+      previous.taskId,
+      _gates[previous.taskId] ?? const [],
+      gateIds: failed,
+    );
+  }
+
+  @override
   Future<List<VerificationRun>> listHistory(
     String taskId, {
     int limit = 20,
   }) async => [...?_history[taskId]].take(limit).toList();
+
+  @override
+  Future<VerificationCompletionReport?> loadReport(String runId) async {
+    final run = _history.values
+        .expand((runs) => runs)
+        .where((run) => run.id == runId)
+        .firstOrNull;
+    return run == null
+        ? null
+        : VerificationCompletionReport(runId: run.id, status: run.status);
+  }
 }

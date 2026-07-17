@@ -6,22 +6,34 @@ class ProjectCommand {
     required this.label,
     required this.command,
     this.source = CommandSource.detected,
+    this.kind = 'custom',
+    this.cwd,
+    this.timeout,
   });
 
   final String id;
   final String label;
   final String command;
   final CommandSource source;
+  final String kind;
+  final String? cwd;
+  final Duration? timeout;
 
   ProjectCommand copyWith({
     String? label,
     String? command,
     CommandSource? source,
+    String? kind,
+    String? cwd,
+    Duration? timeout,
   }) => ProjectCommand(
     id: id,
     label: label ?? this.label,
     command: command ?? this.command,
     source: source ?? this.source,
+    kind: kind ?? this.kind,
+    cwd: cwd ?? this.cwd,
+    timeout: timeout ?? this.timeout,
   );
 }
 
@@ -32,6 +44,9 @@ class VerificationGate {
     required this.command,
     this.required = true,
     this.enabled = true,
+    this.kind = 'custom',
+    this.cwd,
+    this.timeout,
   });
 
   final String id;
@@ -39,18 +54,27 @@ class VerificationGate {
   final String command;
   final bool required;
   final bool enabled;
+  final String kind;
+  final String? cwd;
+  final Duration? timeout;
 
   VerificationGate copyWith({
     String? label,
     String? command,
     bool? required,
     bool? enabled,
+    String? kind,
+    String? cwd,
+    Duration? timeout,
   }) => VerificationGate(
     id: id,
     label: label ?? this.label,
     command: command ?? this.command,
     required: required ?? this.required,
     enabled: enabled ?? this.enabled,
+    kind: kind ?? this.kind,
+    cwd: cwd ?? this.cwd,
+    timeout: timeout ?? this.timeout,
   );
 }
 
@@ -124,6 +148,7 @@ class VerificationRun {
     required this.startedAt,
     this.completedAt,
     this.gates = const [],
+    this.auditTrail = const [],
   });
 
   final String id;
@@ -132,6 +157,7 @@ class VerificationRun {
   final DateTime startedAt;
   final DateTime? completedAt;
   final List<GateExecution> gates;
+  final List<VerificationAuditEntry> auditTrail;
 
   Duration get duration =>
       (completedAt ?? DateTime.now()).difference(startedAt);
@@ -144,6 +170,7 @@ class VerificationRun {
     VerificationRunStatus? status,
     DateTime? completedAt,
     List<GateExecution>? gates,
+    List<VerificationAuditEntry>? auditTrail,
   }) => VerificationRun(
     id: id,
     taskId: taskId,
@@ -151,7 +178,46 @@ class VerificationRun {
     startedAt: startedAt,
     completedAt: completedAt ?? this.completedAt,
     gates: gates ?? this.gates,
+    auditTrail: auditTrail ?? this.auditTrail,
   );
+}
+
+class VerificationAuditEntry {
+  const VerificationAuditEntry({
+    required this.kind,
+    required this.actor,
+    required this.createdAt,
+  });
+
+  final String kind;
+  final String actor;
+  final DateTime createdAt;
+}
+
+class VerificationCompletionReport {
+  const VerificationCompletionReport({
+    required this.runId,
+    required this.status,
+    this.filesChanged = const [],
+    this.approvalsTotal = 0,
+    this.approvalsApproved = 0,
+    this.approvalsDenied = 0,
+    this.estimatedCostMicros,
+    this.actualCostMicros,
+    this.currency = 'USD',
+    this.limitations = const [],
+  });
+
+  final String runId;
+  final VerificationRunStatus status;
+  final List<String> filesChanged;
+  final int approvalsTotal;
+  final int approvalsApproved;
+  final int approvalsDenied;
+  final int? estimatedCostMicros;
+  final int? actualCostMicros;
+  final String currency;
+  final List<String> limitations;
 }
 
 class VerificationComparison {
@@ -206,6 +272,15 @@ class GateFinished extends VerificationEvent {
 
 class RunFinished extends VerificationEvent {
   const RunFinished({
+    required super.taskId,
+    required super.runId,
+    required this.run,
+  });
+  final VerificationRun run;
+}
+
+class RunUpdated extends VerificationEvent {
+  const RunUpdated({
     required super.taskId,
     required super.runId,
     required this.run,
