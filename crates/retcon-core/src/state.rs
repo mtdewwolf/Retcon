@@ -15,6 +15,7 @@ use crate::session_rpc::SessionRegistry;
 use crate::spikes::agent::AgentRegistry;
 use crate::spikes::browser::BrowserHandle;
 use crate::spikes::terminal::TerminalRegistry;
+use crate::verification::{DurableVerificationRunner, VerificationRunner};
 use retcon_filesystem::FilesystemHandle;
 use retcon_permissions::ApprovalEngine;
 use retcon_storage::{RecoveryReport, Storage};
@@ -38,12 +39,29 @@ struct Inner {
     recovery: RecoveryReport,
     schema_version: Option<u32>,
     permissions: ApprovalEngine,
+    verification_runner: Arc<dyn VerificationRunner>,
 }
 
 impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
-        let (shutdown, _) = watch::channel(false);
         let storage = Storage::open(data_dir)?;
+        let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
+        Self::from_storage(storage, verification_runner)
+    }
+
+    pub fn new_with_verification_runner(
+        data_dir: &std::path::Path,
+        verification_runner: Arc<dyn VerificationRunner>,
+    ) -> Result<Self, CoreError> {
+        let storage = Storage::open(data_dir)?;
+        Self::from_storage(storage, verification_runner)
+    }
+
+    fn from_storage(
+        storage: Storage,
+        verification_runner: Arc<dyn VerificationRunner>,
+    ) -> Result<Self, CoreError> {
+        let (shutdown, _) = watch::channel(false);
         let schema_version = storage.database().schema_version().ok();
         let recovery = storage.startup_recovery().clone();
         let permissions = ApprovalEngine::new(
@@ -72,6 +90,7 @@ impl CoreState {
                 recovery,
                 schema_version,
                 permissions,
+                verification_runner,
             }),
         })
     }
@@ -118,6 +137,9 @@ impl CoreState {
     }
     pub fn permissions(&self) -> &ApprovalEngine {
         &self.inner.permissions
+    }
+    pub fn verification_runner(&self) -> &dyn VerificationRunner {
+        self.inner.verification_runner.as_ref()
     }
 
     pub async fn cleanup_children(&self) {
@@ -166,6 +188,7 @@ impl CoreState {
             "checkpoints": true,
             "task_planning": true,
             "acceptance_gates": true,
+            "durable_verification": true,
         })
     }
 

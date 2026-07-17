@@ -6,13 +6,17 @@ import 'task_models.dart';
 import 'task_repository.dart';
 
 class TaskBoardController extends ChangeNotifier {
-  TaskBoardController({required TaskRepository repository, this.projectId})
-    : _repository = repository {
+  TaskBoardController({
+    required TaskRepository repository,
+    this.projectId,
+    this.verificationAllowsCompletion,
+  }) : _repository = repository {
     _changes = _repository.changes.listen((_) => unawaited(refresh()));
   }
 
   final TaskRepository _repository;
   final String? projectId;
+  final bool Function(String taskId)? verificationAllowsCompletion;
   StreamSubscription<void>? _changes;
 
   List<RoadmapTask> _tasks = const [];
@@ -148,7 +152,11 @@ class TaskBoardController extends ChangeNotifier {
 
   Future<void> setTaskStatus(TaskStatus status) async {
     final task = selectedTask;
-    if (task == null || (status == TaskStatus.complete && !task.canComplete)) {
+    final verificationReady =
+        verificationAllowsCompletion?.call(task?.id ?? '') ?? true;
+    if (task == null ||
+        (status == TaskStatus.complete &&
+            (!task.canComplete || !verificationReady))) {
       return;
     }
     await _save(task.copyWith(status: status));

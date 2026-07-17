@@ -29,6 +29,8 @@ pub mod spikes;
 pub mod state;
 mod storage_rpc;
 mod tasks_rpc;
+pub mod verification;
+mod verification_rpc;
 
 pub use error::{CoreError, ErrorCode, ErrorSource};
 pub use lifecycle::{CoreConfig, CoreRuntime};

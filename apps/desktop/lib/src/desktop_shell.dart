@@ -12,6 +12,7 @@ import 'projects/project_picker.dart';
 import 'projects/project_controller.dart';
 import 'provider_doctor_dialog.dart';
 import 'tasks/tasks.dart';
+import 'verification/verification.dart';
 import 'window_controller.dart';
 import 'workspace.dart';
 
@@ -155,6 +156,7 @@ class DesktopShell extends StatefulWidget {
     this.branch = '—',
     this.provider = 'Provider offline',
     this.taskRepository,
+    this.verificationRepository,
     this.onCommand,
   });
 
@@ -165,6 +167,7 @@ class DesktopShell extends StatefulWidget {
   final String branch;
   final String provider;
   final TaskRepository? taskRepository;
+  final VerificationRepository? verificationRepository;
   final ValueChanged<ShellCommand>? onCommand;
 
   @override
@@ -176,7 +179,10 @@ class _DesktopShellState extends State<DesktopShell> {
   late final WorkspaceController _workspace = WorkspaceController();
   late final InMemoryTaskRepository _offlineTasks =
       InMemoryTaskRepository.demo();
+  late final InMemoryVerificationRepository _offlineVerification =
+      InMemoryVerificationRepository.demo();
   CoreTaskRepository? _coreTasks;
+  CoreVerificationRepository? _coreVerification;
 
   @override
   void initState() {
@@ -200,6 +206,7 @@ class _DesktopShellState extends State<DesktopShell> {
     }
     if (oldWidget.core != widget.core) {
       _coreTasks = null;
+      _coreVerification = null;
     }
   }
 
@@ -248,7 +255,10 @@ class _DesktopShellState extends State<DesktopShell> {
         await TaskBoardDialog.show(
           context,
           repository: _taskRepository,
+          verificationRepository: _verificationRepository,
           projectId: widget.projectController?.current?.id,
+          projectPath:
+              widget.projectController?.current?.metadata.repositoryPath,
         );
       case ShellCommand.fullScreen:
         await widget.windowController.toggleFullScreen();
@@ -284,6 +294,16 @@ class _DesktopShellState extends State<DesktopShell> {
       return _offlineTasks;
     }
     return _coreTasks ??= CoreTaskRepository.fromCore(core);
+  }
+
+  VerificationRepository get _verificationRepository {
+    final override = widget.verificationRepository;
+    if (override != null) return override;
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      return _offlineVerification;
+    }
+    return _coreVerification ??= CoreVerificationRepository.fromCore(core);
   }
 
   Future<void> _showNewProjectStub() => showDialog<void>(

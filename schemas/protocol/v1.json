@@ -179,6 +179,20 @@
       "task.acceptance.evaluate",
       "task.acceptance.override"
     ],
+    "verification": [
+      "verification.commands.list",
+      "verification.commands.configure",
+      "verification.create",
+      "verification.start",
+      "verification.recordResult",
+      "verification.finish",
+      "verification.cancel",
+      "verification.rerun",
+      "verification.get",
+      "verification.list",
+      "verification.history",
+      "verification.report"
+    ],
     "terminal": [
       "terminal.detectShells",
       "terminal.start",

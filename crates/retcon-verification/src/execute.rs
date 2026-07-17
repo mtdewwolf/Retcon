@@ -51,6 +51,12 @@ impl CancellationHandle {
         !self.sender.send_replace(true)
     }
 
+    /// Whether cancellation has already been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.sender.borrow()
+    }
+
     async fn cancelled(&self) {
         let mut receiver = self.sender.subscribe();
         if *receiver.borrow() {
