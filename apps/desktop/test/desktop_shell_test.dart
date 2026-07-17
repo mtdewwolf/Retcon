@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/main.dart';
+import 'package:retcon_desktop/src/browser/browser.dart';
 import 'package:retcon_desktop/src/core_client.dart';
 import 'package:retcon_desktop/src/dev_server/dev_server.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
@@ -187,6 +188,48 @@ void main() {
     await tester.tap(find.byKey(const Key('server-open-preview')));
     await tester.pump();
     expect(devServers.openedPreviews, ['http://127.0.0.1:5173']);
+  });
+
+  testWidgets('dev preview opens shared browser with inspection metadata', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final browser = InMemoryBrowserRepository();
+    final devServers = InMemoryDevServerRepository(
+      configs: const {
+        'local-project': DevServerConfig(
+          projectId: 'local-project',
+          framework: 'Vite',
+          startupCommand: 'npm run dev',
+          port: 5173,
+          worktreePath: r'C:\projects\preview',
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: testCore(),
+          browserRepository: browser,
+          devServerRepository: devServers,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Browser').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev server center').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('server-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('server-open-preview')));
+    await tester.pumpAndSettle();
+
+    final snapshot = await browser.load();
+    expect(snapshot.session!.activeTab!.url, 'http://127.0.0.1:5173');
+    expect(snapshot.session!.previewMetadata['source'], 'dev-server-preview');
+    expect(snapshot.session!.previewMetadata['port'], 5173);
   });
 
   testWidgets('connected shell uses Core dev servers and browser navigation', (

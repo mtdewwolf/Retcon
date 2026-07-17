@@ -19,7 +19,7 @@ void main() {
           projectId: projectId,
           worktreePath: worktree,
           maxLogCharacters: 48,
-          onOpenPreview: (url) async => navigated.add(url),
+          onOpenPreview: (preview) async => navigated.add(preview.url),
         );
         addTearDown(controller.dispose);
 

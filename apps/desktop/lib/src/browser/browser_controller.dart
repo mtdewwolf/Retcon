@@ -1,180 +1,127 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
-import '../core_client.dart';
+import 'browser_models.dart';
+import 'browser_repository.dart';
 
-/// Resolves `apps/browser-service` by walking up from [Directory.current].
-String? resolveBrowserServiceDir({Directory? from}) {
-  var dir = from ?? Directory.current;
-  for (var i = 0; i < 8; i++) {
-    final candidate = Directory(
-      '${dir.path}${Platform.pathSeparator}apps'
-      '${Platform.pathSeparator}browser-service',
-    );
-    if (candidate.existsSync()) return candidate.path;
-    final parent = dir.parent;
-    if (parent.path == dir.path) break;
-    dir = parent;
-  }
-  return null;
-}
-
-String? _eventKind(Map<String, dynamic> event) {
-  final nested = event['event'];
-  final envelope = nested is Map
-      ? nested.cast<String, dynamic>()
-      : event;
-  return envelope['kind']?.toString() ??
-      envelope['name']?.toString() ??
-      envelope['type']?.toString();
-}
-
-/// Thin controller over Core `browser.startService|stopService|call`.
 class BrowserController extends ChangeNotifier {
-  BrowserController(this.core, {String? serviceDir}) {
-    _serviceDir = serviceDir ?? resolveBrowserServiceDir() ?? '';
-    _events = core.events.listen(_onEvent);
+  BrowserController({required BrowserRepository repository})
+    : _repository = repository {
+    _events = repository.events.listen(_accept);
   }
 
-  final CoreClient core;
-  StreamSubscription<Map<String, dynamic>>? _events;
+  final BrowserRepository _repository;
+  StreamSubscription<BrowserSnapshot>? _events;
+  BrowserSnapshot snapshot = const BrowserSnapshot();
+  BrowserEvidenceKind evidenceKind = BrowserEvidenceKind.console;
+  bool loading = false;
+  bool loaded = false;
+  bool busy = false;
+  String? error;
+  String? lastActionResult;
 
-  String _serviceDir = '';
-  bool _running = false;
-  bool _busy = false;
-  String? _error;
-  String? _lastResult;
-  final List<String> _eventLog = [];
+  BrowserCapabilities get capabilities => _repository.capabilities;
+  BrowserSession? get session => snapshot.session;
+  BrowserTab? get activeTab => session?.activeTab;
+  BrowserRuntimeStatus get status =>
+      session?.status ?? BrowserRuntimeStatus.stopped;
+  bool get running =>
+      status == BrowserRuntimeStatus.running ||
+      status == BrowserRuntimeStatus.paused;
+  bool get automationPaused => session?.automationPaused == true;
+  bool get crashed => status == BrowserRuntimeStatus.crashed;
+  String get address => activeTab?.url ?? '';
 
-  String get serviceDir => _serviceDir;
-  bool get running => _running;
-  bool get busy => _busy;
-  String? get error => _error;
-  String? get lastResult => _lastResult;
-  List<String> get eventLog => List.unmodifiable(_eventLog);
+  List<BrowserEvidenceEntry> get visibleEvidence => snapshot.evidence
+      .where((entry) => entry.kind == evidenceKind)
+      .toList()
+      .reversed
+      .toList();
 
-  void setServiceDir(String value) {
-    _serviceDir = value.trim();
-    notifyListeners();
-  }
-
-  Future<void> start() async {
-    if (core.status != CoreConnectionStatus.connected || _busy) return;
-    if (_serviceDir.isEmpty) {
-      _error =
-          'Set the browser-service directory (apps/browser-service) first.';
-      notifyListeners();
-      return;
-    }
-    _busy = true;
-    _error = null;
+  Future<void> load() async {
+    loading = true;
+    error = null;
     notifyListeners();
     try {
-      final result = await core.request(
-        'browser.startService',
-        params: {'dir': _serviceDir},
-      );
-      _running = true;
-      if (result['alreadyRunning'] == true) {
-        _lastResult = 'Browser service already running.';
-      } else {
-        _lastResult = 'Browser service started.';
-      }
-      await refreshStatus();
-    } catch (error) {
-      _running = false;
-      _error = error.toString();
+      _accept(await _repository.load());
+      loaded = true;
+    } on Object catch (caught) {
+      error = caught.toString();
     } finally {
-      _busy = false;
+      loading = false;
       notifyListeners();
     }
   }
 
-  Future<void> stop() async {
-    if (core.status != CoreConnectionStatus.connected || _busy) return;
-    _busy = true;
-    _error = null;
+  Future<void> launch() => _run(_repository.launch);
+  Future<void> close() => _run(_repository.close);
+  Future<void> recover() => _run(_repository.recover);
+  Future<void> newTab() => _run(_repository.newTab);
+  Future<void> closeTab(String tabId) =>
+      _run(() => _repository.closeTab(tabId));
+  Future<void> selectTab(String tabId) =>
+      _run(() => _repository.selectTab(tabId));
+  Future<void> navigate(
+    String url, {
+    Map<String, dynamic> metadata = const {},
+  }) => _run(() => _repository.navigate(url, metadata: metadata));
+  Future<void> openPreview(BrowserPreviewRequest preview) async {
+    if (!running) await launch();
+    if (running) {
+      await navigate(preview.url, metadata: preview.metadata);
+    }
+  }
+
+  Future<void> back() => _run(_repository.back);
+  Future<void> forward() => _run(_repository.forward);
+  Future<void> reload() => _run(_repository.reload);
+  Future<void> stopLoading() => _run(_repository.stopLoading);
+  Future<void> setViewport(BrowserViewport viewport) =>
+      _run(() => _repository.setViewport(viewport));
+  Future<void> captureScreenshot({bool fullPage = false}) =>
+      _run(() => _repository.captureScreenshot(fullPage: fullPage));
+  Future<void> refreshEvidence() => _run(_repository.refreshEvidence);
+
+  Future<void> performAction(BrowserAutomationAction action) async {
+    await _run(() => _repository.performAction(action));
+    if (error == null) lastActionResult = '${action.kind.name} completed';
+    notifyListeners();
+  }
+
+  Future<void> pauseAutomation({String reason = 'Manual inspection'}) =>
+      _run(() => _repository.pauseAutomation(reason: reason));
+  Future<void> openHeadedTakeover() => _run(_repository.openHeadedTakeover);
+  Future<void> resumeAutomation() => _run(_repository.resumeAutomation);
+
+  void showEvidence(BrowserEvidenceKind kind) {
+    evidenceKind = kind;
+    notifyListeners();
+  }
+
+  void clearError() {
+    error = null;
+    notifyListeners();
+  }
+
+  Future<void> _run(Future<BrowserSnapshot> Function() operation) async {
+    if (busy) return;
+    busy = true;
+    error = null;
     notifyListeners();
     try {
-      await core.request('browser.stopService');
-      _running = false;
-      _lastResult = 'Browser service stopped.';
-    } catch (error) {
-      _error = error.toString();
+      _accept(await operation());
+    } on Object catch (caught) {
+      error = caught.toString();
     } finally {
-      _busy = false;
+      busy = false;
       notifyListeners();
     }
   }
 
-  Future<void> refreshStatus() async {
-    if (core.status != CoreConnectionStatus.connected || !_running) return;
-    try {
-      final result = await core.request(
-        'browser.call',
-        params: {'method': 'browser.status', 'params': <String, dynamic>{}},
-      );
-      _lastResult = result.toString();
-      _error = null;
-    } catch (error) {
-      _error = error.toString();
-    }
+  void _accept(BrowserSnapshot value) {
+    snapshot = value;
     notifyListeners();
-  }
-
-  Future<void> navigate(String url) async {
-    final trimmed = url.trim();
-    if (trimmed.isEmpty ||
-        core.status != CoreConnectionStatus.connected ||
-        _busy) {
-      return;
-    }
-    _busy = true;
-    _error = null;
-    notifyListeners();
-    try {
-      if (!_running) {
-        await start();
-        if (!_running) return;
-      }
-      final result = await core.request(
-        'browser.call',
-        params: {
-          'method': 'browser.navigate',
-          'params': {'url': trimmed},
-        },
-      );
-      _lastResult = result.toString();
-    } catch (error) {
-      _error = error.toString();
-    } finally {
-      _busy = false;
-      notifyListeners();
-    }
-  }
-
-  void _onEvent(Map<String, dynamic> event) {
-    final kind = _eventKind(event);
-    if (kind == 'browser.serviceExited') {
-      _running = false;
-      _appendLog('service exited');
-      notifyListeners();
-      return;
-    }
-    if (kind == 'browser.event') {
-      final payload = event['payload'] ?? event;
-      _appendLog(payload.toString());
-      notifyListeners();
-    }
-  }
-
-  void _appendLog(String line) {
-    _eventLog.insert(0, line);
-    if (_eventLog.length > 40) {
-      _eventLog.removeRange(40, _eventLog.length);
-    }
   }
 
   @override

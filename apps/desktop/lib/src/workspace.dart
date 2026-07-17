@@ -275,10 +275,13 @@ class RpcWorkspaceStore implements WorkspaceStore {
   @override
   Future<WorkspaceLayout?> read() async {
     if (core.status != CoreConnectionStatus.connected) return null;
-    final result = await core.request('storage.layout.get', params: {
-      'layoutId': layoutId,
-      if (workspaceId != null) 'workspaceId': workspaceId,
-    });
+    final result = await core.request(
+      'storage.layout.get',
+      params: {
+        'layoutId': layoutId,
+        if (workspaceId != null) 'workspaceId': workspaceId,
+      },
+    );
     final record = result['layout'] as Map<String, dynamic>?;
     if (record == null) return null;
     final payload = record['layout'] as Map<String, dynamic>?;
@@ -289,13 +292,16 @@ class RpcWorkspaceStore implements WorkspaceStore {
   @override
   Future<void> write(WorkspaceLayout layout) async {
     if (core.status != CoreConnectionStatus.connected) return;
-    await core.request('storage.layout.save', params: {
-      'layoutId': layoutId,
-      'name': layoutId,
-      'layout': layout.toJson(),
-      if (workspaceId != null) 'workspaceId': workspaceId,
-      'isActive': true,
-    });
+    await core.request(
+      'storage.layout.save',
+      params: {
+        'layoutId': layoutId,
+        'name': layoutId,
+        'layout': layout.toJson(),
+        if (workspaceId != null) 'workspaceId': workspaceId,
+        'isActive': true,
+      },
+    );
   }
 }
 
@@ -334,10 +340,7 @@ enum LayoutPreset {
             fraction: .55,
           ),
           second: const TabGroup(
-            panels: [
-              PanelDefinition.browser,
-              PanelDefinition.checkpoints,
-            ],
+            panels: [PanelDefinition.browser, PanelDefinition.checkpoints],
           ),
           fraction: .58,
         ),
@@ -484,9 +487,7 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   Future<void> moveFloating(FloatingPanel floating, Offset delta) async {
-    final moved = floating.copyWith(
-      rect: floating.rect.shift(delta),
-    );
+    final moved = floating.copyWith(rect: floating.rect.shift(delta));
     _layout = WorkspaceLayout(
       root: _layout.root,
       closedPanels: _layout.closedPanels,
@@ -603,11 +604,13 @@ class DockingWorkspace extends StatefulWidget {
     super.key,
     required this.controller,
     this.core,
+    this.browserRepository,
     this.workingDirectory,
     this.projectId,
   });
   final WorkspaceController controller;
   final CoreClient? core;
+  final BrowserRepository? browserRepository;
   final String? workingDirectory;
   final String? projectId;
   @override
@@ -647,6 +650,7 @@ class _DockingWorkspaceState extends State<DockingWorkspace> {
                 controller: widget.controller,
                 workspaceSize: viewport,
                 core: widget.core,
+                browserRepository: widget.browserRepository,
                 workingDirectory: widget.workingDirectory,
                 projectId: widget.projectId,
               ),
@@ -657,6 +661,7 @@ class _DockingWorkspaceState extends State<DockingWorkspace> {
                 controller: widget.controller,
                 workspaceSize: viewport,
                 core: widget.core,
+                browserRepository: widget.browserRepository,
                 workingDirectory: widget.workingDirectory,
                 projectId: widget.projectId,
               ),
@@ -673,6 +678,7 @@ class _NodeView extends StatelessWidget {
     required this.controller,
     required this.workspaceSize,
     this.core,
+    this.browserRepository,
     this.workingDirectory,
     this.projectId,
   });
@@ -680,6 +686,7 @@ class _NodeView extends StatelessWidget {
   final WorkspaceController controller;
   final Size workspaceSize;
   final CoreClient? core;
+  final BrowserRepository? browserRepository;
   final String? workingDirectory;
   final String? projectId;
   @override
@@ -689,6 +696,7 @@ class _NodeView extends StatelessWidget {
       controller: controller,
       workspaceSize: workspaceSize,
       core: core,
+      browserRepository: browserRepository,
       workingDirectory: workingDirectory,
       projectId: projectId,
     ),
@@ -704,6 +712,7 @@ class _NodeView extends StatelessWidget {
             controller: controller,
             workspaceSize: workspaceSize,
             core: core,
+            browserRepository: browserRepository,
             workingDirectory: workingDirectory,
             projectId: projectId,
           ),
@@ -716,6 +725,7 @@ class _NodeView extends StatelessWidget {
             controller: controller,
             workspaceSize: workspaceSize,
             core: core,
+            browserRepository: browserRepository,
             workingDirectory: workingDirectory,
             projectId: projectId,
           ),
@@ -731,6 +741,7 @@ class _TabGroupView extends StatelessWidget {
     required this.controller,
     required this.workspaceSize,
     this.core,
+    this.browserRepository,
     this.workingDirectory,
     this.projectId,
   });
@@ -738,6 +749,7 @@ class _TabGroupView extends StatelessWidget {
   final WorkspaceController controller;
   final Size workspaceSize;
   final CoreClient? core;
+  final BrowserRepository? browserRepository;
   final String? workingDirectory;
   final String? projectId;
   @override
@@ -808,6 +820,7 @@ class _TabGroupView extends StatelessWidget {
             child: _PanelBody(
               panel: panel,
               core: core,
+              browserRepository: browserRepository,
               workingDirectory: workingDirectory,
               projectId: projectId,
             ),
@@ -824,6 +837,7 @@ class _FloatingView extends StatefulWidget {
     required this.controller,
     required this.workspaceSize,
     this.core,
+    this.browserRepository,
     this.workingDirectory,
     this.projectId,
   });
@@ -831,6 +845,7 @@ class _FloatingView extends StatefulWidget {
   final WorkspaceController controller;
   final Size workspaceSize;
   final CoreClient? core;
+  final BrowserRepository? browserRepository;
   final String? workingDirectory;
   final String? projectId;
 
@@ -870,16 +885,12 @@ class _FloatingViewState extends State<_FloatingView> {
           child: Column(
             children: [
               GestureDetector(
-                onPanStart: (_) => setState(
-                  () => _dragOrigin = floating.rect.topLeft,
-                ),
+                onPanStart: (_) =>
+                    setState(() => _dragOrigin = floating.rect.topLeft),
                 onPanUpdate: (details) {
                   if (_dragOrigin == null) return;
                   unawaited(
-                    widget.controller.moveFloating(
-                      floating,
-                      details.delta,
-                    ),
+                    widget.controller.moveFloating(floating, details.delta),
                   );
                 },
                 onPanEnd: _onDragEnd,
@@ -910,6 +921,7 @@ class _FloatingViewState extends State<_FloatingView> {
                 child: _PanelBody(
                   panel: floating.panel,
                   core: widget.core,
+                  browserRepository: widget.browserRepository,
                   workingDirectory: widget.workingDirectory,
                   projectId: widget.projectId,
                 ),
@@ -926,25 +938,25 @@ class _PanelBody extends StatelessWidget {
   const _PanelBody({
     required this.panel,
     this.core,
+    this.browserRepository,
     this.workingDirectory,
     this.projectId,
   });
   final PanelDefinition panel;
   final CoreClient? core;
+  final BrowserRepository? browserRepository;
   final String? workingDirectory;
   final String? projectId;
   @override
   Widget build(BuildContext context) {
     if (panel.id == 'workspace' && core != null) {
-      return ConversationPanel(
-        core: core!,
-        workingDirectory: workingDirectory,
-      );
+      return ConversationPanel(core: core!, workingDirectory: workingDirectory);
     }
     if (panel.id == 'terminal' && core != null) {
       return TerminalPanel(
         service: RpcTerminalService(
-          (method, {params = const {}}) => core!.request(method, params: params),
+          (method, {params = const {}}) =>
+              core!.request(method, params: params),
         ),
         events: core!.events,
       );
@@ -952,13 +964,14 @@ class _PanelBody extends StatelessWidget {
     if (panel.id == 'approvals' && core != null) {
       return ApprovalCenterPanel(core: core!, projectId: projectId);
     }
-    if (panel.id == 'browser' && core != null) {
-      return BrowserPanel(core: core!);
+    if (panel.id == 'browser' && browserRepository != null) {
+      return BrowserPanel(repository: browserRepository!);
     }
     if (panel.id == 'explorer' && core != null && workingDirectory != null) {
       return FileWorkspacePanel(
         service: RpcFileService(
-          (method, {params = const {}}) => core!.request(method, params: params),
+          (method, {params = const {}}) =>
+              core!.request(method, params: params),
         ),
         root: workingDirectory!,
         events: core!.events,
@@ -967,7 +980,8 @@ class _PanelBody extends StatelessWidget {
     if (panel.id == 'review' && core != null && workingDirectory != null) {
       return DiffReviewPanel(
         service: RpcDiffService(
-          (method, {params = const {}}) => core!.request(method, params: params),
+          (method, {params = const {}}) =>
+              core!.request(method, params: params),
         ),
         repo: workingDirectory!,
       );

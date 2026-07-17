@@ -23,7 +23,7 @@ class DevServerController extends ChangeNotifier {
   final String projectId;
   final String worktreePath;
   final int maxLogCharacters;
-  final Future<void> Function(String url)? onOpenPreview;
+  final Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview;
   StreamSubscription<DevServerEvent>? _events;
   Timer? _poll;
 
@@ -111,8 +111,8 @@ class DevServerController extends ChangeNotifier {
     error = null;
     try {
       lastPreview = await _repository.openPreview(current);
-      final previewUrl = lastPreview?.url;
-      if (previewUrl != null) await onOpenPreview?.call(previewUrl);
+      final preview = lastPreview;
+      if (preview != null) await onOpenPreview?.call(preview);
     } on Object catch (caught) {
       error = caught.toString();
     }

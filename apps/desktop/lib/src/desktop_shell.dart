@@ -162,6 +162,7 @@ class DesktopShell extends StatefulWidget {
     this.taskRepository,
     this.verificationRepository,
     this.devServerRepository,
+    this.browserRepository,
     this.onCommand,
   });
 
@@ -174,6 +175,7 @@ class DesktopShell extends StatefulWidget {
   final TaskRepository? taskRepository;
   final VerificationRepository? verificationRepository;
   final DevServerRepository? devServerRepository;
+  final BrowserRepository? browserRepository;
   final ValueChanged<ShellCommand>? onCommand;
 
   @override
@@ -189,9 +191,12 @@ class _DesktopShellState extends State<DesktopShell> {
       InMemoryVerificationRepository.demo();
   late final InMemoryDevServerRepository _offlineDevServers =
       InMemoryDevServerRepository.demo();
+  late final InMemoryBrowserRepository _offlineBrowser =
+      InMemoryBrowserRepository.demo();
   CoreTaskRepository? _coreTasks;
   CoreVerificationRepository? _coreVerification;
   CoreDevServerRepository? _coreDevServers;
+  CoreBrowserRepository? _coreBrowser;
   DevServerController? _devServerController;
   DevServerRepository? _devServerControllerRepository;
 
@@ -219,6 +224,8 @@ class _DesktopShellState extends State<DesktopShell> {
       _coreTasks = null;
       _coreVerification = null;
       _coreDevServers = null;
+      unawaited(_coreBrowser?.dispose());
+      _coreBrowser = null;
       _devServerController?.dispose();
       _devServerController = null;
       _devServerControllerRepository = null;
@@ -228,12 +235,17 @@ class _DesktopShellState extends State<DesktopShell> {
       _devServerController = null;
       _devServerControllerRepository = null;
     }
+    if (oldWidget.browserRepository != widget.browserRepository) {
+      unawaited(_coreBrowser?.dispose());
+      _coreBrowser = null;
+    }
   }
 
   @override
   void dispose() {
     widget.projectController?.removeListener(_handleProjectUpdate);
     _devServerController?.dispose();
+    unawaited(_coreBrowser?.dispose());
     _workspace.dispose();
     super.dispose();
   }
@@ -348,6 +360,16 @@ class _DesktopShellState extends State<DesktopShell> {
     return _coreDevServers ??= CoreDevServerRepository.fromCore(core);
   }
 
+  BrowserRepository get _browserRepository {
+    final override = widget.browserRepository;
+    if (override != null) return override;
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      return _offlineBrowser;
+    }
+    return _coreBrowser ??= CoreBrowserRepository.fromCore(core);
+  }
+
   DevServerController get _serverController {
     final repository = _devServerRepository;
     final existing = _devServerController;
@@ -369,17 +391,23 @@ class _DesktopShellState extends State<DesktopShell> {
     return controller;
   }
 
-  Future<void> _openBrowserPreview(String url) async {
+  Future<void> _openBrowserPreview(DevServerPreviewMetadata preview) async {
     await _workspace.openPanel(PanelDefinition.browser);
-    final core = widget.core;
-    if (core == null || core.status != CoreConnectionStatus.connected) return;
-    final browser = BrowserController(core);
-    try {
-      await browser.start();
-      await browser.navigate(url);
-    } finally {
-      browser.dispose();
+    final repository = _browserRepository;
+    final current = await repository.load();
+    if (current.session == null ||
+        current.session?.status == BrowserRuntimeStatus.crashed) {
+      await repository.launch();
     }
+    await repository.navigate(
+      preview.url,
+      metadata: {
+        ...preview.metadata,
+        'port': preview.port,
+        'serverStatus': preview.status.name,
+        'source': 'dev-server-preview',
+      },
+    );
   }
 
   Future<void> _showNewProjectStub() => showDialog<void>(
@@ -549,6 +577,7 @@ class _DesktopShellState extends State<DesktopShell> {
                       child: _Workspace(
                         controller: _workspace,
                         core: widget.core,
+                        browserRepository: _browserRepository,
                         workingDirectory: widget
                             .projectController
                             ?.current
@@ -754,11 +783,13 @@ class _Workspace extends StatelessWidget {
   const _Workspace({
     required this.controller,
     this.core,
+    this.browserRepository,
     this.workingDirectory,
     this.projectId,
   });
   final WorkspaceController controller;
   final CoreClient? core;
+  final BrowserRepository? browserRepository;
   final String? workingDirectory;
   final String? projectId;
 
@@ -796,6 +827,7 @@ class _Workspace extends StatelessWidget {
           child: DockingWorkspace(
             controller: controller,
             core: core,
+            browserRepository: browserRepository,
             workingDirectory: workingDirectory,
             projectId: projectId,
           ),
