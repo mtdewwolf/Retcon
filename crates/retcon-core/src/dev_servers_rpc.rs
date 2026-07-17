@@ -326,7 +326,18 @@ async fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid
     };
     match state.dev_server_runtime().start(&config, &instance).await {
         Ok(started) => {
-            let started = match validate_runtime_report(&instance, started) {
+            let runtime_instance = match repo.instance(instance.id) {
+                Ok(Some(runtime_instance)) => runtime_instance,
+                Ok(None) => {
+                    let _ = state.dev_server_runtime().stop(&instance).await;
+                    return missing(id, "server instance");
+                }
+                Err(error) => {
+                    let _ = state.dev_server_runtime().stop(&instance).await;
+                    return storage_error(id, error);
+                }
+            };
+            let started = match validate_runtime_report(&runtime_instance, started) {
                 Ok(started) => started,
                 Err(error) => {
                     let _ = state.dev_server_runtime().stop(&instance).await;
@@ -901,5 +912,150 @@ mod tests {
                 .assign_port(config.id, None, 4323, "test")
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn real_runtime_reassigns_conflicted_port_persists_logs_and_auto_starts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let preferred_port = i64::from(listener.local_addr().unwrap().port());
+        let state = CoreState::new(&directory.path().join("data")).unwrap();
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&NewProject::new("Real runtime"))
+            .unwrap();
+        state
+            .storage()
+            .database()
+            .projects()
+            .add_location(
+                project.id,
+                &root.canonicalize().unwrap().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        let configured = rpc(
+            state.clone(),
+            10,
+            "devServer.configure",
+            json!({
+                "projectId": project.id,
+                "name": "real",
+                "command": long_running_command(),
+                "cwd": ".",
+                "preferredPort": preferred_port,
+                "autoStart": true,
+            }),
+        )
+        .await;
+        assert!(configured.error.is_none(), "{configured:?}");
+        let config_id: Uuid = configured.result.unwrap()["config"]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let started = rpc(
+            state.clone(),
+            11,
+            "devServer.start",
+            json!({"configId": config_id}),
+        )
+        .await;
+        assert!(started.error.is_none(), "{started:?}");
+        let started = started.result.unwrap();
+        let instance_id: Uuid = started["instance"]["id"].as_str().unwrap().parse().unwrap();
+        let actual_port = started["instance"]["port"].as_i64().unwrap();
+        assert_ne!(actual_port, preferred_port);
+        assert!(
+            started["instance"]["url"]
+                .as_str()
+                .unwrap()
+                .contains(&actual_port.to_string())
+        );
+        let preview = rpc(
+            state.clone(),
+            12,
+            "devServer.openPreview",
+            json!({"instanceId": instance_id}),
+        )
+        .await;
+        assert_eq!(preview.result.unwrap()["status"], "running");
+        let logs = rpc(
+            state.clone(),
+            13,
+            "devServer.logs",
+            json!({"instanceId": instance_id}),
+        )
+        .await;
+        let log = &logs.result.as_ref().unwrap()["log"];
+        assert!(log["artifactHash"].is_string());
+        assert!(log["text"].as_str().unwrap().contains("Hot reload"));
+        let stopped = rpc(
+            state.clone(),
+            14,
+            "devServer.stop",
+            json!({"instanceId": instance_id}),
+        )
+        .await;
+        assert_eq!(stopped.result.unwrap()["instance"]["status"], "stopped");
+
+        drop(listener);
+        auto_start(state.clone()).await;
+        let instances = state
+            .storage()
+            .database()
+            .dev_servers()
+            .list_instances(project.id)
+            .unwrap();
+        assert_eq!(instances.len(), 2);
+        assert_eq!(instances[0].status, "running");
+        assert_eq!(instances[0].port, preferred_port);
+        let saved = state
+            .storage()
+            .database()
+            .dev_servers()
+            .config(config_id)
+            .unwrap()
+            .unwrap();
+        assert!(saved.auto_start);
+        assert_eq!(saved.command, long_running_command());
+        state.cleanup_children().await;
+        assert_eq!(
+            state
+                .storage()
+                .database()
+                .dev_servers()
+                .instance(instances[0].id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "stopped"
+        );
+    }
+
+    async fn rpc(state: CoreState, id: u64, method: &str, params: Value) -> Response {
+        handle(
+            state,
+            Request {
+                id,
+                method: method.into(),
+                params,
+            },
+        )
+        .await
+    }
+
+    #[cfg(windows)]
+    fn long_running_command() -> String {
+        "powershell.exe -NoProfile -Command \"Write-Output 'Local: http://localhost:{port}'; Write-Output 'Hot reload enabled'; Start-Sleep -Seconds 30\"".into()
+    }
+
+    #[cfg(not(windows))]
+    fn long_running_command() -> String {
+        "/bin/sh -c \"printf 'Local: http://localhost:{port}\\nHot reload enabled\\n'; exec sleep 30\"".into()
     }
 }

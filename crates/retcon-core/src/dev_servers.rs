@@ -393,7 +393,7 @@ async fn monitor_instance(
                 let _ = storage
                     .database()
                     .dev_servers()
-                    .mark_stopped(instance_id, RUNTIME_ACTOR);
+                    .mark_exited(instance_id, RUNTIME_ACTOR);
                 let _ = events.emit(
                     "dev_server.exited",
                     json!({"instanceId": instance_id, "exitCode": exit_code}),
