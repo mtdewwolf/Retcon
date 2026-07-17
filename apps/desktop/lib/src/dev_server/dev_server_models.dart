@@ -32,6 +32,7 @@ class DevServerEnvironmentVariable {
 
 class DevServerConfig {
   const DevServerConfig({
+    this.id = '',
     required this.projectId,
     required this.framework,
     required this.startupCommand,
@@ -41,8 +42,10 @@ class DevServerConfig {
     this.environment = const [],
     this.autoStart = false,
     this.requiredForPreview = false,
+    this.worktreeId,
   });
 
+  final String id;
   final String projectId;
   final String framework;
   final String startupCommand;
@@ -52,10 +55,12 @@ class DevServerConfig {
   final List<DevServerEnvironmentVariable> environment;
   final bool autoStart;
   final bool requiredForPreview;
+  final String? worktreeId;
 
   String get url => 'http://$host:$port';
 
   DevServerConfig copyWith({
+    String? id,
     String? projectId,
     String? framework,
     String? startupCommand,
@@ -65,7 +70,9 @@ class DevServerConfig {
     List<DevServerEnvironmentVariable>? environment,
     bool? autoStart,
     bool? requiredForPreview,
+    String? worktreeId,
   }) => DevServerConfig(
+    id: id ?? this.id,
     projectId: projectId ?? this.projectId,
     framework: framework ?? this.framework,
     startupCommand: startupCommand ?? this.startupCommand,
@@ -75,44 +82,81 @@ class DevServerConfig {
     environment: environment ?? this.environment,
     autoStart: autoStart ?? this.autoStart,
     requiredForPreview: requiredForPreview ?? this.requiredForPreview,
+    worktreeId: worktreeId ?? this.worktreeId,
   );
+}
+
+class DevServerHistoryEntry {
+  const DevServerHistoryEntry({
+    required this.kind,
+    required this.actor,
+    required this.createdAt,
+  });
+  final String kind;
+  final String actor;
+  final DateTime createdAt;
+}
+
+class DevServerPreviewMetadata {
+  const DevServerPreviewMetadata({
+    required this.url,
+    required this.port,
+    required this.status,
+    this.metadata = const {},
+  });
+  final String url;
+  final int port;
+  final DevServerStatus status;
+  final Map<String, dynamic> metadata;
 }
 
 class DevServerSnapshot {
   const DevServerSnapshot({
     required this.config,
     required this.status,
+    this.instanceId = '',
     this.startedAt,
     this.stoppedAt,
     this.message,
     this.suggestedPort,
+    this.history = const [],
+    this.previewMetadata = const {},
   });
 
+  final String instanceId;
   final DevServerConfig config;
   final DevServerStatus status;
   final DateTime? startedAt;
   final DateTime? stoppedAt;
   final String? message;
   final int? suggestedPort;
+  final List<DevServerHistoryEntry> history;
+  final Map<String, dynamic> previewMetadata;
 
   bool get running => status == DevServerStatus.running;
   bool get transitioning =>
       status == DevServerStatus.starting || status == DevServerStatus.stopping;
 
   DevServerSnapshot copyWith({
+    String? instanceId,
     DevServerConfig? config,
     DevServerStatus? status,
     DateTime? startedAt,
     DateTime? stoppedAt,
     String? message,
     int? suggestedPort,
+    List<DevServerHistoryEntry>? history,
+    Map<String, dynamic>? previewMetadata,
   }) => DevServerSnapshot(
+    instanceId: instanceId ?? this.instanceId,
     config: config ?? this.config,
     status: status ?? this.status,
     startedAt: startedAt ?? this.startedAt,
     stoppedAt: stoppedAt ?? this.stoppedAt,
     message: message ?? this.message,
     suggestedPort: suggestedPort ?? this.suggestedPort,
+    history: history ?? this.history,
+    previewMetadata: previewMetadata ?? this.previewMetadata,
   );
 }
 

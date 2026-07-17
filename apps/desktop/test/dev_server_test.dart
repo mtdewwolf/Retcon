@@ -13,11 +13,13 @@ void main() {
         final repository = InMemoryDevServerRepository(
           configs: {projectId: config.copyWith(autoStart: true)},
         );
+        final navigated = <String>[];
         final controller = DevServerController(
           repository: repository,
           projectId: projectId,
           worktreePath: worktree,
           maxLogCharacters: 48,
+          onOpenPreview: (url) async => navigated.add(url),
         );
         addTearDown(controller.dispose);
 
@@ -27,6 +29,7 @@ void main() {
         expect(controller.stdout.length, lessThanOrEqualTo(49));
         await controller.openPreview();
         expect(repository.openedPreviews, ['http://127.0.0.1:3000']);
+        expect(navigated, ['http://127.0.0.1:3000']);
 
         await controller.setAutoStart(false);
         await controller.setRequiredForPreview(true);

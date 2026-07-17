@@ -10,11 +10,14 @@ abstract interface class DevServerRepository {
     required String worktreePath,
   });
   Future<DevServerConfig> saveConfig(DevServerConfig config);
+  Future<DevServerConfig> setAutoStart(DevServerConfig config, bool enabled);
+  Future<DevServerConfig> changePort(DevServerConfig config, int port);
   Future<DevServerSnapshot?> getSnapshot(String projectId);
+  Future<String> loadLogs(String projectId);
   Future<DevServerSnapshot> start(DevServerConfig config);
   Future<DevServerSnapshot> stop(String projectId);
   Future<DevServerSnapshot> restart(DevServerConfig config);
-  Future<void> openPreview(String url);
+  Future<DevServerPreviewMetadata?> openPreview(DevServerSnapshot snapshot);
 }
 
 class InMemoryDevServerRepository implements DevServerRepository {
@@ -33,6 +36,7 @@ class InMemoryDevServerRepository implements DevServerRepository {
   final Map<String, DevServerConfig> _configs;
   final Map<String, DevServerSnapshot> _snapshots;
   final Set<int> _occupiedPorts;
+  final Map<String, String> _logs = {};
   final _events = StreamController<DevServerEvent>.broadcast(sync: true);
   final List<String> openedPreviews = [];
 
@@ -64,8 +68,19 @@ class InMemoryDevServerRepository implements DevServerRepository {
   }
 
   @override
+  Future<DevServerConfig> setAutoStart(DevServerConfig config, bool enabled) =>
+      saveConfig(config.copyWith(autoStart: enabled));
+
+  @override
+  Future<DevServerConfig> changePort(DevServerConfig config, int port) =>
+      saveConfig(config.copyWith(port: port));
+
+  @override
   Future<DevServerSnapshot?> getSnapshot(String projectId) async =>
       _snapshots[projectId];
+
+  @override
+  Future<String> loadLogs(String projectId) async => _logs[projectId] ?? '';
 
   @override
   Future<DevServerSnapshot> start(DevServerConfig config) async {
@@ -138,8 +153,16 @@ class InMemoryDevServerRepository implements DevServerRepository {
   }
 
   @override
-  Future<void> openPreview(String url) async {
-    openedPreviews.add(url);
+  Future<DevServerPreviewMetadata?> openPreview(
+    DevServerSnapshot snapshot,
+  ) async {
+    openedPreviews.add(snapshot.config.url);
+    return DevServerPreviewMetadata(
+      url: snapshot.config.url,
+      port: snapshot.config.port,
+      status: snapshot.status,
+      metadata: snapshot.previewMetadata,
+    );
   }
 
   DevServerSnapshot simulateCrash(String projectId, {String? message}) {
@@ -173,8 +196,10 @@ class InMemoryDevServerRepository implements DevServerRepository {
     return snapshot;
   }
 
-  void _log(String projectId, String text, {bool stderr = false}) => _events
-      .add(DevServerLog(projectId: projectId, text: text, stderr: stderr));
+  void _log(String projectId, String text, {bool stderr = false}) {
+    _logs[projectId] = '${_logs[projectId] ?? ''}$text';
+    _events.add(DevServerLog(projectId: projectId, text: text, stderr: stderr));
+  }
 
   int _alternatePort(int port) {
     var candidate = port + 1;

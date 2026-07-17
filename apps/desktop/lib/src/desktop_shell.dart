@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'browser/browser.dart';
 import 'core_client.dart';
 import 'dev_server/dev_server.dart';
 import 'projects/project_picker.dart';
@@ -72,7 +73,9 @@ class ShellState extends ChangeNotifier {
     try {
       final doctor = await core.request('provider.doctor');
       provider = _providerLabel(doctor);
-      errorCount = _failureCount(doctor['checks'] as List<dynamic>? ?? const []);
+      errorCount = _failureCount(
+        doctor['checks'] as List<dynamic>? ?? const [],
+      );
 
       final approvals = await core.request(
         'approval.list',
@@ -116,11 +119,10 @@ class ShellState extends ChangeNotifier {
     return '$name ($suffix)';
   }
 
-  static int _failureCount(List<dynamic> checks) =>
-      checks.where((check) {
-        if (check is! Map) return false;
-        return check['status']?.toString() == 'failure';
-      }).length;
+  static int _failureCount(List<dynamic> checks) => checks.where((check) {
+    if (check is! Map) return false;
+    return check['status']?.toString() == 'failure';
+  }).length;
 
   @override
   void dispose() {
@@ -189,7 +191,9 @@ class _DesktopShellState extends State<DesktopShell> {
       InMemoryDevServerRepository.demo();
   CoreTaskRepository? _coreTasks;
   CoreVerificationRepository? _coreVerification;
+  CoreDevServerRepository? _coreDevServers;
   DevServerController? _devServerController;
+  DevServerRepository? _devServerControllerRepository;
 
   @override
   void initState() {
@@ -214,10 +218,15 @@ class _DesktopShellState extends State<DesktopShell> {
     if (oldWidget.core != widget.core) {
       _coreTasks = null;
       _coreVerification = null;
+      _coreDevServers = null;
+      _devServerController?.dispose();
+      _devServerController = null;
+      _devServerControllerRepository = null;
     }
     if (oldWidget.devServerRepository != widget.devServerRepository) {
       _devServerController?.dispose();
       _devServerController = null;
+      _devServerControllerRepository = null;
     }
   }
 
@@ -239,6 +248,7 @@ class _DesktopShellState extends State<DesktopShell> {
     }
     _devServerController?.dispose();
     _devServerController = null;
+    _devServerControllerRepository = null;
     if (mounted) setState(() {});
   }
 
@@ -277,6 +287,7 @@ class _DesktopShellState extends State<DesktopShell> {
           repository: _taskRepository,
           verificationRepository: _verificationRepository,
           devServerRepository: _devServerRepository,
+          onOpenPreview: _openBrowserPreview,
           projectId: widget.projectController?.current?.id,
           projectPath:
               widget.projectController?.current?.metadata.repositoryPath,
@@ -327,21 +338,48 @@ class _DesktopShellState extends State<DesktopShell> {
     return _coreVerification ??= CoreVerificationRepository.fromCore(core);
   }
 
-  DevServerRepository get _devServerRepository =>
-      widget.devServerRepository ?? _offlineDevServers;
+  DevServerRepository get _devServerRepository {
+    final override = widget.devServerRepository;
+    if (override != null) return override;
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      return _offlineDevServers;
+    }
+    return _coreDevServers ??= CoreDevServerRepository.fromCore(core);
+  }
 
   DevServerController get _serverController {
+    final repository = _devServerRepository;
     final existing = _devServerController;
-    if (existing != null) return existing;
+    if (existing != null &&
+        identical(_devServerControllerRepository, repository)) {
+      return existing;
+    }
+    existing?.dispose();
     final project = widget.projectController?.current;
     final controller = DevServerController(
-      repository: _devServerRepository,
+      repository: repository,
       projectId: project?.id ?? 'local-project',
       worktreePath: project?.metadata.repositoryPath ?? '',
+      onOpenPreview: _openBrowserPreview,
     );
     _devServerController = controller;
+    _devServerControllerRepository = repository;
     unawaited(controller.load());
     return controller;
+  }
+
+  Future<void> _openBrowserPreview(String url) async {
+    await _workspace.openPanel(PanelDefinition.browser);
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) return;
+    final browser = BrowserController(core);
+    try {
+      await browser.start();
+      await browser.navigate(url);
+    } finally {
+      browser.dispose();
+    }
   }
 
   Future<void> _showNewProjectStub() => showDialog<void>(
@@ -526,7 +564,8 @@ class _DesktopShellState extends State<DesktopShell> {
                       startMenuOpen: _startMenuOpen,
                       onStartPressed: () =>
                           setState(() => _startMenuOpen = !_startMenuOpen),
-                      onApprovalsPressed: () => unawaited(_run(ShellCommand.approvals)),
+                      onApprovalsPressed: () =>
+                          unawaited(_run(ShellCommand.approvals)),
                     ),
                   ],
                 ),

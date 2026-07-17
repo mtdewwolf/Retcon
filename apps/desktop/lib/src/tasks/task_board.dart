@@ -15,6 +15,7 @@ class TaskBoardDialog extends StatelessWidget {
     required this.verificationRepository,
     super.key,
     this.devServerRepository,
+    this.onOpenPreview,
     this.projectId,
     this.projectPath,
   });
@@ -22,6 +23,7 @@ class TaskBoardDialog extends StatelessWidget {
   final TaskRepository repository;
   final VerificationRepository verificationRepository;
   final DevServerRepository? devServerRepository;
+  final Future<void> Function(String url)? onOpenPreview;
   final String? projectId;
   final String? projectPath;
 
@@ -30,6 +32,7 @@ class TaskBoardDialog extends StatelessWidget {
     required TaskRepository repository,
     required VerificationRepository verificationRepository,
     DevServerRepository? devServerRepository,
+    Future<void> Function(String url)? onOpenPreview,
     String? projectId,
     String? projectPath,
   }) => showDialog<void>(
@@ -38,6 +41,7 @@ class TaskBoardDialog extends StatelessWidget {
       repository: repository,
       verificationRepository: verificationRepository,
       devServerRepository: devServerRepository,
+      onOpenPreview: onOpenPreview,
       projectId: projectId,
       projectPath: projectPath,
     ),
@@ -78,6 +82,7 @@ class TaskBoardDialog extends StatelessWidget {
               repository: repository,
               verificationRepository: verificationRepository,
               devServerRepository: devServerRepository,
+              onOpenPreview: onOpenPreview,
               projectId: projectId,
               projectPath: projectPath,
             ),
@@ -94,6 +99,7 @@ class TaskBoardPanel extends StatefulWidget {
     super.key,
     this.verificationRepository,
     this.devServerRepository,
+    this.onOpenPreview,
     this.projectId,
     this.projectPath,
   });
@@ -101,6 +107,7 @@ class TaskBoardPanel extends StatefulWidget {
   final TaskRepository repository;
   final VerificationRepository? verificationRepository;
   final DevServerRepository? devServerRepository;
+  final Future<void> Function(String url)? onOpenPreview;
   final String? projectId;
   final String? projectPath;
 
@@ -127,6 +134,7 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
       repository: _devServerRepository,
       projectId: widget.projectId ?? 'local-project',
       worktreePath: widget.projectPath ?? '',
+      onOpenPreview: widget.onOpenPreview,
     );
     _controller = TaskBoardController(
       repository: widget.repository,

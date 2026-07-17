@@ -295,6 +295,18 @@ class _Overview extends StatelessWidget {
               _Field(label: 'Port', value: config.port.toString()),
               _Field(label: 'Worktree', value: config.worktreePath),
               _Field(label: 'Startup command', value: config.startupCommand),
+              _Field(
+                label: 'Preview metadata',
+                value: snapshot == null || snapshot.previewMetadata.isEmpty
+                    ? 'Not available'
+                    : snapshot.previewMetadata.toString(),
+              ),
+              _Field(
+                label: 'History',
+                value: snapshot == null || snapshot.history.isEmpty
+                    ? 'No lifecycle events'
+                    : '${snapshot.history.length} events · latest ${snapshot.history.last.kind}',
+              ),
             ],
           ),
         ),

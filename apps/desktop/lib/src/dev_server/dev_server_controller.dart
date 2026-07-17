@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'core_dev_server_repository.dart';
 import 'dev_server_models.dart';
 import 'dev_server_repository.dart';
 
@@ -11,6 +12,7 @@ class DevServerController extends ChangeNotifier {
     required this.projectId,
     required this.worktreePath,
     this.maxLogCharacters = 16000,
+    this.onOpenPreview,
   }) : _repository = repository {
     _events = repository.events
         .where((event) => event.projectId == projectId)
@@ -21,7 +23,9 @@ class DevServerController extends ChangeNotifier {
   final String projectId;
   final String worktreePath;
   final int maxLogCharacters;
+  final Future<void> Function(String url)? onOpenPreview;
   StreamSubscription<DevServerEvent>? _events;
+  Timer? _poll;
 
   DevServerConfig? config;
   DevServerSnapshot? snapshot;
@@ -30,6 +34,7 @@ class DevServerController extends ChangeNotifier {
   bool loading = false;
   bool loaded = false;
   String? error;
+  DevServerPreviewMetadata? lastPreview;
 
   DevServerStatus get status => snapshot?.status ?? DevServerStatus.stopped;
   bool get running => snapshot?.running == true;
@@ -49,8 +54,14 @@ class DevServerController extends ChangeNotifier {
       snapshot =
           await _repository.getSnapshot(projectId) ??
           DevServerSnapshot(config: config!, status: DevServerStatus.stopped);
+      stdout = _bounded(await _repository.loadLogs(projectId));
       loaded = true;
       if (config!.autoStart && !running) await start();
+      if (_repository is CoreDevServerRepository) {
+        _poll ??= Timer.periodic(const Duration(seconds: 2), (_) {
+          if (running) unawaited(refreshRuntime());
+        });
+      }
     } on Object catch (caught) {
       error = caught.toString();
     } finally {
@@ -95,9 +106,17 @@ class DevServerController extends ChangeNotifier {
   }
 
   Future<void> openPreview() async {
-    final previewUrl = url;
-    if (!canOpenPreview || previewUrl == null) return;
-    await _repository.openPreview(previewUrl);
+    final current = snapshot;
+    if (!canOpenPreview || current == null) return;
+    error = null;
+    try {
+      lastPreview = await _repository.openPreview(current);
+      final previewUrl = lastPreview?.url;
+      if (previewUrl != null) await onOpenPreview?.call(previewUrl);
+    } on Object catch (caught) {
+      error = caught.toString();
+    }
+    notifyListeners();
   }
 
   Future<void> startAndOpenPreview() async {
@@ -109,7 +128,7 @@ class DevServerController extends ChangeNotifier {
     final current = config;
     if (current == null || port < 1 || port > 65535) return;
     final wasRunning = running;
-    config = await _repository.saveConfig(current.copyWith(port: port));
+    config = await _repository.changePort(current, port);
     snapshot = snapshot?.copyWith(config: config);
     notifyListeners();
     if (restartIfRunning && wasRunning) await restart();
@@ -125,17 +144,22 @@ class DevServerController extends ChangeNotifier {
   Future<void> updateStartupCommand(String command) async {
     final current = config;
     if (current == null || command.trim().isEmpty) return;
-    config = await _repository.saveConfig(
-      current.copyWith(startupCommand: command.trim()),
-    );
-    snapshot = snapshot?.copyWith(config: config);
+    error = null;
+    try {
+      config = await _repository.saveConfig(
+        current.copyWith(startupCommand: command.trim()),
+      );
+      snapshot = snapshot?.copyWith(config: config);
+    } on Object catch (caught) {
+      error = caught.toString();
+    }
     notifyListeners();
   }
 
   Future<void> setAutoStart(bool value) async {
     final current = config;
     if (current == null) return;
-    config = await _repository.saveConfig(current.copyWith(autoStart: value));
+    config = await _repository.setAutoStart(current, value);
     snapshot = snapshot?.copyWith(config: config);
     notifyListeners();
   }
@@ -155,16 +179,36 @@ class DevServerController extends ChangeNotifier {
   ) async {
     final current = config;
     if (current == null) return;
-    config = await _repository.saveConfig(
-      current.copyWith(environment: environment),
-    );
-    snapshot = snapshot?.copyWith(config: config);
+    error = null;
+    try {
+      config = await _repository.saveConfig(
+        current.copyWith(environment: environment),
+      );
+      snapshot = snapshot?.copyWith(config: config);
+    } on Object catch (caught) {
+      error = caught.toString();
+    }
     notifyListeners();
   }
 
   void clearLogs() {
     stdout = '';
     stderr = '';
+    notifyListeners();
+  }
+
+  Future<void> refreshRuntime() async {
+    try {
+      final refreshed = await _repository.getSnapshot(projectId);
+      if (refreshed != null) {
+        snapshot = refreshed;
+        config = refreshed.config;
+      }
+      stdout = _bounded(await _repository.loadLogs(projectId));
+      error = null;
+    } on Object catch (caught) {
+      error = caught.toString();
+    }
     notifyListeners();
   }
 
@@ -189,6 +233,7 @@ class DevServerController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _poll?.cancel();
     unawaited(_events?.cancel());
     super.dispose();
   }
