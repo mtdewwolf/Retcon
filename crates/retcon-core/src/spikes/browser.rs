@@ -24,6 +24,7 @@ struct BrowserWriter {
 }
 
 struct BrowserProc {
+    generation: u64,
     child: Child,
     writer: Arc<Mutex<BrowserWriter>>,
     pending: Pending,
@@ -34,6 +35,7 @@ struct BrowserProc {
 #[derive(Default)]
 pub struct BrowserHandle {
     proc: Mutex<Option<BrowserProc>>,
+    generation: AtomicU64,
 }
 
 impl BrowserHandle {
@@ -143,6 +145,11 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
     let reader_pending = Arc::clone(&pending);
     let event_state = state.clone();
     let cleanup_state = state.clone();
+    let generation = state
+        .browser()
+        .generation
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         while let Ok(Some(line)) = read_capped_line(&mut reader).await {
@@ -162,11 +169,20 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
             json!({"error":{"message":"browser service exited"}}),
         )
         .await;
-        cleanup_state.browser().proc.lock().await.take();
+        {
+            let mut guard = cleanup_state.browser().proc.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|proc| proc.generation == generation)
+            {
+                guard.take();
+            }
+        }
         event_state.emit("browser.serviceExited", json!({}));
     });
 
     *guard = Some(BrowserProc {
+        generation,
         child,
         writer: Arc::new(Mutex::new(BrowserWriter { stdin })),
         pending,

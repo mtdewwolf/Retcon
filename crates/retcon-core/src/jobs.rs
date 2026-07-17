@@ -321,17 +321,23 @@ impl JobSupervisor {
     }
 
     pub fn shutdown(&self) {
+        // Collect directly from the map so the API page cap (500) cannot leave
+        // active jobs running across process shutdown.
         let ids: Vec<_> = self
-            .list(0, usize::MAX)
-            .into_iter()
-            .filter(|j| {
-                matches!(
-                    j.status,
-                    JobStatus::Queued | JobStatus::Running | JobStatus::Stuck
-                )
+            .inner
+            .lock()
+            .map(|jobs| {
+                jobs.iter()
+                    .filter(|(_, entry)| {
+                        matches!(
+                            entry.snapshot.status,
+                            JobStatus::Queued | JobStatus::Running | JobStatus::Stuck
+                        )
+                    })
+                    .map(|(id, _)| *id)
+                    .collect()
             })
-            .map(|j| j.id)
-            .collect();
+            .unwrap_or_default();
         for id in ids {
             self.force_stop(id);
         }
