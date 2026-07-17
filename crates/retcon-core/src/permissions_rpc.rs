@@ -144,7 +144,8 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let limit = params
                 .get("limit")
                 .and_then(Value::as_u64)
-                .unwrap_or(100) as usize;
+                .unwrap_or(100)
+                .min(200) as usize;
             match engine.list_approvals(status, session_id, limit) {
                 Ok(approvals) => Response::ok(
                     id,

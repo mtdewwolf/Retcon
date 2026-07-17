@@ -4,6 +4,9 @@ import 'dart:io';
 
 import 'generated/protocol_v1.dart';
 
+/// Align with retcon-protocol::MAX_FRAME_BYTES.
+const int maxFrameBytes = 1024 * 1024;
+
 /// A newline-delimited JSON protocol connection.
 abstract interface class ProtocolConnection {
   Stream<String> get lines;
@@ -24,6 +27,20 @@ Future<ProtocolConnection> openTransport(Discovery discovery) async {
   );
 }
 
+StreamTransformer<String, String> _cappedLines() {
+  return StreamTransformer.fromHandlers(
+    handleData: (line, sink) {
+      if (utf8.encode(line).length > maxFrameBytes) {
+        sink.addError(
+          StateError('inbound frame exceeds $maxFrameBytes bytes'),
+        );
+        return;
+      }
+      sink.add(line);
+    },
+  );
+}
+
 final class UnixProtocolConnection implements ProtocolConnection {
   UnixProtocolConnection._(this._socket, this._lines);
 
@@ -40,6 +57,7 @@ final class UnixProtocolConnection implements ProtocolConnection {
         .cast<List<int>>()
         .transform(utf8.decoder)
         .transform(const LineSplitter())
+        .transform(_cappedLines())
         .asBroadcastStream();
     return UnixProtocolConnection._(socket, lines);
   }
@@ -90,17 +108,42 @@ final class PipeProtocolConnection implements ProtocolConnection {
     try {
       final chunk = await _file.read(4096);
       if (chunk.isEmpty) return;
+      if (_buffer.length + chunk.length > maxFrameBytes + 1) {
+        _buffer.clear();
+        if (!_controller.isClosed) {
+          _controller.addError(
+            StateError('inbound frame exceeds $maxFrameBytes bytes'),
+          );
+        }
+        return;
+      }
       _buffer.write(utf8.decode(chunk, allowMalformed: true));
       final text = _buffer.toString();
       final parts = text.split('\n');
       _buffer.clear();
       if (!text.endsWith('\n') && parts.isNotEmpty) {
-        _buffer.write(parts.removeLast());
+        final remainder = parts.removeLast();
+        if (utf8.encode(remainder).length > maxFrameBytes) {
+          if (!_controller.isClosed) {
+            _controller.addError(
+              StateError('inbound frame exceeds $maxFrameBytes bytes'),
+            );
+          }
+          return;
+        }
+        _buffer.write(remainder);
       }
       for (final part in parts) {
-        if (part.isNotEmpty) {
-          _controller.add(part);
+        if (part.isEmpty) continue;
+        if (utf8.encode(part).length > maxFrameBytes) {
+          if (!_controller.isClosed) {
+            _controller.addError(
+              StateError('inbound frame exceeds $maxFrameBytes bytes'),
+            );
+          }
+          continue;
         }
+        _controller.add(part);
       }
     } on FileSystemException {
       await _controller.close();

@@ -20,6 +20,8 @@ use crate::state::CoreState;
 const OUTPUT_COALESCE_MS: u64 = 50;
 const OUTPUT_COALESCE_BYTES: usize = 4_096;
 const SCROLLBACK_FLUSH_BYTES: usize = 16_384;
+const OUTPUT_QUEUE_CAPACITY: usize = 256;
+const MAX_SCROLLBACK_BYTES: usize = 256 * 1024;
 
 struct LiveTerminal {
     pty: Arc<PtySession>,
@@ -138,7 +140,7 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     }
 
     let terminal_id = state.terminals().next.fetch_add(1, Ordering::Relaxed) + 1;
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(OUTPUT_QUEUE_CAPACITY);
     let output_state = state.clone();
     tokio::spawn(async move {
         let mut buffer = String::new();
@@ -171,7 +173,7 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     });
 
     let session = match PtySession::spawn(&shell, cwd_path.as_deref(), cols, rows, move |chunk| {
-        let _ = tx.send(String::from_utf8_lossy(chunk).into_owned());
+        let _ = tx.try_send(String::from_utf8_lossy(chunk).into_owned());
     }) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -413,6 +415,10 @@ fn append_scrollback(state: &CoreState, terminal_id: u64, chunk: &str) {
     let mut should_flush = false;
     if let Ok(mut buffer) = terminal.scrollback.lock() {
         buffer.push_str(chunk);
+        if buffer.len() > MAX_SCROLLBACK_BYTES {
+            let excess = buffer.len() - MAX_SCROLLBACK_BYTES;
+            buffer.drain(..excess);
+        }
         should_flush = buffer.len() >= SCROLLBACK_FLUSH_BYTES;
     }
     if should_flush {
@@ -421,14 +427,14 @@ fn append_scrollback(state: &CoreState, terminal_id: u64, chunk: &str) {
 }
 
 fn flush_scrollback(state: &CoreState, terminal: &LiveTerminal) {
-    let text = terminal
-        .scrollback
-        .lock()
-        .map(|buffer| buffer.clone())
-        .unwrap_or_default();
-    if text.is_empty() {
+    let text = if let Ok(mut buffer) = terminal.scrollback.lock() {
+        if buffer.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *buffer)
+    } else {
         return;
-    }
+    };
     let store = state.storage().artifacts();
     let Ok(artifact) = store.store_bytes(text.as_bytes()) else {
         return;

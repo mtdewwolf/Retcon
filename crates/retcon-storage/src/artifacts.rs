@@ -253,13 +253,13 @@ fn referenced_hashes(database: &Database) -> Result<HashSet<String>> {
     database.read(|db| {
         let mut statement = db.prepare(
             "SELECT log_artifact_hash FROM terminal_sessions WHERE log_artifact_hash IS NOT NULL
-             UNION SELECT output_artifact_hash FROM commands WHERE output_artifact_hash IS NOT NULL
-             UNION SELECT patch_artifact_hash FROM git_checkpoints WHERE patch_artifact_hash IS NOT NULL
-             UNION SELECT before_artifact_hash FROM file_changes WHERE before_artifact_hash IS NOT NULL
-             UNION SELECT after_artifact_hash FROM file_changes WHERE after_artifact_hash IS NOT NULL
-             UNION SELECT artifact_hash FROM screenshots
-             UNION SELECT report_artifact_hash FROM test_runs WHERE report_artifact_hash IS NOT NULL
-             UNION SELECT artifact_hash FROM diagnostics WHERE artifact_hash IS NOT NULL",
+             UNION ALL SELECT output_artifact_hash FROM commands WHERE output_artifact_hash IS NOT NULL
+             UNION ALL SELECT patch_artifact_hash FROM git_checkpoints WHERE patch_artifact_hash IS NOT NULL
+             UNION ALL SELECT before_artifact_hash FROM file_changes WHERE before_artifact_hash IS NOT NULL
+             UNION ALL SELECT after_artifact_hash FROM file_changes WHERE after_artifact_hash IS NOT NULL
+             UNION ALL SELECT artifact_hash FROM screenshots
+             UNION ALL SELECT report_artifact_hash FROM test_runs WHERE report_artifact_hash IS NOT NULL
+             UNION ALL SELECT artifact_hash FROM diagnostics WHERE artifact_hash IS NOT NULL",
         )?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?

@@ -5,6 +5,8 @@ import { type Browser, type BrowserContext, type Page, chromium } from "playwrig
 
 /** Retained console/network evidence per session (ring buffer). */
 export const MAX_LOG_ENTRIES = 1_000;
+const MAX_TEXT_CHARS = 8_192;
+const MAX_URL_CHARS = 2_048;
 
 export interface BrowserEvent {
   type: string;
@@ -14,6 +16,8 @@ export interface BrowserEvent {
 export interface LogQuery {
   offset?: number;
   limit?: number;
+  /** When true (default), return the newest page of entries. */
+  tail?: boolean;
 }
 
 export interface ScreenshotOptions {
@@ -31,9 +35,16 @@ export function pushCapped<T>(buffer: T[], entry: T, max: number): void {
   }
 }
 
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
 function sliceLogs<T>(entries: T[], query: LogQuery = {}): T[] {
-  const offset = Math.max(0, query.offset ?? 0);
   const limit = Math.min(Math.max(1, query.limit ?? 100), MAX_LOG_ENTRIES);
+  if (query.tail !== false && query.offset === undefined) {
+    return entries.slice(Math.max(0, entries.length - limit));
+  }
+  const offset = Math.max(0, query.offset ?? 0);
   return entries.slice(offset, offset + limit);
 }
 
@@ -42,6 +53,7 @@ export class ManagedBrowser {
   private context: BrowserContext | undefined;
   private page: Page | undefined;
   private profile: string | undefined;
+  private closingIntentionally = false;
   private readonly consoleEntries: Record<string, unknown>[] = [];
   private readonly networkEntries: Record<string, unknown>[] = [];
 
@@ -49,6 +61,7 @@ export class ManagedBrowser {
 
   async launch(): Promise<Record<string, unknown>> {
     if (this.context) return { alreadyRunning: true };
+    this.closingIntentionally = false;
     this.profile = await mkdtemp(join(tmpdir(), "retcon-browser-"));
     const executablePath = process.env.RETCON_CHROMIUM_PATH;
     this.context = await chromium.launchPersistentContext(this.profile, {
@@ -57,31 +70,18 @@ export class ManagedBrowser {
       ...(executablePath ? { executablePath } : {}),
     });
     this.browser = this.context.browser() ?? undefined;
-    this.context.on("close", () => this.emit({ type: "browser.crashed", payload: {} }));
+    this.context.on("close", () => {
+      this.browser = undefined;
+      this.context = undefined;
+      this.page = undefined;
+      if (!this.closingIntentionally) {
+        this.emit({ type: "browser.crashed", payload: {} });
+      }
+      this.closingIntentionally = false;
+    });
+    this.context.on("page", (page) => this.attachPageListeners(page));
     this.page = this.context.pages()[0] ?? (await this.context.newPage());
-    this.page.on("console", (message) => {
-      const entry = {
-        type: message.type(),
-        text: message.text(),
-        timestamp: new Date().toISOString(),
-      };
-      pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.console", payload: entry });
-    });
-    this.page.on("request", (request) => {
-      const entry = {
-        method: request.method(),
-        url: request.url(),
-        resourceType: request.resourceType(),
-      };
-      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.request", payload: entry });
-    });
-    this.page.on("response", (response) => {
-      const entry = { status: response.status(), url: response.url() };
-      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
-      this.emit({ type: "browser.response", payload: entry });
-    });
+    this.attachPageListeners(this.page);
     return { launched: true, profile: this.profile };
   }
 
@@ -94,7 +94,11 @@ export class ManagedBrowser {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
-    return { url: page.url(), title: await page.title(), status: response?.status() ?? null };
+    return {
+      url: truncate(page.url(), MAX_URL_CHARS),
+      title: truncate(await page.title(), MAX_TEXT_CHARS),
+      status: response?.status() ?? null,
+    };
   }
 
   async screenshot(options: ScreenshotOptions): Promise<Record<string, unknown>> {
@@ -122,7 +126,7 @@ export class ManagedBrowser {
         await page.locator(selector).press(String(params.value ?? "Enter"));
         break;
       case "text":
-        return { text: await page.locator(selector).innerText() };
+        return { text: truncate(await page.locator(selector).innerText(), MAX_TEXT_CHARS) };
       default:
         throw new Error(`unsupported action: ${String(params.action)}`);
     }
@@ -139,25 +143,57 @@ export class ManagedBrowser {
       },
       offset: query.offset ?? 0,
       limit: query.limit ?? 100,
+      tail: query.tail !== false && query.offset === undefined,
     };
   }
 
   status(): Record<string, unknown> {
     return {
       running: this.context !== undefined,
-      url: this.page?.url() ?? null,
+      url: this.page?.url() ? truncate(this.page.url(), MAX_URL_CHARS) : null,
     };
   }
 
   async close(): Promise<Record<string, unknown>> {
     const context = this.context;
+    const profile = this.profile;
+    this.closingIntentionally = true;
     this.browser = undefined;
     this.context = undefined;
     this.page = undefined;
-    if (context) await context.close();
-    if (this.profile) await rm(this.profile, { recursive: true, force: true });
     this.profile = undefined;
+    if (context) await context.close();
+    if (profile) await rm(profile, { recursive: true, force: true });
     return { closed: true };
+  }
+
+  private attachPageListeners(page: Page): void {
+    page.on("console", (message) => {
+      const entry = {
+        type: message.type(),
+        text: truncate(message.text(), MAX_TEXT_CHARS),
+        timestamp: new Date().toISOString(),
+      };
+      pushCapped(this.consoleEntries, entry, MAX_LOG_ENTRIES);
+      this.emit({ type: "browser.console", payload: entry });
+    });
+    page.on("request", (request) => {
+      const entry = {
+        method: request.method(),
+        url: truncate(request.url(), MAX_URL_CHARS),
+        resourceType: request.resourceType(),
+      };
+      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
+      this.emit({ type: "browser.request", payload: entry });
+    });
+    page.on("response", (response) => {
+      const entry = {
+        status: response.status(),
+        url: truncate(response.url(), MAX_URL_CHARS),
+      };
+      pushCapped(this.networkEntries, entry, MAX_LOG_ENTRIES);
+      this.emit({ type: "browser.response", payload: entry });
+    });
   }
 
   private requirePage(): Page {

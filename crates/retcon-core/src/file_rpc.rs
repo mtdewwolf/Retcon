@@ -114,7 +114,8 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let limit = params
                 .get("limit")
                 .and_then(Value::as_u64)
-                .unwrap_or(DEFAULT_READ_LIMIT);
+                .unwrap_or(DEFAULT_READ_LIMIT)
+                .min(DEFAULT_READ_LIMIT);
             match service.read(&root, path, limit) {
                 Ok(result) => Response::ok(
                     id,
@@ -149,7 +150,8 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let limit = params
                 .get("limit")
                 .and_then(Value::as_u64)
-                .unwrap_or(DEFAULT_WRITE_LIMIT);
+                .unwrap_or(DEFAULT_WRITE_LIMIT)
+                .min(DEFAULT_WRITE_LIMIT);
             let snapshot =
                 crate::checkpoints_rpc::hook_file_write_begin(&state, &root, path, &params);
             match service.write(&root, path, content, limit) {

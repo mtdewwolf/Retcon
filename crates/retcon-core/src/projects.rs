@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::{CoreError, ErrorCode, ErrorSource};
@@ -88,9 +87,18 @@ pub async fn open(state: &CoreState, path: &str) -> Result<Value, CoreError> {
         "project.opened",
         json!({"projectId": project.id, "path": root}),
     );
-    Ok(
-        json!({"id": project.id, "metadata": merged, "analysis": analyze(&root), "health": health(&root).await}),
-    )
+    let analysis_root = root.clone();
+    let analysis = tokio::task::spawn_blocking(move || analyze(&analysis_root))
+        .await
+        .map_err(|error| {
+            CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::System,
+                "Retcon could not analyze that project.",
+                error.to_string(),
+            )
+        })?;
+    Ok(json!({"id": project.id, "metadata": merged, "analysis": analysis, "health": health(&root).await}))
 }
 
 /// Clone a repository and then open the resulting folder.
@@ -106,26 +114,21 @@ pub async fn clone(
     if destination.exists() {
         return Err(invalid("clone destination already exists"));
     }
-    let output = Command::new("git")
-        .args(["clone", "--", remote_url, &destination.to_string_lossy()])
-        .output()
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let dest_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid("clone destination must have a file name"))?;
+    retcon_git::run_git(parent, &["clone", "--", remote_url, dest_name])
         .await
-        .map_err(|e| {
+        .map_err(|error| {
             CoreError::new(
                 ErrorCode::Io,
                 ErrorSource::System,
-                "Git is required to clone a project.",
-                format!("start git clone: {e}"),
+                "Retcon could not clone that repository.",
+                error.to_string(),
             )
         })?;
-    if !output.status.success() {
-        return Err(CoreError::new(
-            ErrorCode::Io,
-            ErrorSource::System,
-            "Retcon could not clone that repository.",
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
     open(state, &destination.to_string_lossy()).await
 }
 
@@ -190,7 +193,18 @@ pub fn remove(state: &CoreState, id: Uuid) -> Result<(), CoreError> {
 /// Analyze a folder without adding it to the recent-project list.
 pub async fn inspect(path: &str) -> Result<Value, CoreError> {
     let root = canonical_directory(path)?;
-    Ok(json!({"analysis": analyze(&root), "health": health(&root).await}))
+    let analysis_root = root.clone();
+    let analysis = tokio::task::spawn_blocking(move || analyze(&analysis_root))
+        .await
+        .map_err(|error| {
+            CoreError::new(
+                ErrorCode::Internal,
+                ErrorSource::System,
+                "Retcon could not analyze that project.",
+                error.to_string(),
+            )
+        })?;
+    Ok(json!({"analysis": analysis, "health": health(&root).await}))
 }
 
 fn metadata(state: &CoreState, id: Uuid) -> Result<Value, CoreError> {
@@ -305,13 +319,7 @@ fn analyze(root: &Path) -> Value {
 }
 
 async fn health(root: &Path) -> Value {
-    let git_version = Command::new("git")
-        .arg("--version")
-        .output()
-        .await
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some();
+    let git_version = retcon_git::run_git(root, &["--version"]).await.is_ok();
     let git_status = git_output(root, &["status", "--porcelain=v1", "--branch"])
         .await
         .ok();
@@ -338,17 +346,7 @@ async fn health(root: &Path) -> Value {
     ]})
 }
 async fn git_output(root: &Path, args: &[&str]) -> Result<String, ()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|_| ())?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .ok_or(())
+    retcon_git::run_git(root, args).await.map_err(|_| ())
 }
 
 #[cfg(test)]

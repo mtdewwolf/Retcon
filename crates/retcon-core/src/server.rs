@@ -20,6 +20,9 @@ use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::frame::read_capped_line;
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
+use retcon_protocol::MAX_FRAME_BYTES;
+
+const MAX_CONNECTIONS: usize = 64;
 
 pub struct Server {
     listener: TransportListener,
@@ -59,6 +62,11 @@ impl Server {
                 },
                 result = self.listener.accept() => match result {
                     Ok(stream) => {
+                        while connections.len() >= MAX_CONNECTIONS {
+                            if connections.join_next().await.is_none() {
+                                break;
+                            }
+                        }
                         let token = self.token.clone();
                         let state = self.state.clone();
                         connections.spawn(async move {
@@ -73,6 +81,7 @@ impl Server {
                     }
                     Err(error) => tracing::warn!(%error, "failed to accept RPC connection"),
                 },
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
@@ -232,6 +241,14 @@ async fn write_json_value(
         )
     })?;
     encoded.push(b'\n');
+    if encoded.len() > MAX_FRAME_BYTES + 1 {
+        return Err(CoreError::new(
+            ErrorCode::Internal,
+            ErrorSource::Rpc,
+            "Retcon could not send an oversized local response.",
+            format!("outbound frame exceeds {MAX_FRAME_BYTES} bytes"),
+        ));
+    }
     writer
         .write_all(&encoded)
         .await

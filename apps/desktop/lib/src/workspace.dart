@@ -416,10 +416,13 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   Future<void> close(PanelDefinition panel) async {
+    final closed = [..._layout.closedPanels, panel];
     _layout = WorkspaceLayout(
       root: _remove(_layout.root, panel.id),
       floatingPanels: _layout.floatingPanels,
-      closedPanels: [..._layout.closedPanels, panel],
+      closedPanels: closed.length > 32
+          ? closed.sublist(closed.length - 32)
+          : closed,
     );
     await _save();
   }
