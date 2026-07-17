@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
+use crate::verification::ensure_default_commands;
 
 const LOCAL_ACTOR: &str = "local_user";
 const MAX_STREAM_ARTIFACT_BYTES: usize = 256 * 1024;
@@ -101,9 +102,9 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(value) => value,
                 Err(message) => return invalid(id, message),
             };
-            match repository.commands(project_id) {
+            match ensure_default_commands(state.storage(), project_id) {
                 Ok(commands) => Response::ok(id, json!({"commands": commands})),
-                Err(error) => storage_error(id, error),
+                Err(error) => invalid(id, error),
             }
         }
         "verification.commands.configure" => {
@@ -141,6 +142,17 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(value) => value,
                 Err(error) => return invalid(id, error.to_string()),
             };
+            let task = match state.storage().database().tasks().get(input.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => return missing(id, "task"),
+                Err(error) => return storage_error(id, error),
+            };
+            let Some(project_id) = task.project_id else {
+                return invalid(id, "task must belong to a project before verification");
+            };
+            if let Err(error) = ensure_default_commands(state.storage(), project_id) {
+                return invalid(id, error);
+            }
             match repository.create_run(input.task_id, &input.kinds, "manual", None, LOCAL_ACTOR) {
                 Ok(mutation) => {
                     emit_mutation(&state, "created", &mutation);
@@ -376,15 +388,22 @@ fn mutate_run(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::verification::NoopVerificationRunner;
     use retcon_storage::{NewProject, NewTask};
+
+    fn test_state(path: &std::path::Path) -> CoreState {
+        CoreState::new_with_verification_runner(path, Arc::new(NoopVerificationRunner)).unwrap()
+    }
 
     #[tokio::test]
     async fn rpc_flow_persists_streams_as_bounded_artifacts() {
         let directory = tempfile::tempdir().unwrap();
-        let state = CoreState::new(directory.path()).unwrap();
+        let state = test_state(directory.path());
         let project = state
             .storage()
             .database()
@@ -472,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_configuration_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
-        let state = CoreState::new(directory.path()).unwrap();
+        let state = test_state(directory.path());
         let response = handle(
             state,
             Request {
@@ -483,5 +502,235 @@ mod tests {
         )
         .await;
         assert!(response.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn detected_defaults_do_not_replace_project_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_state(directory.path());
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&NewProject::new("Configured verification"))
+            .unwrap();
+        let configured = handle(
+            state.clone(),
+            Request {
+                id: 20,
+                method: "verification.commands.configure".into(),
+                params: json!({
+                    "projectId": project.id,
+                    "commands": [{
+                        "key": "project-test-override",
+                        "kind": "test",
+                        "command": "cargo test --lib",
+                        "required": true,
+                        "enabled": true
+                    }]
+                }),
+            },
+        )
+        .await;
+        assert!(configured.error.is_none());
+
+        let listed = handle(
+            state,
+            Request {
+                id: 21,
+                method: "verification.commands.list".into(),
+                params: json!({"projectId": project.id}),
+            },
+        )
+        .await;
+        let commands = listed.result.unwrap()["commands"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["key"], "project-test-override");
+        assert_eq!(commands[0]["command"], "cargo test --lib");
+    }
+
+    #[tokio::test]
+    async fn detected_run_persists_evidence_and_passing_rerun_clears_completion_blocker() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"verification-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("src/lib.rs"),
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn completion_gate() {
+        assert!(std::path::Path::new("pass.marker").exists());
+    }
+}
+"#,
+        )
+        .unwrap();
+        let state = CoreState::new(&directory.path().join("data")).unwrap();
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&NewProject::new("Detected verification"))
+            .unwrap();
+        let canonical = project_root
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        state
+            .storage()
+            .database()
+            .projects()
+            .add_location(project.id, &canonical, None)
+            .unwrap();
+        let mut new_task = NewTask::new("Gate completion");
+        new_task.project_id = Some(project.id);
+        let task = state
+            .storage()
+            .database()
+            .tasks()
+            .create(&new_task)
+            .unwrap();
+
+        let detected = handle(
+            state.clone(),
+            Request {
+                id: 10,
+                method: "verification.commands.list".into(),
+                params: json!({"projectId": project.id}),
+            },
+        )
+        .await;
+        assert!(detected.error.is_none());
+        assert!(
+            detected.result.unwrap()["commands"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 5
+        );
+
+        let created = handle(
+            state.clone(),
+            Request {
+                id: 11,
+                method: "verification.create".into(),
+                params: json!({"taskId": task.id}),
+            },
+        )
+        .await;
+        let first_run_id = created.result.unwrap()["verification"]["run"]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        assert!(
+            handle(
+                state.clone(),
+                Request {
+                    id: 12,
+                    method: "verification.start".into(),
+                    params: json!({"runId": first_run_id}),
+                },
+            )
+            .await
+            .error
+            .is_none()
+        );
+        let failed = wait_for_terminal_run(&state, first_run_id).await;
+        assert_eq!(failed.run.status, "failed");
+        assert!(
+            failed
+                .results
+                .iter()
+                .any(|result| result.status == "failed")
+        );
+        assert!(!failed.artifacts.is_empty());
+        assert!(
+            state
+                .storage()
+                .database()
+                .task_planning()
+                .set_task_status(task.id, "completed")
+                .is_err()
+        );
+        let report = state
+            .storage()
+            .database()
+            .verification()
+            .report(first_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.status, "failed");
+        assert!(report.tests["resultCount"].as_u64().unwrap() > 0);
+
+        std::fs::write(project_root.join("pass.marker"), "pass").unwrap();
+        let rerun = handle(
+            state.clone(),
+            Request {
+                id: 13,
+                method: "verification.rerun".into(),
+                params: json!({"runId": first_run_id}),
+            },
+        )
+        .await;
+        let second_run_id = rerun.result.unwrap()["verification"]["run"]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        assert!(
+            handle(
+                state.clone(),
+                Request {
+                    id: 14,
+                    method: "verification.start".into(),
+                    params: json!({"runId": second_run_id}),
+                },
+            )
+            .await
+            .error
+            .is_none()
+        );
+        let passed = wait_for_terminal_run(&state, second_run_id).await;
+        assert_eq!(passed.run.status, "passed");
+        assert!(passed.gates.iter().all(|gate| gate.status == "passed"));
+        assert!(
+            state
+                .storage()
+                .database()
+                .task_planning()
+                .set_task_status(task.id, "completed")
+                .unwrap()
+        );
+    }
+
+    async fn wait_for_terminal_run(
+        state: &CoreState,
+        run_id: Uuid,
+    ) -> retcon_storage::VerificationRunDetails {
+        for _ in 0..600 {
+            let details = state
+                .storage()
+                .database()
+                .verification()
+                .get(run_id)
+                .unwrap()
+                .unwrap();
+            if !matches!(details.run.status.as_str(), "queued" | "running") {
+                return details;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("verification run did not finish within 60 seconds")
     }
 }

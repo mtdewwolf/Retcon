@@ -717,6 +717,18 @@ impl ProjectRepository<'_> {
         })
     }
 
+    /// Return the most recently seen repository root for a project.
+    pub fn primary_location_path(&self, project_id: Uuid) -> Result<Option<String>> {
+        self.0.read(|db| {
+            db.query_row(
+                "SELECT path FROM repository_locations WHERE project_id=?1 ORDER BY last_seen_at DESC,created_at DESC LIMIT 1",
+                [project_id.as_bytes()],
+                |row| row.get(0),
+            )
+            .optional()
+        })
+    }
+
     /// Associate a repository location with a project. Reopening an existing path is idempotent.
     pub fn add_location(
         &self,

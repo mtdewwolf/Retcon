@@ -26,6 +26,7 @@ retcon-browser = { path = "crates/retcon-browser" }
 retcon-diagnostics = { path = "crates/retcon-diagnostics" }
 retcon-updater = { path = "crates/retcon-updater" }
 retcon-platform = { path = "crates/retcon-platform" }
+retcon-verification = { path = "crates/retcon-verification" }
 
 # External
 fs2 = "0.4.3"
@@ -38,6 +39,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+shell-words = "1"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

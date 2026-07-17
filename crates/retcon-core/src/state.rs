@@ -15,7 +15,7 @@ use crate::session_rpc::SessionRegistry;
 use crate::spikes::agent::AgentRegistry;
 use crate::spikes::browser::BrowserHandle;
 use crate::spikes::terminal::TerminalRegistry;
-use crate::verification::{NoopVerificationRunner, VerificationRunner};
+use crate::verification::{DurableVerificationRunner, VerificationRunner};
 use retcon_filesystem::FilesystemHandle;
 use retcon_permissions::ApprovalEngine;
 use retcon_storage::{RecoveryReport, Storage};
@@ -44,15 +44,24 @@ struct Inner {
 
 impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
-        Self::new_with_verification_runner(data_dir, Arc::new(NoopVerificationRunner))
+        let storage = Storage::open(data_dir)?;
+        let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
+        Self::from_storage(storage, verification_runner)
     }
 
     pub fn new_with_verification_runner(
         data_dir: &std::path::Path,
         verification_runner: Arc<dyn VerificationRunner>,
     ) -> Result<Self, CoreError> {
-        let (shutdown, _) = watch::channel(false);
         let storage = Storage::open(data_dir)?;
+        Self::from_storage(storage, verification_runner)
+    }
+
+    fn from_storage(
+        storage: Storage,
+        verification_runner: Arc<dyn VerificationRunner>,
+    ) -> Result<Self, CoreError> {
+        let (shutdown, _) = watch::channel(false);
         let schema_version = storage.database().schema_version().ok();
         let recovery = storage.startup_recovery().clone();
         let permissions = ApprovalEngine::new(
