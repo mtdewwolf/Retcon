@@ -21,6 +21,7 @@ const FEATURES = [
   "video",
   "takeover",
   "cancel",
+  "verification",
 ];
 type RpcRequest = { id: number; method: string; params?: Record<string, unknown> };
 
@@ -219,6 +220,7 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
     pending.add(task);
     void task.finally(() => pending.delete(task));
   }
+  lines.close();
   for (const controller of active.values()) controller.abort();
   await Promise.allSettled([...pending]);
 }
