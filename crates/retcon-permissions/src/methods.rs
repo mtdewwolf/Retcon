@@ -29,6 +29,10 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
         "task.acceptance.override"
         | "task.acceptance.delete"
         | "verification.commands.configure" => Some(ApprovalCategory::System),
+        "devServer.start" | "devServer.stop" | "devServer.restart" => {
+            Some(ApprovalCategory::Terminal)
+        }
+        "devServer.configure" | "devServer.autoStart.set" => Some(ApprovalCategory::System),
         _ => None,
     }
 }
@@ -65,6 +69,11 @@ pub fn method_summary(method: &str) -> &'static str {
         "verification.start" => "Start project verification commands",
         "verification.rerun" => "Rerun project verification commands",
         "verification.commands.configure" => "Change project verification requirements",
+        "devServer.start" => "Start a development server",
+        "devServer.stop" => "Stop a development server",
+        "devServer.restart" => "Restart a development server",
+        "devServer.configure" => "Change development server settings or environment",
+        "devServer.autoStart.set" => "Change development server auto-start settings",
         _ => "Perform a protected operation",
     }
 }

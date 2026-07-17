@@ -101,6 +101,11 @@ mod tests {
             "verification.start",
             "verification.rerun",
             "verification.commands.configure",
+            "devServer.start",
+            "devServer.stop",
+            "devServer.restart",
+            "devServer.configure",
+            "devServer.autoStart.set",
         ] {
             assert_eq!(
                 check_rpc_method_with_bypass(method, true),
@@ -251,6 +256,22 @@ mod tests {
             check_rpc_method_with_bypass("verification.commands.configure", false),
             RpcPermission::Denied { .. }
         ));
+    }
+
+    #[test]
+    fn deny_development_server_process_and_environment_changes_by_default() {
+        for method in [
+            "devServer.start",
+            "devServer.stop",
+            "devServer.restart",
+            "devServer.configure",
+            "devServer.autoStart.set",
+        ] {
+            assert!(matches!(
+                check_rpc_method_with_bypass(method, false),
+                RpcPermission::Denied { .. }
+            ));
+        }
     }
 
     #[test]

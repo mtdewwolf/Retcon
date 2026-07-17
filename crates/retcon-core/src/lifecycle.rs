@@ -323,7 +323,7 @@ mod tests {
         let shutdown = read_rpc_response(&mut lines).await;
         assert_eq!(health["result"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["status"], "healthy");
-        assert_eq!(health["result"]["storage"]["schema_version"], 7);
+        assert_eq!(health["result"]["storage"]["schema_version"], 8);
         assert_eq!(shutdown["result"]["accepted"], true);
 
         runtime.wait_for_shutdown_signal().await.unwrap();

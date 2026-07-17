@@ -6,7 +6,7 @@
 
 #![allow(missing_docs)]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -298,6 +298,56 @@ const fn default_true() -> bool {
 
 fn default_object() -> Value {
     serde_json::json!({})
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevServerConfigureParams {
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    pub project_id: Uuid,
+    #[serde(default)]
+    pub worktree_id: Option<Uuid>,
+    pub name: String,
+    pub command: String,
+    pub cwd: String,
+    #[serde(default = "default_dev_server_host")]
+    pub host: String,
+    #[serde(default)]
+    pub preferred_port: Option<i64>,
+    #[serde(default)]
+    pub auto_start: bool,
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevServerStartParams {
+    pub config_id: Uuid,
+    #[serde(default)]
+    pub task_id: Option<Uuid>,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevServerPortParams {
+    pub config_id: Uuid,
+    #[serde(default)]
+    pub task_id: Option<Uuid>,
+    pub port: i64,
+    #[serde(default)]
+    pub approval_id: Option<Uuid>,
+}
+
+fn default_dev_server_host() -> String {
+    "127.0.0.1".into()
 }
 
 fn default_step_status() -> String {
