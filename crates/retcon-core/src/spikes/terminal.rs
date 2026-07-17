@@ -20,6 +20,8 @@ use crate::state::CoreState;
 const OUTPUT_COALESCE_MS: u64 = 50;
 const OUTPUT_COALESCE_BYTES: usize = 4_096;
 const SCROLLBACK_FLUSH_BYTES: usize = 16_384;
+/// Cap live in-memory scrollback so long-running shells cannot OOM the core.
+const MAX_SCROLLBACK_BYTES: usize = 256 * 1024;
 
 struct LiveTerminal {
     pty: Arc<PtySession>,
@@ -34,7 +36,7 @@ struct LiveTerminal {
 #[derive(Default)]
 pub struct TerminalRegistry {
     next: AtomicU64,
-    map: Mutex<HashMap<u64, LiveTerminal>>,
+    map: Mutex<HashMap<u64, Arc<LiveTerminal>>>,
     shells: Mutex<Option<Vec<Value>>>,
 }
 
@@ -189,14 +191,14 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
         }
     };
 
-    let live = LiveTerminal {
+    let live = Arc::new(LiveTerminal {
         pty: Arc::clone(&session),
         session_id: session_uuid,
         shell: shell.clone(),
         cwd: cwd.clone(),
         scrollback: Mutex::new(String::new()),
         tracker: Mutex::new(CommandLineTracker::new()),
-    };
+    });
     if let Ok(mut map) = state.terminals().map.lock() {
         map.insert(terminal_id, live);
     }
@@ -380,9 +382,9 @@ fn with_session(
         .map
         .lock()
         .ok()
-        .and_then(|m| m.get(&terminal_id).cloned());
+        .and_then(|m| m.get(&terminal_id).map(Arc::clone));
     match terminal {
-        Some(terminal) => match f(&terminal) {
+        Some(terminal) => match f(terminal.as_ref()) {
             Ok(()) => Response::ok(id, json!({})),
             Err(e) => fail(
                 id,
@@ -406,18 +408,32 @@ fn append_scrollback(state: &CoreState, terminal_id: u64, chunk: &str) {
         .map
         .lock()
         .ok()
-        .and_then(|map| map.get(&terminal_id).cloned())
+        .and_then(|map| map.get(&terminal_id).map(Arc::clone))
     else {
         return;
     };
     let mut should_flush = false;
     if let Ok(mut buffer) = terminal.scrollback.lock() {
         buffer.push_str(chunk);
+        truncate_scrollback_front(&mut buffer);
         should_flush = buffer.len() >= SCROLLBACK_FLUSH_BYTES;
     }
     if should_flush {
         flush_scrollback(state, &terminal);
     }
+}
+
+fn truncate_scrollback_front(buffer: &mut String) {
+    if buffer.len() <= MAX_SCROLLBACK_BYTES {
+        return;
+    }
+    let excess = buffer.len() - MAX_SCROLLBACK_BYTES;
+    let trim_at = buffer
+        .char_indices()
+        .find(|(index, _)| *index >= excess)
+        .map(|(index, _)| index)
+        .unwrap_or(excess);
+    buffer.drain(..trim_at);
 }
 
 fn flush_scrollback(state: &CoreState, terminal: &LiveTerminal) {
@@ -464,29 +480,6 @@ fn session_json(session: retcon_storage::TerminalSession) -> Value {
     })
 }
 
-impl Clone for LiveTerminal {
-    fn clone(&self) -> Self {
-        Self {
-            pty: Arc::clone(&self.pty),
-            session_id: self.session_id,
-            shell: self.shell.clone(),
-            cwd: self.cwd.clone(),
-            scrollback: Mutex::new(
-                self.scrollback
-                    .lock()
-                    .map(|buffer| buffer.clone())
-                    .unwrap_or_default(),
-            ),
-            tracker: Mutex::new(
-                self.tracker
-                    .lock()
-                    .map(|tracker| tracker.clone())
-                    .unwrap_or_default(),
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +499,13 @@ mod tests {
         let value = session_json(session);
         assert_eq!(value["status"], "ended");
         assert!(value["sessionId"].is_string());
+    }
+
+    #[test]
+    fn truncate_scrollback_keeps_tail_within_cap() {
+        let mut buffer = "a".repeat(MAX_SCROLLBACK_BYTES + 64);
+        truncate_scrollback_front(&mut buffer);
+        assert_eq!(buffer.len(), MAX_SCROLLBACK_BYTES);
+        assert!(buffer.chars().all(|character| character == 'a'));
     }
 }

@@ -136,13 +136,19 @@ impl PtySession {
 
     /// Kill the shell process; ConPTY teardown takes the process tree with it.
     pub fn kill(&self) {
+        #[cfg(windows)]
+        let process_id = self
+            .child
+            .lock()
+            .ok()
+            .and_then(|child| child.process_id());
+        #[cfg(windows)]
+        if let Some(process_id) = process_id {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &process_id.to_string(), "/T", "/F"])
+                .output();
+        }
         if let Ok(mut child) = self.child.lock() {
-            #[cfg(windows)]
-            if let Some(process_id) = child.process_id() {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/PID", &process_id.to_string(), "/T", "/F"])
-                    .output();
-            }
             let _ = child.kill();
         }
     }
