@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import '../core_client.dart';
@@ -12,6 +13,9 @@ abstract interface class BrowserRpcClient {
     String method, {
     Map<String, dynamic> params = const {},
   });
+
+  Future<String?> readArtifact(String hash, {required int maxBytes});
+  String? artifactPath(String hash);
 }
 
 class CoreBrowserRpcClient implements BrowserRpcClient {
@@ -26,54 +30,86 @@ class CoreBrowserRpcClient implements BrowserRpcClient {
     String method, {
     Map<String, dynamic> params = const {},
   }) => _core.request(method, params: params);
-}
 
-String? resolveBrowserServiceDir({Directory? from}) {
-  var dir = from ?? Directory.current;
-  for (var i = 0; i < 8; i++) {
-    final candidate = Directory(
-      '${dir.path}${Platform.pathSeparator}apps'
-      '${Platform.pathSeparator}browser-service',
-    );
-    if (candidate.existsSync()) return candidate.path;
-    final parent = dir.parent;
-    if (parent.path == dir.path) break;
-    dir = parent;
+  @override
+  Future<String?> readArtifact(String hash, {required int maxBytes}) async {
+    final path = artifactPath(hash);
+    if (path == null || maxBytes <= 0) return null;
+    try {
+      final handle = await File(path).open();
+      try {
+        final length = await handle.length();
+        final bytes = await handle.read(maxBytes);
+        final text = utf8.decode(bytes, allowMalformed: true);
+        return length > bytes.length ? '$text\n… [artifact truncated]' : text;
+      } finally {
+        await handle.close();
+      }
+    } on FileSystemException {
+      return null;
+    }
   }
-  return null;
+
+  @override
+  String? artifactPath(String hash) {
+    if (!_artifactHash.hasMatch(hash)) return null;
+    final separator = Platform.pathSeparator;
+    return '${_core.dataDirectory.path}${separator}artifacts${separator}sha256'
+        '$separator${hash.substring(0, 2)}$separator${hash.substring(2)}';
+  }
 }
 
 class CoreBrowserRepository implements BrowserRepository {
-  CoreBrowserRepository(this._rpc, {String? serviceDir})
-    : _serviceDir = serviceDir ?? resolveBrowserServiceDir() ?? '' {
-    _subscription = _rpc.events.listen(_onEvent);
+  CoreBrowserRepository(
+    this._rpc, {
+    required this.projectId,
+    this.taskId,
+    this.maxArtifactBytes = 64 * 1024,
+  }) {
+    _subscription = _rpc.events.where(_isRefreshEvent).listen(_onEvent);
   }
 
   factory CoreBrowserRepository.fromCore(
     CoreClient core, {
-    String? serviceDir,
-  }) =>
-      CoreBrowserRepository(CoreBrowserRpcClient(core), serviceDir: serviceDir);
+    required String projectId,
+    String? taskId,
+  }) => CoreBrowserRepository(
+    CoreBrowserRpcClient(core),
+    projectId: projectId,
+    taskId: taskId,
+  );
 
-  static const maxEvidenceEntries = 200;
+  static const maxEvidenceEntries = 1000;
   final BrowserRpcClient _rpc;
-  final String _serviceDir;
+  final String projectId;
+  final String? taskId;
+  final int maxArtifactBytes;
   final _events = StreamController<BrowserSnapshot>.broadcast(sync: true);
   StreamSubscription<Map<String, dynamic>>? _subscription;
   BrowserSnapshot _snapshot = const BrowserSnapshot();
-  bool _serviceRunning = false;
-  int _sessionSequence = 0;
-  int _artifactSequence = 0;
+  String? _sessionId;
+  String? _activeTabId;
+  String? _devServerInstanceId;
+  Map<String, dynamic> _previewMetadata = const {};
+  bool _openedHeaded = false;
+  int _recoveryCount = 0;
+  final Map<String, bool> _canGoBack = {};
+  final Map<String, bool> _canGoForward = {};
 
   @override
   BrowserCapabilities get capabilities => const BrowserCapabilities(
-    multipleTabs: false,
-    historyNavigation: false,
-    reloadAndStop: false,
+    multipleTabs: true,
+    historyNavigation: true,
+    reload: true,
+    stopLoading: false,
     viewportAndDevice: false,
-    accessibility: false,
+    screenshots: true,
+    consoleAndNetwork: true,
+    accessibility: true,
     performance: false,
-    headedTakeover: false,
+    automation: true,
+    headedTakeover: true,
+    cookiesAndStorage: false,
   );
 
   @override
@@ -81,66 +117,73 @@ class CoreBrowserRepository implements BrowserRepository {
 
   @override
   Future<BrowserSnapshot> load() async {
-    if (!_serviceRunning) return _snapshot;
-    return _refreshStatus();
+    final response = await _rpc.request(
+      'browser.session.list',
+      params: {'projectId': projectId},
+    );
+    final sessions = _maps(response['sessions']);
+    final active = sessions.where((session) {
+      final status = session['status']?.toString();
+      return status == 'running' ||
+          status == 'starting' ||
+          status == 'orphaned';
+    }).firstOrNull;
+    if (active == null) return _emit(const BrowserSnapshot());
+    _sessionId = active['id']?.toString();
+    _devServerInstanceId = active['devServerInstanceId']?.toString();
+    return _refreshSession();
   }
 
   @override
-  Future<BrowserSnapshot> launch() async {
-    if (_serviceDir.isEmpty) {
-      throw StateError(
-        'The apps/browser-service directory could not be located.',
-      );
-    }
-    await _rpc.request('browser.startService', params: {'dir': _serviceDir});
-    _serviceRunning = true;
-    final launched = await _call('browser.launch');
-    _sessionSequence++;
-    final profile = launched['profile']?.toString();
-    final session = BrowserSession(
-      id: 'core-browser-$_sessionSequence',
-      profileId: profile == null || profile.isEmpty
-          ? 'ephemeral-profile-$_sessionSequence'
-          : _profileLabel(profile),
-      status: BrowserRuntimeStatus.running,
-      tabs: const [
-        BrowserTab(id: 'core-tab', title: 'New tab', url: 'about:blank'),
-      ],
-      activeTabId: 'core-tab',
-      viewport: const BrowserViewport(width: 1280, height: 720),
+  Future<BrowserSnapshot> launch({
+    String? taskId,
+    String? devServerInstanceId,
+  }) async {
+    final response = await _rpc.request(
+      'browser.session.start',
+      params: {
+        'projectId': projectId,
+        if (_validUuid(taskId ?? this.taskId)) 'taskId': taskId ?? this.taskId,
+        if (_validUuid(devServerInstanceId))
+          'devServerInstanceId': devServerInstanceId,
+        'persistentProfile': false,
+        'networkPolicy': 'loopback',
+      },
     );
-    return _emit(BrowserSnapshot(session: session));
+    final session = _map(response['session']);
+    _sessionId = session['id']?.toString();
+    _devServerInstanceId = session['devServerInstanceId']?.toString();
+    final initial = _map(response['initialTab']);
+    if (initial.isNotEmpty) _activeTabId = initial['id']?.toString();
+    return _refreshSession();
   }
 
   @override
   Future<BrowserSnapshot> close() async {
-    if (_serviceRunning) {
-      try {
-        await _call('browser.close');
-      } finally {
-        await _rpc.request('browser.stopService');
-      }
-    }
-    _serviceRunning = false;
+    final sessionId = _requireSessionId();
+    await _rpc.request(
+      'browser.session.stop',
+      params: {'sessionId': sessionId},
+    );
+    _sessionId = null;
+    _activeTabId = null;
+    _openedHeaded = false;
     return _emit(_snapshot.copyWith(clearSession: true));
   }
 
   @override
   Future<BrowserSnapshot> recover() async {
     final previous = _snapshot;
-    if (_serviceRunning) {
-      try {
-        await _rpc.request('browser.stopService');
-      } on Object {
-        // The child may already have exited.
-      }
-      _serviceRunning = false;
-    }
-    final recoveryCount = (_snapshot.session?.recoveryCount ?? 0) + 1;
-    final recovered = await launch();
+    final binding = _devServerInstanceId;
+    _recoveryCount++;
+    _sessionId = null;
+    final recovered = await launch(
+      taskId: taskId,
+      devServerInstanceId: binding,
+    );
     return _emit(
       recovered.copyWith(
-        session: recovered.session?.copyWith(recoveryCount: recoveryCount),
+        session: recovered.session?.copyWith(recoveryCount: _recoveryCount),
         evidence: previous.evidence,
         artifacts: previous.artifacts,
         screenshotPath: previous.screenshotPath,
@@ -149,140 +192,132 @@ class CoreBrowserRepository implements BrowserRepository {
   }
 
   @override
+  Future<BrowserSnapshot> newTab({String url = 'about:blank'}) async {
+    final response = await _operation('browser.tab.open', {'url': url});
+    final tab = _map(response['tab']);
+    if (tab.isNotEmpty) _activeTabId = tab['id']?.toString();
+    return _refreshSession();
+  }
+
+  @override
+  Future<BrowserSnapshot> closeTab(String tabId) async {
+    await _operation('browser.tab.close', {'tabId': tabId});
+    if (_activeTabId == tabId) _activeTabId = null;
+    return _refreshSession();
+  }
+
+  @override
+  Future<BrowserSnapshot> selectTab(String tabId) async {
+    await _operation('browser.tab.activate', {'tabId': tabId});
+    _activeTabId = tabId;
+    return _refreshSession();
+  }
+
+  @override
   Future<BrowserSnapshot> navigate(
     String url, {
     Map<String, dynamic> metadata = const {},
   }) async {
-    if (_snapshot.session == null) await launch();
-    final parsed = Uri.tryParse(url.trim());
-    if (parsed == null ||
-        (parsed.scheme != 'http' && parsed.scheme != 'https') ||
-        parsed.host.isEmpty) {
-      throw ArgumentError('Only absolute HTTP(S) URLs are allowed.');
+    if (_sessionId == null) {
+      final binding = metadata['devServerInstanceId']?.toString();
+      await launch(devServerInstanceId: binding);
     }
-    final result = await _call('browser.navigate', {'url': parsed.toString()});
-    final session = _snapshot.session!;
-    final tab = session.activeTab!.copyWith(
-      url: maskBrowserText(result['url']?.toString() ?? parsed.toString()),
-      title: result['title']?.toString() ?? parsed.host,
-      status: BrowserTabStatus.ready,
-    );
-    final changed = _snapshot.copyWith(
-      session: session.copyWith(
-        tabs: [tab],
-        previewMetadata: maskBrowserMap(metadata),
-      ),
-    );
-    _snapshot = changed;
-    return refreshEvidence();
+    if (_activeTabId == null) await newTab();
+    final tabId = _requireTabId();
+    await _operation('browser.navigate', {'tabId': tabId, 'url': url});
+    _canGoBack[tabId] = true;
+    _canGoForward[tabId] = false;
+    _previewMetadata = maskBrowserMap(metadata);
+    return _refreshSession();
   }
 
   @override
+  Future<BrowserSnapshot> back() async {
+    final tabId = _requireTabId();
+    await _operation('browser.back', {'tabId': tabId});
+    _canGoForward[tabId] = true;
+    return _refreshSession();
+  }
+
+  @override
+  Future<BrowserSnapshot> forward() async {
+    final tabId = _requireTabId();
+    await _operation('browser.forward', {'tabId': tabId});
+    return _refreshSession();
+  }
+
+  @override
+  Future<BrowserSnapshot> reload() async {
+    await _operation('browser.reload', {'tabId': _requireTabId()});
+    return _refreshSession();
+  }
+
+  @override
+  Future<BrowserSnapshot> stopLoading() => Future.error(
+    UnsupportedError('The durable Core contract does not expose stop loading.'),
+  );
+
+  @override
+  Future<BrowserSnapshot> setViewport(BrowserViewport viewport) => Future.error(
+    UnsupportedError(
+      'The durable Core contract does not expose device emulation.',
+    ),
+  );
+
+  @override
   Future<BrowserSnapshot> captureScreenshot({bool fullPage = false}) async {
-    _requireSession();
-    _artifactSequence++;
-    final separator = Platform.pathSeparator;
-    final path =
-        '${Directory.systemTemp.path}${separator}retcon-browser-$_artifactSequence.png';
-    final result = await _call('browser.screenshot', {
-      'path': path,
+    final response = await _operation('browser.observation.screenshot', {
+      'tabId': _requireTabId(),
       'fullPage': fullPage,
       'type': 'png',
     });
-    final safePath = result['path']?.toString() ?? path;
-    final artifact = BrowserArtifact(
-      id: 'core-browser-artifact-$_artifactSequence',
-      label: fullPage ? 'Full-page screenshot' : 'Viewport screenshot',
-      path: safePath,
-      createdAt: DateTime.now(),
-      metadata: {'fullPage': fullPage},
-    );
-    return _emit(
-      _snapshot.copyWith(
-        screenshotPath: safePath,
-        artifacts: [..._snapshot.artifacts, artifact],
-        evidence: _bounded([
-          ..._snapshot.evidence,
-          BrowserEvidenceEntry(
-            kind: BrowserEvidenceKind.screenshots,
-            summary: artifact.label,
-            createdAt: artifact.createdAt,
-            details: {'path': safePath},
-          ),
-        ]),
-      ),
-    );
+    await _mergeOperationArtifacts(response);
+    return _refreshObservations();
   }
 
   @override
   Future<BrowserSnapshot> refreshEvidence() async {
-    _requireSession();
-    final result = await _call('browser.logs', {
-      'offset': 0,
-      'limit': maxEvidenceEntries,
-    });
-    final entries = <BrowserEvidenceEntry>[];
-    for (final item in _maps(result['console'])) {
-      entries.add(
-        BrowserEvidenceEntry(
-          kind: item['type'] == 'error'
-              ? BrowserEvidenceKind.errors
-              : BrowserEvidenceKind.console,
-          summary: maskBrowserText(item['text']?.toString() ?? item.toString()),
-          createdAt: _date(item['timestamp']) ?? DateTime.now(),
-          level: item['type']?.toString() ?? 'info',
-          details: maskBrowserMap(item),
-        ),
-      );
+    final tabId = _activeTabId;
+    try {
+      await _operation('browser.observation.logs', {'tabId': ?tabId});
+    } on Object {
+      // Durable observations already recorded remain available.
     }
-    for (final item in _maps(result['network'])) {
-      entries.add(
-        BrowserEvidenceEntry(
-          kind: BrowserEvidenceKind.network,
-          summary: maskBrowserText(
-            '${item['method'] ?? item['status'] ?? ''} ${item['url'] ?? ''}',
-          ).trim(),
-          createdAt: DateTime.now(),
-          details: maskBrowserMap(item),
-        ),
-      );
+    try {
+      await _operation('browser.observation.snapshot', {'tabId': ?tabId});
+    } on Object {
+      // Accessibility snapshots depend on the installed service feature set.
     }
-    return _emit(_snapshot.copyWith(evidence: _bounded(entries)));
+    return _refreshObservations();
   }
 
   @override
   Future<BrowserSnapshot> performAction(BrowserAutomationAction action) async {
-    _requireSession();
-    final selector = action.selector.trim();
-    if (selector.isEmpty || selector.length > 500) {
-      throw ArgumentError('Use a non-empty selector under 500 characters.');
-    }
     final actionName = switch (action.kind) {
       BrowserActionKind.readText => 'text',
       _ => action.kind.name,
     };
-    final result = await _call('browser.action', {
+    await _operation('browser.automation.action', {
+      'tabId': _requireTabId(),
       'action': actionName,
-      'selector': selector,
+      'selector': action.selector,
       if (action.value != null) 'value': action.value,
     });
-    final summary = action.kind == BrowserActionKind.fill
-        ? 'Filled $selector with a masked value'
-        : '${action.kind.name} completed on $selector';
     return _emit(
       _snapshot.copyWith(
         evidence: _bounded([
           ..._snapshot.evidence,
           BrowserEvidenceEntry(
             kind: BrowserEvidenceKind.artifacts,
-            summary: summary,
+            summary: action.kind == BrowserActionKind.fill
+                ? 'Filled ${action.selector} with a masked value'
+                : '${action.kind.name} completed on ${action.selector}',
             createdAt: DateTime.now(),
-            details: maskBrowserMap({
+            details: {
               'action': actionName,
-              'selector': selector,
+              'selector': action.selector,
               if (action.kind == BrowserActionKind.fill) 'value': maskedValue,
-              if (action.kind != BrowserActionKind.fill) 'result': result,
-            }),
+            },
           ),
         ]),
       ),
@@ -290,139 +325,235 @@ class CoreBrowserRepository implements BrowserRepository {
   }
 
   @override
-  Future<BrowserSnapshot> newTab({String url = 'about:blank'}) =>
-      _unsupported('Multiple tabs');
-
-  @override
-  Future<BrowserSnapshot> closeTab(String tabId) =>
-      _unsupported('Multiple tabs');
-
-  @override
-  Future<BrowserSnapshot> selectTab(String tabId) async => _snapshot;
-
-  @override
-  Future<BrowserSnapshot> back() => _unsupported('History navigation');
-
-  @override
-  Future<BrowserSnapshot> forward() => _unsupported('History navigation');
-
-  @override
-  Future<BrowserSnapshot> reload() => _unsupported('Reload');
-
-  @override
-  Future<BrowserSnapshot> stopLoading() => _unsupported('Stop loading');
-
-  @override
-  Future<BrowserSnapshot> setViewport(BrowserViewport viewport) =>
-      _unsupported('Viewport emulation');
-
-  @override
-  Future<BrowserSnapshot> pauseAutomation({required String reason}) =>
-      _unsupported('Manual takeover');
-
-  @override
-  Future<BrowserSnapshot> openHeadedTakeover() =>
-      _unsupported('Headed takeover');
-
-  @override
-  Future<BrowserSnapshot> resumeAutomation() => _unsupported('Manual takeover');
-
-  Future<BrowserSnapshot> _refreshStatus() async {
-    final status = await _call('browser.status');
-    final session = _snapshot.session;
-    if (session == null) return _snapshot;
-    final url = status['url']?.toString();
-    final active = session.activeTab;
-    final updated = active == null || url == null
-        ? session
-        : session.copyWith(tabs: [active.copyWith(url: maskBrowserText(url))]);
-    return _emit(_snapshot.copyWith(session: updated));
+  Future<BrowserSnapshot> pauseAutomation({required String reason}) async {
+    if (_snapshot.session?.automationPaused != true) {
+      await _rpc.request(
+        'browser.takeover.start',
+        params: {'sessionId': _requireSessionId(), 'reason': reason},
+      );
+    }
+    return _refreshSession();
   }
 
-  Future<Map<String, dynamic>> _call(
-    String method, [
-    Map<String, dynamic> params = const {},
-  ]) => _rpc.request(
-    'browser.call',
-    params: {'method': method, 'params': params},
+  @override
+  Future<BrowserSnapshot> openHeadedTakeover() async {
+    _openedHeaded = true;
+    if (_snapshot.session?.automationPaused != true) {
+      await _rpc.request(
+        'browser.takeover.start',
+        params: {
+          'sessionId': _requireSessionId(),
+          'reason': 'Manual headed takeover',
+        },
+      );
+    }
+    return _refreshSession();
+  }
+
+  @override
+  Future<BrowserSnapshot> resumeAutomation() async {
+    await _rpc.request(
+      'browser.takeover.stop',
+      params: {'sessionId': _requireSessionId()},
+    );
+    _openedHeaded = false;
+    return _refreshSession();
+  }
+
+  Future<Map<String, dynamic>> _operation(
+    String method,
+    Map<String, dynamic> params,
+  ) => _rpc.request(
+    method,
+    params: {'sessionId': _requireSessionId(), ...params},
   );
 
-  void _onEvent(Map<String, dynamic> wire) {
-    final envelope = _map(wire['event']).isEmpty ? wire : _map(wire['event']);
-    final kind = envelope['kind']?.toString();
-    if (kind == 'browser.serviceExited') {
-      _serviceRunning = false;
-      final session = _snapshot.session;
-      if (session != null) {
-        _emit(
-          _snapshot.copyWith(
-            session: session.copyWith(
-              status: BrowserRuntimeStatus.crashed,
-              automationPaused: true,
-              crashMessage: 'The browser service exited unexpectedly.',
-            ),
-          ),
-        );
-      }
-      return;
+  Future<BrowserSnapshot> _refreshSession() async {
+    final sessionId = _requireSessionId();
+    final status = await _rpc.request(
+      'browser.session.status',
+      params: {'sessionId': sessionId},
+    );
+    final historyResponse = await _rpc.request(
+      'browser.session.history',
+      params: {'sessionId': sessionId},
+    );
+    final sessionWire = _map(status['session']);
+    final tabsWire = _maps(status['tabs']);
+    final takeover = _map(status['takeover']);
+    final history = _maps(
+      historyResponse['events'],
+    ).map(_decodeHistory).toList();
+    final tabs = tabsWire.where((tab) => tab['status'] != 'closed').map((tab) {
+      final id = tab['id']?.toString() ?? '';
+      return BrowserTab(
+        id: id,
+        title: tab['title']?.toString() ?? 'New tab',
+        url: maskBrowserText(tab['url']?.toString() ?? 'about:blank'),
+        status: tab['status'] == 'open'
+            ? BrowserTabStatus.ready
+            : BrowserTabStatus.failed,
+        canGoBack: _canGoBack[id] == true,
+        canGoForward: _canGoForward[id] == true,
+      );
+    }).toList();
+    if (_activeTabId == null || !tabs.any((tab) => tab.id == _activeTabId)) {
+      _activeTabId = tabs.firstOrNull?.id;
     }
-    if (kind != 'browser.event') return;
-    final outerPayload = _map(envelope['payload']);
-    final inner = _map(outerPayload['event']);
-    final type = inner['type']?.toString();
-    final payload = _map(inner['payload']);
-    if (type == null) return;
-    if (type == 'browser.crashed') {
-      final session = _snapshot.session;
-      if (session != null) {
-        _emit(
-          _snapshot.copyWith(
-            session: session.copyWith(
-              status: BrowserRuntimeStatus.crashed,
-              automationPaused: true,
-              crashMessage: 'The managed browser context crashed.',
-            ),
-          ),
-        );
-      }
-      return;
+    _devServerInstanceId = sessionWire['devServerInstanceId']?.toString();
+    final statusValue = _runtimeStatus(
+      sessionWire['status'],
+      takeover.isNotEmpty,
+    );
+    final intervals = _decodeTakeovers(history, takeover);
+    final session = BrowserSession(
+      id: sessionId,
+      profileId: sessionWire['profileId']?.toString() ?? 'isolated-profile',
+      status: statusValue,
+      tabs: tabs,
+      activeTabId: _activeTabId ?? '',
+      viewport:
+          _snapshot.session?.viewport ??
+          const BrowserViewport(width: 1280, height: 720),
+      headless: takeover.isEmpty || !_openedHeaded,
+      automationPaused: takeover.isNotEmpty,
+      crashMessage: sessionWire['failure']?.toString(),
+      recoveryCount: _recoveryCount,
+      previewMetadata: _previewMetadata,
+      takeoverHistory: intervals,
+      history: history,
+    );
+    _snapshot = _snapshot.copyWith(session: session);
+    return _refreshObservations();
+  }
+
+  Future<BrowserSnapshot> _refreshObservations() async {
+    final response = await _rpc.request(
+      'browser.observation.list',
+      params: {'sessionId': _requireSessionId()},
+    );
+    final evidence = <BrowserEvidenceEntry>[];
+    for (final item in _maps(response['console'])) {
+      evidence.add(_logEvidence(item, console: true));
     }
-    final evidenceKind = switch (type) {
-      'browser.console' when payload['type'] == 'error' =>
-        BrowserEvidenceKind.errors,
-      'browser.console' => BrowserEvidenceKind.console,
-      'browser.request' || 'browser.response' => BrowserEvidenceKind.network,
-      _ => BrowserEvidenceKind.artifacts,
-    };
-    _emit(
+    for (final item in _maps(response['network'])) {
+      evidence.add(_logEvidence(item, console: false));
+    }
+    final artifacts = <BrowserArtifact>[];
+    String? screenshotPath = _snapshot.screenshotPath;
+    for (final item in _maps(response['observations'])) {
+      final decoded = await _decodeObservation(item);
+      artifacts.add(decoded.$1);
+      evidence.add(decoded.$2);
+      if (item['kind'] == 'screenshot') screenshotPath = decoded.$1.path;
+    }
+    return _emit(
       _snapshot.copyWith(
-        evidence: _bounded([
-          ..._snapshot.evidence,
-          BrowserEvidenceEntry(
-            kind: evidenceKind,
-            summary: maskBrowserText(
-              payload['text']?.toString() ?? payload['url']?.toString() ?? type,
-            ),
-            createdAt: _date(payload['timestamp']) ?? DateTime.now(),
-            level: payload['type']?.toString() ?? 'info',
-            details: maskBrowserMap(payload),
-          ),
-        ]),
+        evidence: _bounded(evidence),
+        artifacts: artifacts,
+        screenshotPath: screenshotPath,
       ),
     );
   }
 
-  BrowserSession _requireSession() {
-    final session = _snapshot.session;
-    if (session == null) throw StateError('Start a browser session first.');
-    if (session.status == BrowserRuntimeStatus.crashed) {
-      throw StateError('Recover the browser session first.');
+  Future<void> _mergeOperationArtifacts(Map<String, dynamic> response) async {
+    for (final observation in _maps(response['artifacts'])) {
+      await _decodeObservation(observation);
     }
-    return session;
   }
 
-  Future<BrowserSnapshot> _unsupported(String feature) =>
-      Future.error(UnsupportedError('$feature is not exposed by Core yet.'));
+  Future<(BrowserArtifact, BrowserEvidenceEntry)> _decodeObservation(
+    Map<String, dynamic> item,
+  ) async {
+    final hash = item['artifactHash']?.toString() ?? '';
+    final mime = item['mimeType']?.toString() ?? 'application/octet-stream';
+    final kind = item['kind']?.toString() ?? 'artifact';
+    final metadata = maskBrowserMap(_map(item['metadata']));
+    if ((mime.startsWith('text/') || mime.contains('json')) &&
+        _artifactHash.hasMatch(hash)) {
+      final preview = await _rpc.readArtifact(hash, maxBytes: maxArtifactBytes);
+      if (preview != null) {
+        metadata['contentPreview'] = maskBrowserText(preview);
+      }
+    }
+    final path = _rpc.artifactPath(hash) ?? 'artifact:$hash';
+    final createdAt = _date(item['createdAt']) ?? DateTime.now();
+    final artifact = BrowserArtifact(
+      id: item['id']?.toString() ?? hash,
+      label: _artifactLabel(kind),
+      path: path,
+      createdAt: createdAt,
+      metadata: {
+        ...metadata,
+        'artifactHash': hash,
+        'mimeType': mime,
+        'sizeBytes': item['sizeBytes'],
+      },
+    );
+    final evidenceKind = switch (kind) {
+      'screenshot' => BrowserEvidenceKind.screenshots,
+      'snapshot' || 'accessibility' => BrowserEvidenceKind.accessibility,
+      'trace' => BrowserEvidenceKind.performance,
+      'logs' => BrowserEvidenceKind.artifacts,
+      _ => BrowserEvidenceKind.artifacts,
+    };
+    return (
+      artifact,
+      BrowserEvidenceEntry(
+        kind: evidenceKind,
+        summary: artifact.label,
+        createdAt: createdAt,
+        details: artifact.metadata,
+      ),
+    );
+  }
+
+  BrowserEvidenceEntry _logEvidence(
+    Map<String, dynamic> item, {
+    required bool console,
+  }) {
+    final isError = console && item['type']?.toString() == 'error';
+    return BrowserEvidenceEntry(
+      kind: isError
+          ? BrowserEvidenceKind.errors
+          : console
+          ? BrowserEvidenceKind.console
+          : BrowserEvidenceKind.network,
+      summary: maskBrowserText(
+        item['text']?.toString() ??
+            '${item['method'] ?? item['status'] ?? ''} ${item['url'] ?? ''}',
+      ).trim(),
+      createdAt: _date(item['timestamp']) ?? DateTime.now(),
+      level: item['type']?.toString() ?? 'info',
+      details: maskBrowserMap(item),
+    );
+  }
+
+  void _onEvent(Map<String, dynamic> wire) {
+    final envelope = _envelope(wire);
+    final payload = _map(envelope['payload']);
+    if (payload['projectId']?.toString() != projectId) return;
+    final eventSession = payload['sessionId']?.toString();
+    if (_sessionId == null && eventSession != null) _sessionId = eventSession;
+    if (eventSession != null && eventSession != _sessionId) return;
+    unawaited(_refreshSession().catchError((Object _) => _snapshot));
+  }
+
+  String _requireSessionId() {
+    final value = _sessionId;
+    if (value == null || value.isEmpty) {
+      throw StateError('Start a durable browser session first.');
+    }
+    return value;
+  }
+
+  String _requireTabId() {
+    final value = _activeTabId;
+    if (value == null || value.isEmpty) {
+      throw StateError('Open a browser tab first.');
+    }
+    return value;
+  }
 
   BrowserSnapshot _emit(BrowserSnapshot snapshot) {
     _snapshot = snapshot;
@@ -434,6 +565,69 @@ class CoreBrowserRepository implements BrowserRepository {
     await _subscription?.cancel();
     await _events.close();
   }
+}
+
+BrowserHistoryEntry _decodeHistory(Map<String, dynamic> item) =>
+    BrowserHistoryEntry(
+      kind: item['kind']?.toString() ?? 'updated',
+      actor: item['actor']?.toString() ?? 'system',
+      createdAt: _date(item['createdAt']) ?? DateTime.now(),
+      details: maskBrowserMap(_map(item['payload'])),
+    );
+
+List<BrowserTakeoverInterval> _decodeTakeovers(
+  List<BrowserHistoryEntry> history,
+  Map<String, dynamic> active,
+) {
+  final intervals = <BrowserTakeoverInterval>[];
+  for (final event in history) {
+    if (event.kind == 'takeover_started') {
+      intervals.add(
+        BrowserTakeoverInterval(
+          startedAt: event.createdAt,
+          reason: event.details['reason']?.toString() ?? 'Manual inspection',
+          openedHeaded: true,
+        ),
+      );
+    } else if (event.kind == 'takeover_stopped' && intervals.isNotEmpty) {
+      intervals[intervals.length - 1] = intervals.last.copyWith(
+        endedAt: event.createdAt,
+      );
+    }
+  }
+  if (active.isNotEmpty &&
+      (intervals.isEmpty || intervals.last.endedAt != null)) {
+    intervals.add(
+      BrowserTakeoverInterval(
+        startedAt: _date(active['startedAt']) ?? DateTime.now(),
+        reason: active['reason']?.toString() ?? 'Manual inspection',
+        openedHeaded: true,
+      ),
+    );
+  }
+  return intervals;
+}
+
+BrowserRuntimeStatus _runtimeStatus(Object? status, bool takeover) =>
+    switch (status?.toString()) {
+      'starting' => BrowserRuntimeStatus.launching,
+      'running' when takeover => BrowserRuntimeStatus.paused,
+      'running' => BrowserRuntimeStatus.running,
+      'stopping' => BrowserRuntimeStatus.recovering,
+      'failed' || 'orphaned' => BrowserRuntimeStatus.crashed,
+      _ => BrowserRuntimeStatus.stopped,
+    };
+
+bool _isRefreshEvent(Map<String, dynamic> wire) {
+  final kind = _envelope(wire)['kind']?.toString() ?? '';
+  return kind.startsWith('browser.') &&
+      kind != 'browser.event' &&
+      kind != 'browser.serviceExited';
+}
+
+Map<String, dynamic> _envelope(Map<String, dynamic> wire) {
+  final nested = wire['event'];
+  return nested is Map ? nested.cast<String, dynamic>() : wire;
 }
 
 Map<String, dynamic> _map(Object? value) =>
@@ -457,7 +651,18 @@ DateTime? _date(Object? value) => value is String
     ? DateTime.fromMillisecondsSinceEpoch(value.toInt())
     : null;
 
-String _profileLabel(String path) {
-  final parts = path.split(RegExp(r'[/\\]'));
-  return parts.isEmpty ? 'ephemeral-profile' : parts.last;
-}
+String _artifactLabel(String kind) => switch (kind) {
+  'screenshot' => 'Browser screenshot',
+  'snapshot' => 'Accessibility snapshot',
+  'trace' => 'Browser trace',
+  'logs' => 'Bounded browser logs',
+  _ => 'Browser artifact · $kind',
+};
+
+bool _validUuid(String? value) => value != null && _uuid.hasMatch(value);
+
+final _artifactHash = RegExp(r'^[0-9a-f]{64}$');
+final _uuid = RegExp(
+  r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-'
+  r'[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+);

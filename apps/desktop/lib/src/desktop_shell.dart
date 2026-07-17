@@ -261,6 +261,8 @@ class _DesktopShellState extends State<DesktopShell> {
     _devServerController?.dispose();
     _devServerController = null;
     _devServerControllerRepository = null;
+    unawaited(_coreBrowser?.dispose());
+    _coreBrowser = null;
     if (mounted) setState(() {});
   }
 
@@ -367,7 +369,10 @@ class _DesktopShellState extends State<DesktopShell> {
     if (core == null || core.status != CoreConnectionStatus.connected) {
       return _offlineBrowser;
     }
-    return _coreBrowser ??= CoreBrowserRepository.fromCore(core);
+    return _coreBrowser ??= CoreBrowserRepository.fromCore(
+      core,
+      projectId: widget.projectController?.current?.id ?? 'local-project',
+    );
   }
 
   DevServerController get _serverController {
@@ -397,7 +402,10 @@ class _DesktopShellState extends State<DesktopShell> {
     final current = await repository.load();
     if (current.session == null ||
         current.session?.status == BrowserRuntimeStatus.crashed) {
-      await repository.launch();
+      await repository.launch(
+        devServerInstanceId: preview.metadata['devServerInstanceId']
+            ?.toString(),
+      );
     }
     await repository.navigate(
       preview.url,

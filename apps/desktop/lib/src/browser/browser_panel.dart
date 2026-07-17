@@ -180,7 +180,9 @@ class _SessionBar extends StatelessWidget {
             ),
             if (session != null) ...[
               const SizedBox(width: RetconSpacing.xs),
-              RetconBadge(label: 'Profile: ${session.profileId}'),
+              RetconBadge(
+                label: 'Profile: ${_compactIdentifier(session.profileId)}',
+              ),
               if (constraints.maxWidth >= 920) ...[
                 const SizedBox(width: RetconSpacing.xs),
                 RetconBadge(
@@ -219,6 +221,11 @@ class _SessionBar extends StatelessWidget {
       ),
     );
   }
+}
+
+String _compactIdentifier(String value) {
+  if (value.length <= 24) return value;
+  return '${value.substring(0, 12)}\u2026';
 }
 
 class _EmptyBrowser extends StatelessWidget {
@@ -353,7 +360,7 @@ class _NavigationBar extends StatelessWidget {
           IconButton(
             key: const Key('browser-reload'),
             tooltip: 'Reload',
-            onPressed: controlsEnabled && controller.capabilities.reloadAndStop
+            onPressed: controlsEnabled && controller.capabilities.reload
                 ? controller.reload
                 : null,
             icon: const Icon(Icons.refresh),
@@ -363,7 +370,7 @@ class _NavigationBar extends StatelessWidget {
             tooltip: 'Stop loading',
             onPressed:
                 controlsEnabled &&
-                    controller.capabilities.reloadAndStop &&
+                    controller.capabilities.stopLoading &&
                     tab.status == BrowserTabStatus.loading
                 ? controller.stopLoading
                 : null,
@@ -530,6 +537,29 @@ class _PageView extends StatelessWidget {
             recessed: true,
             child: Text(session.previewMetadata.toString()),
           ),
+        if (session.history.isNotEmpty) ...[
+          const SizedBox(height: RetconSpacing.sm),
+          RetconPanel(
+            key: const Key('browser-session-history'),
+            label: 'Durable session history',
+            recessed: true,
+            child: Column(
+              children: [
+                for (final event in session.history.reversed.take(5))
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.history),
+                    title: Text(event.kind),
+                    subtitle: Text(
+                      '${event.actor} · ${event.createdAt.toLocal()} · ${event.details}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: RetconSpacing.sm),
         Row(
           children: [
@@ -704,13 +734,16 @@ class _AutomationView extends StatelessWidget {
                     ),
                   ),
                   if (action == BrowserActionKind.fill ||
-                      action == BrowserActionKind.press) ...[
+                      action == BrowserActionKind.press ||
+                      action == BrowserActionKind.select) ...[
                     const SizedBox(width: RetconSpacing.sm),
                     Expanded(
                       child: RetconTextField(
                         key: const Key('browser-action-value'),
                         label: action == BrowserActionKind.fill
                             ? 'Value (masked)'
+                            : action == BrowserActionKind.select
+                            ? 'Option value'
                             : 'Key',
                         controller: value,
                         obscureText: action == BrowserActionKind.fill,

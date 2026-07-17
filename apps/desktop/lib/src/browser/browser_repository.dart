@@ -7,7 +7,7 @@ abstract interface class BrowserRepository {
   Stream<BrowserSnapshot> get events;
 
   Future<BrowserSnapshot> load();
-  Future<BrowserSnapshot> launch();
+  Future<BrowserSnapshot> launch({String? taskId, String? devServerInstanceId});
   Future<BrowserSnapshot> close();
   Future<BrowserSnapshot> recover();
   Future<BrowserSnapshot> newTab({String url = 'about:blank'});
@@ -52,7 +52,10 @@ class InMemoryBrowserRepository implements BrowserRepository {
   Future<BrowserSnapshot> load() async => _snapshot;
 
   @override
-  Future<BrowserSnapshot> launch() async {
+  Future<BrowserSnapshot> launch({
+    String? taskId,
+    String? devServerInstanceId,
+  }) async {
     final existing = _snapshot.session;
     if (existing != null &&
         existing.status != BrowserRuntimeStatus.stopped &&
@@ -324,6 +327,7 @@ class InMemoryBrowserRepository implements BrowserRepository {
       BrowserActionKind.fill => 'Filled $selector with a masked value',
       BrowserActionKind.press =>
         'Pressed ${maskBrowserText(action.value ?? 'Enter')} on $selector',
+      BrowserActionKind.select => 'Selected an option in $selector',
       BrowserActionKind.readText => 'Read text from $selector',
     };
     return _addEvidence(

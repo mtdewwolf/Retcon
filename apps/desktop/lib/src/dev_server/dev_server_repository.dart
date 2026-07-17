@@ -36,6 +36,7 @@ class InMemoryDevServerRepository implements DevServerRepository {
   final Map<String, DevServerConfig> _configs;
   final Map<String, DevServerSnapshot> _snapshots;
   final Set<int> _occupiedPorts;
+  int _nextInstance = 1;
   final Map<String, String> _logs = {};
   final _events = StreamController<DevServerEvent>.broadcast(sync: true);
   final List<String> openedPreviews = [];
@@ -120,6 +121,8 @@ class InMemoryDevServerRepository implements DevServerRepository {
       DevServerSnapshot(
         config: config,
         status: DevServerStatus.running,
+        instanceId:
+            '00000000-0000-4000-8000-${(_nextInstance++).toString().padLeft(12, '0')}',
         startedAt: DateTime.now(),
       ),
     );
@@ -161,7 +164,11 @@ class InMemoryDevServerRepository implements DevServerRepository {
       url: snapshot.config.url,
       port: snapshot.config.port,
       status: snapshot.status,
-      metadata: snapshot.previewMetadata,
+      metadata: {
+        ...snapshot.previewMetadata,
+        if (snapshot.instanceId.isNotEmpty)
+          'devServerInstanceId': snapshot.instanceId,
+      },
     );
   }
 

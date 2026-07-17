@@ -21,13 +21,14 @@ enum BrowserEvidenceKind {
   artifacts,
 }
 
-enum BrowserActionKind { click, fill, press, readText }
+enum BrowserActionKind { click, fill, press, select, readText }
 
 class BrowserCapabilities {
   const BrowserCapabilities({
     this.multipleTabs = true,
     this.historyNavigation = true,
-    this.reloadAndStop = true,
+    this.reload = true,
+    this.stopLoading = true,
     this.viewportAndDevice = true,
     this.screenshots = true,
     this.consoleAndNetwork = true,
@@ -35,11 +36,13 @@ class BrowserCapabilities {
     this.performance = true,
     this.automation = true,
     this.headedTakeover = true,
+    this.cookiesAndStorage = true,
   });
 
   final bool multipleTabs;
   final bool historyNavigation;
-  final bool reloadAndStop;
+  final bool reload;
+  final bool stopLoading;
   final bool viewportAndDevice;
   final bool screenshots;
   final bool consoleAndNetwork;
@@ -47,6 +50,20 @@ class BrowserCapabilities {
   final bool performance;
   final bool automation;
   final bool headedTakeover;
+  final bool cookiesAndStorage;
+}
+
+class BrowserHistoryEntry {
+  const BrowserHistoryEntry({
+    required this.kind,
+    required this.actor,
+    required this.createdAt,
+    this.details = const {},
+  });
+  final String kind;
+  final String actor;
+  final DateTime createdAt;
+  final Map<String, dynamic> details;
 }
 
 class BrowserViewport {
@@ -176,6 +193,7 @@ class BrowserSession {
     this.recoveryCount = 0,
     this.previewMetadata = const {},
     this.takeoverHistory = const [],
+    this.history = const [],
   });
 
   final String id;
@@ -190,6 +208,7 @@ class BrowserSession {
   final int recoveryCount;
   final Map<String, dynamic> previewMetadata;
   final List<BrowserTakeoverInterval> takeoverHistory;
+  final List<BrowserHistoryEntry> history;
 
   BrowserTab? get activeTab {
     for (final tab in tabs) {
@@ -210,6 +229,7 @@ class BrowserSession {
     int? recoveryCount,
     Map<String, dynamic>? previewMetadata,
     List<BrowserTakeoverInterval>? takeoverHistory,
+    List<BrowserHistoryEntry>? history,
   }) => BrowserSession(
     id: id,
     profileId: profileId,
@@ -223,6 +243,7 @@ class BrowserSession {
     recoveryCount: recoveryCount ?? this.recoveryCount,
     previewMetadata: previewMetadata ?? this.previewMetadata,
     takeoverHistory: takeoverHistory ?? this.takeoverHistory,
+    history: history ?? this.history,
   );
 }
 
