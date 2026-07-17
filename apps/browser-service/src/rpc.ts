@@ -13,9 +13,9 @@ import type {
   RpcRequest,
   RpcResponse,
   ServerHello,
-} from "./generated/protocol-v1";
-import { PROTOCOL_VERSION } from "./generated/protocol-v1";
-import { logger } from "./logging";
+} from "./generated/protocol-v1.ts";
+import { PROTOCOL_VERSION } from "./generated/protocol-v1.ts";
+import { logger } from "./logging.ts";
 
 const CLIENT_VERSION = "0.1.0";
 const CLIENT_FEATURES = ["ping", "events.replay", "request.cancel"];
