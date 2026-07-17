@@ -8,6 +8,7 @@ import 'package:retcon_design_system/retcon_design_system.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'core_client.dart';
+import 'dev_server/dev_server.dart';
 import 'projects/project_picker.dart';
 import 'projects/project_controller.dart';
 import 'provider_doctor_dialog.dart';
@@ -24,6 +25,7 @@ enum ShellCommand {
   checkpoints('Checkpoints', Icons.history),
   terminal('Open terminal', Icons.terminal),
   browser('Open browser', Icons.language),
+  serverCenter('Dev server center', Icons.dns),
   taskBoard('Task board', Icons.view_kanban),
   settings('Settings', Icons.settings),
   diagnostics('Diagnostics', Icons.monitor_heart),
@@ -157,6 +159,7 @@ class DesktopShell extends StatefulWidget {
     this.provider = 'Provider offline',
     this.taskRepository,
     this.verificationRepository,
+    this.devServerRepository,
     this.onCommand,
   });
 
@@ -168,6 +171,7 @@ class DesktopShell extends StatefulWidget {
   final String provider;
   final TaskRepository? taskRepository;
   final VerificationRepository? verificationRepository;
+  final DevServerRepository? devServerRepository;
   final ValueChanged<ShellCommand>? onCommand;
 
   @override
@@ -181,8 +185,11 @@ class _DesktopShellState extends State<DesktopShell> {
       InMemoryTaskRepository.demo();
   late final InMemoryVerificationRepository _offlineVerification =
       InMemoryVerificationRepository.demo();
+  late final InMemoryDevServerRepository _offlineDevServers =
+      InMemoryDevServerRepository.demo();
   CoreTaskRepository? _coreTasks;
   CoreVerificationRepository? _coreVerification;
+  DevServerController? _devServerController;
 
   @override
   void initState() {
@@ -208,11 +215,16 @@ class _DesktopShellState extends State<DesktopShell> {
       _coreTasks = null;
       _coreVerification = null;
     }
+    if (oldWidget.devServerRepository != widget.devServerRepository) {
+      _devServerController?.dispose();
+      _devServerController = null;
+    }
   }
 
   @override
   void dispose() {
     widget.projectController?.removeListener(_handleProjectUpdate);
+    _devServerController?.dispose();
     _workspace.dispose();
     super.dispose();
   }
@@ -225,6 +237,8 @@ class _DesktopShellState extends State<DesktopShell> {
         projectId: widget.projectController?.current?.id,
       );
     }
+    _devServerController?.dispose();
+    _devServerController = null;
     if (mounted) setState(() {});
   }
 
@@ -245,6 +259,12 @@ class _DesktopShellState extends State<DesktopShell> {
         await _workspace.float(PanelDefinition.terminal, const Size(900, 600));
       case ShellCommand.browser:
         await _workspace.openPanel(PanelDefinition.browser);
+      case ShellCommand.serverCenter:
+        await DevServerDialog.show(
+          context,
+          controller: _serverController,
+          title: _projectTitle,
+        );
       case ShellCommand.commandPalette:
         await _showCommandPalette();
       case ShellCommand.settings:
@@ -256,6 +276,7 @@ class _DesktopShellState extends State<DesktopShell> {
           context,
           repository: _taskRepository,
           verificationRepository: _verificationRepository,
+          devServerRepository: _devServerRepository,
           projectId: widget.projectController?.current?.id,
           projectPath:
               widget.projectController?.current?.metadata.repositoryPath,
@@ -304,6 +325,23 @@ class _DesktopShellState extends State<DesktopShell> {
       return _offlineVerification;
     }
     return _coreVerification ??= CoreVerificationRepository.fromCore(core);
+  }
+
+  DevServerRepository get _devServerRepository =>
+      widget.devServerRepository ?? _offlineDevServers;
+
+  DevServerController get _serverController {
+    final existing = _devServerController;
+    if (existing != null) return existing;
+    final project = widget.projectController?.current;
+    final controller = DevServerController(
+      repository: _devServerRepository,
+      projectId: project?.id ?? 'local-project',
+      worktreePath: project?.metadata.repositoryPath ?? '',
+    );
+    _devServerController = controller;
+    unawaited(controller.load());
+    return controller;
   }
 
   Future<void> _showNewProjectStub() => showDialog<void>(
@@ -649,7 +687,7 @@ class _ApplicationMenu extends StatelessWidget {
       ]),
       _menu('Agents', [ShellCommand.approvals, ShellCommand.commandPalette]),
       _menu('Git', [ShellCommand.commandPalette]),
-      _menu('Browser', [ShellCommand.browser]),
+      _menu('Browser', [ShellCommand.browser, ShellCommand.serverCenter]),
       _menu('Tools', [
         ShellCommand.terminal,
         ShellCommand.settings,

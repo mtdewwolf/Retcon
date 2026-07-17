@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/main.dart';
 import 'package:retcon_desktop/src/core_client.dart';
+import 'package:retcon_desktop/src/dev_server/dev_server.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
 import 'package:retcon_desktop/src/tasks/tasks.dart';
 import 'package:retcon_desktop/src/verification/verification.dart';
@@ -147,6 +148,45 @@ void main() {
     expect(find.text('No tasks match this view.'), findsOneWidget);
     expect(find.text('Evidence-based task completion'), findsNothing);
     expect(core.methods, contains('task.list'));
+  });
+
+  testWidgets('server center opens from the shell and launches preview', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final devServers = InMemoryDevServerRepository(
+      configs: const {
+        'local-project': DevServerConfig(
+          projectId: 'local-project',
+          framework: 'Vite',
+          startupCommand: 'npm run dev -- --port {port}',
+          port: 5173,
+          worktreePath: r'C:\projects\preview',
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: testCore(),
+          devServerRepository: devServers,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Browser').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev server center').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Vite'), findsOneWidget);
+    expect(find.text('http://127.0.0.1:5173'), findsAtLeastNWidgets(1));
+    await tester.tap(find.byKey(const Key('server-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('server-open-preview')));
+    await tester.pump();
+    expect(devServers.openedPreviews, ['http://127.0.0.1:5173']);
   });
 
   testWidgets('connected core selects the RPC verification repository', (

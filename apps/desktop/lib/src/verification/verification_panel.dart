@@ -11,10 +11,14 @@ class TaskVerificationSection extends StatelessWidget {
     required this.controller,
     required this.task,
     super.key,
+    this.onOpenPreview,
+    this.previewReady = false,
   });
 
   final VerificationController controller;
   final RoadmapTask task;
+  final Future<void> Function()? onOpenPreview;
+  final bool previewReady;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -49,6 +53,19 @@ class TaskVerificationSection extends StatelessWidget {
                       ? RetconStatus.success
                       : RetconStatus.error,
                 ),
+                if (onOpenPreview != null)
+                  IconButton(
+                    key: const Key('verification-open-preview'),
+                    tooltip: previewReady
+                        ? 'Open preview'
+                        : 'Start and preview',
+                    onPressed: onOpenPreview,
+                    icon: Icon(
+                      previewReady
+                          ? Icons.open_in_browser
+                          : Icons.rocket_launch,
+                    ),
+                  ),
               ],
             ),
             if (blocker != null) ...[

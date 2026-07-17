@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
+import '../dev_server/dev_server.dart';
 import '../verification/verification.dart';
 import 'task_board_controller.dart';
 import 'task_models.dart';
@@ -13,12 +14,14 @@ class TaskBoardDialog extends StatelessWidget {
     required this.repository,
     required this.verificationRepository,
     super.key,
+    this.devServerRepository,
     this.projectId,
     this.projectPath,
   });
 
   final TaskRepository repository;
   final VerificationRepository verificationRepository;
+  final DevServerRepository? devServerRepository;
   final String? projectId;
   final String? projectPath;
 
@@ -26,6 +29,7 @@ class TaskBoardDialog extends StatelessWidget {
     BuildContext context, {
     required TaskRepository repository,
     required VerificationRepository verificationRepository,
+    DevServerRepository? devServerRepository,
     String? projectId,
     String? projectPath,
   }) => showDialog<void>(
@@ -33,6 +37,7 @@ class TaskBoardDialog extends StatelessWidget {
     builder: (context) => TaskBoardDialog(
       repository: repository,
       verificationRepository: verificationRepository,
+      devServerRepository: devServerRepository,
       projectId: projectId,
       projectPath: projectPath,
     ),
@@ -72,6 +77,7 @@ class TaskBoardDialog extends StatelessWidget {
             child: TaskBoardPanel(
               repository: repository,
               verificationRepository: verificationRepository,
+              devServerRepository: devServerRepository,
               projectId: projectId,
               projectPath: projectPath,
             ),
@@ -87,12 +93,14 @@ class TaskBoardPanel extends StatefulWidget {
     required this.repository,
     super.key,
     this.verificationRepository,
+    this.devServerRepository,
     this.projectId,
     this.projectPath,
   });
 
   final TaskRepository repository;
   final VerificationRepository? verificationRepository;
+  final DevServerRepository? devServerRepository;
   final String? projectId;
   final String? projectPath;
 
@@ -103,6 +111,8 @@ class TaskBoardPanel extends StatefulWidget {
 class _TaskBoardPanelState extends State<TaskBoardPanel> {
   late final TaskBoardController _controller;
   late final VerificationRepository _verificationRepository;
+  late final DevServerRepository _devServerRepository;
+  late final DevServerController _devServerController;
   final _verificationControllers = <String, VerificationController>{};
   final _search = TextEditingController();
 
@@ -111,6 +121,13 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
     super.initState();
     _verificationRepository =
         widget.verificationRepository ?? InMemoryVerificationRepository.demo();
+    _devServerRepository =
+        widget.devServerRepository ?? InMemoryDevServerRepository.demo();
+    _devServerController = DevServerController(
+      repository: _devServerRepository,
+      projectId: widget.projectId ?? 'local-project',
+      worktreePath: widget.projectPath ?? '',
+    );
     _controller = TaskBoardController(
       repository: widget.repository,
       projectId: widget.projectId,
@@ -118,12 +135,14 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
           _verificationControllers[taskId]?.allowsCompletion ?? false,
     );
     unawaited(_controller.refresh());
+    unawaited(_devServerController.load());
   }
 
   @override
   void dispose() {
     _search.dispose();
     _controller.dispose();
+    _devServerController.dispose();
     for (final controller in _verificationControllers.values) {
       controller.dispose();
     }
@@ -163,6 +182,7 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
                     final selected = _controller.selectedTask;
                     final detail = _TaskDetail(
                       controller: _controller,
+                      devServer: _devServerController,
                       verification: selected == null
                           ? null
                           : _verificationFor(selected),
@@ -436,9 +456,14 @@ class _TaskCard extends StatelessWidget {
 }
 
 class _TaskDetail extends StatelessWidget {
-  const _TaskDetail({required this.controller, required this.verification});
+  const _TaskDetail({
+    required this.controller,
+    required this.verification,
+    required this.devServer,
+  });
   final TaskBoardController controller;
   final VerificationController? verification;
+  final DevServerController devServer;
 
   @override
   Widget build(BuildContext context) {
@@ -450,7 +475,7 @@ class _TaskDetail extends StatelessWidget {
     }
     final verification = this.verification!;
     return AnimatedBuilder(
-      animation: verification,
+      animation: Listenable.merge([verification, devServer]),
       builder: (context, _) => RetconPanel(
         key: Key('task-detail-${task.id}'),
         label: 'Task plan',
@@ -546,22 +571,39 @@ class _TaskDetail extends StatelessWidget {
             for (final criterion in task.criteria)
               _CriterionTile(criterion: criterion, controller: controller),
             const Divider(height: RetconSpacing.lg),
-            TaskVerificationSection(controller: verification, task: task),
-            const SizedBox(height: RetconSpacing.md),
-            if (!task.canComplete || !verification.allowsCompletion)
-              Text(
-                _gateMessage(task, verification),
-                key: const Key('completion-gate-message'),
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            const SizedBox(height: RetconSpacing.sm),
-            FilledButton.icon(
-              key: const Key('complete-task'),
-              onPressed: task.canComplete && verification.allowsCompletion
-                  ? () => controller.setTaskStatus(TaskStatus.complete)
-                  : null,
-              icon: const Icon(Icons.task_alt),
-              label: const Text('Complete task'),
+            TaskVerificationSection(
+              controller: verification,
+              task: task,
+              onOpenPreview: devServer.startAndOpenPreview,
+              previewReady: devServer.canOpenPreview,
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: RetconSpacing.md),
+                if (!task.canComplete || !verification.allowsCompletion)
+                  Text(
+                    _gateMessage(task, verification),
+                    key: const Key('completion-gate-message'),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                const SizedBox(height: RetconSpacing.sm),
+                FilledButton.icon(
+                  key: const Key('complete-task'),
+                  onPressed: task.canComplete && verification.allowsCompletion
+                      ? () => controller.setTaskStatus(TaskStatus.complete)
+                      : null,
+                  icon: const Icon(Icons.task_alt),
+                  label: const Text('Complete task'),
+                ),
+                const SizedBox(height: RetconSpacing.md),
+                TaskDevServerSection(
+                  controller: devServer,
+                  taskTitle: task.title,
+                ),
+              ],
             ),
           ],
         ),
