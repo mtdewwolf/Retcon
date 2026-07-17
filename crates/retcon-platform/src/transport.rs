@@ -237,7 +237,7 @@ impl TransportStream {
             }
             #[cfg(unix)]
             TransportStreamInner::Unix(stream) => {
-                let (read, write) = stream.into_split();
+                let (read, write) = tokio::io::split(stream);
                 (
                     TransportReadHalf {
                         inner: ReadHalfInner::Unix(read),
