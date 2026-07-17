@@ -777,6 +777,7 @@ dependencies = [
  "fs2",
  "retcon-agents",
  "retcon-checkpoints",
+ "retcon-devserver",
  "retcon-filesystem",
  "retcon-git",
  "retcon-permissions",
@@ -796,6 +797,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "retcon-devserver"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

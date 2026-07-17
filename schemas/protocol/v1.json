@@ -193,6 +193,22 @@
       "verification.history",
       "verification.report"
     ],
+    "devServer": [
+      "devServer.detect",
+      "devServer.list",
+      "devServer.configure",
+      "devServer.start",
+      "devServer.stop",
+      "devServer.restart",
+      "devServer.logs",
+      "devServer.status",
+      "devServer.openPreview",
+      "devServer.history",
+      "devServer.port.assign",
+      "devServer.port.change",
+      "devServer.port.release",
+      "devServer.autoStart.set"
+    ],
     "terminal": [
       "terminal.detectShells",
       "terminal.start",

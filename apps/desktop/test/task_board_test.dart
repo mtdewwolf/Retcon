@@ -180,6 +180,8 @@ void main() {
       isNotNull,
     );
 
+    await tester.ensureVisible(find.byKey(const Key('complete-task')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('complete-task')));
     await tester.pumpAndSettle();
     final stored = await repository.listTasks();

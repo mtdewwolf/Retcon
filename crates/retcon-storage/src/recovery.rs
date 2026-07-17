@@ -17,6 +17,8 @@ pub struct RecoveryReport {
     pub interrupted_terminals: u64,
     pub interrupted_browsers: u64,
     pub interrupted_verifications: u64,
+    pub orphaned_dev_servers: u64,
+    pub stale_port_leases: u64,
     pub pending_approvals: u64,
     pub active_tasks: u64,
 }
@@ -30,6 +32,8 @@ impl RecoveryReport {
             + self.interrupted_terminals
             + self.interrupted_browsers
             + self.interrupted_verifications
+            + self.orphaned_dev_servers
+            + self.stale_port_leases
             > 0
     }
 }
@@ -48,9 +52,14 @@ impl Database {
             tx.execute("INSERT INTO verification_events(run_id,task_id,gate_id,kind,actor,payload_json,created_at) SELECT id,task_id,NULL,'interrupted','system','{\"reason\":\"process_restart\"}',?1 FROM verification_runs WHERE status='running'", [recovered_at])?;
             tx.execute("UPDATE verification_gates SET status='error',completed_at=?1,summary_json='{\"reason\":\"process_restart\"}' WHERE run_id IN (SELECT id FROM verification_runs WHERE status='running') AND status IN ('pending','running')", [recovered_at])?;
             tx.execute("UPDATE verification_runs SET status='error',completed_at=?1,summary_json='{\"reason\":\"process_restart\"}' WHERE status='running'", [recovered_at])?;
+            let orphaned_dev_servers = tx.query_row("SELECT count(*) FROM dev_server_instances WHERE status IN ('starting','running','stopping')", [], |row| row.get::<_,u64>(0))?;
+            tx.execute("INSERT INTO dev_server_events(instance_id,config_id,project_id,kind,actor,payload_json,created_at) SELECT id,config_id,project_id,'orphaned','system','{\"reason\":\"process_restart\"}',?1 FROM dev_server_instances WHERE status IN ('starting','running','stopping')", [recovered_at])?;
+            tx.execute("UPDATE dev_server_instances SET status='orphaned',pid=NULL,failure='core process restarted',stopped_at=?1 WHERE status IN ('starting','running','stopping')", [recovered_at])?;
+            tx.execute("UPDATE dev_server_instances SET pid=NULL WHERE status='orphaned' AND id IN (SELECT instance_id FROM dev_server_port_leases WHERE status='active' AND instance_id IS NOT NULL)", [])?;
+            let stale_port_leases = tx.execute("UPDATE dev_server_port_leases SET status='stale',released_at=?1 WHERE status='active' AND instance_id IS NOT NULL", [recovered_at])? as u64;
             let pending_approvals = tx.query_row("SELECT count(*) FROM approvals WHERE status='pending'", [], |row| row.get::<_,u64>(0))?;
             let active_tasks = tx.query_row("SELECT count(*) FROM tasks WHERE status NOT IN ('completed','cancelled','failed')", [], |row| row.get::<_,u64>(0))?;
-            Ok(RecoveryReport { recovered_at, interrupted_sessions, interrupted_turns, orphaned_jobs, interrupted_terminals, interrupted_browsers, interrupted_verifications, pending_approvals, active_tasks })
+            Ok(RecoveryReport { recovered_at, interrupted_sessions, interrupted_turns, orphaned_jobs, interrupted_terminals, interrupted_browsers, interrupted_verifications, orphaned_dev_servers, stale_port_leases, pending_approvals, active_tasks })
         })
     }
 }

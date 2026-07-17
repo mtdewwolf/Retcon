@@ -27,6 +27,7 @@ retcon-diagnostics = { path = "crates/retcon-diagnostics" }
 retcon-updater = { path = "crates/retcon-updater" }
 retcon-platform = { path = "crates/retcon-platform" }
 retcon-verification = { path = "crates/retcon-verification" }
+retcon-devserver = { path = "crates/retcon-devserver" }
 
 # External
 fs2 = "0.4.3"

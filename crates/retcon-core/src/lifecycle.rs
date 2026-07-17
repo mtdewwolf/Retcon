@@ -56,6 +56,10 @@ impl CoreRuntime {
             "system.ready",
             serde_json::json!({"transport": endpoint.kind, "path": endpoint.path_string(), "version": env!("CARGO_PKG_VERSION")}),
         );
+        let auto_start_state = state.clone();
+        tokio::spawn(async move {
+            crate::dev_servers_rpc::auto_start(auto_start_state).await;
+        });
 
         Ok(Self {
             config,
@@ -323,7 +327,7 @@ mod tests {
         let shutdown = read_rpc_response(&mut lines).await;
         assert_eq!(health["result"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["status"], "healthy");
-        assert_eq!(health["result"]["storage"]["schema_version"], 7);
+        assert_eq!(health["result"]["storage"]["schema_version"], 8);
         assert_eq!(shutdown["result"]["accepted"], true);
 
         runtime.wait_for_shutdown_signal().await.unwrap();

@@ -2,6 +2,7 @@
 
 mod artifacts;
 mod database;
+mod dev_servers;
 mod error;
 mod migrations;
 mod recovery;
@@ -12,6 +13,10 @@ mod verification;
 
 pub use artifacts::{Artifact, ArtifactCleanup, ArtifactStore};
 pub use database::{Database, IntegrityReport, MaintenanceReport};
+pub use dev_servers::{
+    DevServerConfig, DevServerEvent, DevServerInstance, DevServerLaunchConfig, DevServerPortLease,
+    DevServerRepository, NewDevServerConfig,
+};
 pub use error::{Result, StorageError};
 pub use recovery::RecoveryReport;
 pub use repositories::{

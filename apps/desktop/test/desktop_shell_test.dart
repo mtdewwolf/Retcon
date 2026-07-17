@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:retcon_desktop/main.dart';
 import 'package:retcon_desktop/src/core_client.dart';
+import 'package:retcon_desktop/src/dev_server/dev_server.dart';
 import 'package:retcon_desktop/src/desktop_shell.dart';
 import 'package:retcon_desktop/src/tasks/tasks.dart';
 import 'package:retcon_desktop/src/verification/verification.dart';
@@ -147,6 +148,110 @@ void main() {
     expect(find.text('No tasks match this view.'), findsOneWidget);
     expect(find.text('Evidence-based task completion'), findsNothing);
     expect(core.methods, contains('task.list'));
+  });
+
+  testWidgets('server center opens from the shell and launches preview', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final devServers = InMemoryDevServerRepository(
+      configs: const {
+        'local-project': DevServerConfig(
+          projectId: 'local-project',
+          framework: 'Vite',
+          startupCommand: 'npm run dev -- --port {port}',
+          port: 5173,
+          worktreePath: r'C:\projects\preview',
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: testCore(),
+          devServerRepository: devServers,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Browser').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev server center').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Vite'), findsOneWidget);
+    expect(find.text('http://127.0.0.1:5173'), findsAtLeastNWidgets(1));
+    await tester.tap(find.byKey(const Key('server-start')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('server-open-preview')));
+    await tester.pump();
+    expect(devServers.openedPreviews, ['http://127.0.0.1:5173']);
+  });
+
+  testWidgets('connected shell uses Core dev servers and browser navigation', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final core = FakeConnectedCoreClient(includeDevServer: true);
+    addTearDown(core.dispose);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: core,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Browser').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev server center').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Core Vite'), findsOneWidget);
+    expect(core.methods, contains('devServer.list'));
+    await tester.tap(find.byKey(const Key('server-open-preview')));
+    await tester.pumpAndSettle();
+
+    expect(core.methods, contains('devServer.openPreview'));
+    expect(core.methods, contains('browser.startService'));
+    expect(
+      core.requests.where(
+        (request) =>
+            request.method == 'browser.call' &&
+            request.params['method'] == 'browser.navigate',
+      ),
+      hasLength(1),
+    );
+  });
+
+  testWidgets('explicit dev server injection wins while core is connected', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    final core = FakeConnectedCoreClient(includeDevServer: true);
+    final devServers = InMemoryDevServerRepository();
+    addTearDown(core.dispose);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: core,
+          devServerRepository: devServers,
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Browser').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev server center').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      core.methods.where((method) => method.startsWith('devServer.')),
+      isEmpty,
+    );
   });
 
   testWidgets('connected core selects the RPC verification repository', (
@@ -304,10 +409,15 @@ class FakeWindowController implements RetconWindowController {
 }
 
 class FakeConnectedCoreClient extends CoreClient {
-  FakeConnectedCoreClient({this.includeTask = false});
+  FakeConnectedCoreClient({
+    this.includeTask = false,
+    this.includeDevServer = false,
+  });
 
   final bool includeTask;
+  final bool includeDevServer;
   final methods = <String>[];
+  final requests = <_CoreRequest>[];
   final _fakeEvents = StreamController<Map<String, dynamic>>.broadcast();
 
   @override
@@ -323,6 +433,7 @@ class FakeConnectedCoreClient extends CoreClient {
     Duration timeout = const Duration(seconds: 30),
   }) async {
     methods.add(method);
+    requests.add(_CoreRequest(method, params));
     if (method == 'task.list') {
       return includeTask
           ? const {
@@ -348,6 +459,39 @@ class FakeConnectedCoreClient extends CoreClient {
     if (method == 'verification.list') {
       return const {'verifications': []};
     }
+    if (includeDevServer) {
+      if (method == 'devServer.list') {
+        return const {
+          'configs': [_shellDevServerConfig],
+          'instances': [_shellDevServerInstance],
+        };
+      }
+      if (method == 'devServer.history') {
+        return const {
+          'events': [
+            {'kind': 'started', 'actor': 'local_user', 'createdAt': 2000},
+          ],
+        };
+      }
+      if (method == 'devServer.logs') {
+        return const {
+          'log': {'text': 'ready\n'},
+        };
+      }
+      if (method == 'devServer.openPreview') {
+        return const {
+          'instanceId': '33333333-3333-4333-8333-333333333333',
+          'status': 'running',
+          'url': 'http://127.0.0.1:5173',
+          'port': 5173,
+          'preview': {'title': 'Core preview'},
+        };
+      }
+      if (method == 'browser.startService') {
+        return const {'alreadyRunning': false};
+      }
+      if (method == 'browser.call') return const {};
+    }
     return const {};
   }
 
@@ -357,3 +501,33 @@ class FakeConnectedCoreClient extends CoreClient {
     super.dispose();
   }
 }
+
+class _CoreRequest {
+  const _CoreRequest(this.method, this.params);
+  final String method;
+  final Map<String, dynamic> params;
+}
+
+const _shellDevServerConfig = <String, dynamic>{
+  'id': '22222222-2222-4222-8222-222222222222',
+  'projectId': 'local-project',
+  'name': 'Core Vite',
+  'command': 'npm run dev',
+  'cwd': r'C:\projects\preview',
+  'host': '127.0.0.1',
+  'preferredPort': 5173,
+  'autoStart': false,
+  'environmentKeys': <String>[],
+};
+
+const _shellDevServerInstance = <String, dynamic>{
+  'id': '33333333-3333-4333-8333-333333333333',
+  'configId': '22222222-2222-4222-8222-222222222222',
+  'projectId': 'local-project',
+  'port': 5173,
+  'status': 'running',
+  'url': 'http://127.0.0.1:5173',
+  'preview': {'title': 'Core preview'},
+  'createdAt': 1000,
+  'startedAt': 2000,
+};
