@@ -1,0 +1,25 @@
+{
+  "testResults": [
+    {
+      "name": "C:/repo/src/math.test.ts",
+      "assertionResults": [
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math adds",
+          "status": "passed",
+          "duration": 8,
+          "failureMessages": [],
+          "location": {"line": 4, "column": 3}
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math divides",
+          "status": "failed",
+          "duration": 11,
+          "failureMessages": ["expected 2, received 3"],
+          "location": {"line": 12, "column": 5}
+        }
+      ]
+    }
+  ]
+}

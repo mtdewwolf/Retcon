@@ -1,0 +1,4 @@
+    PASS [   0.012s] demo::unit math::adds
+    SKIP [   0.000s] demo::unit math::ignored
+    FAIL [   1.250s] demo::unit math::fails
+        at tests/math.rs:42:5

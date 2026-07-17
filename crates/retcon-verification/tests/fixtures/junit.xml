@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="math" tests="3" failures="1" skipped="1">
+  <testcase classname="math" name="adds" time="0.008" file="tests/math.py" line="4" />
+  <testcase classname="math" name="skip" time="0.000" file="tests/math.py" line="8"><skipped /></testcase>
+  <testcase classname="math" name="divide" time="1.25" file="tests/math.py" line="19"><failure message="expected 2 &amp; got 3" /></testcase>
+</testsuite>

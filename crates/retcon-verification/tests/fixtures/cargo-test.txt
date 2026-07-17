@@ -1,0 +1,7 @@
+running 3 tests
+test math::adds ... ok
+test math::ignored ... ignored
+test math::fails ... FAILED
+
+thread 'math::fails' panicked at tests/math.rs:42:5:
+assertion failed
