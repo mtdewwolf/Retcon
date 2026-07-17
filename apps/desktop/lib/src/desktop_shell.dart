@@ -161,6 +161,7 @@ class DesktopShell extends StatefulWidget {
     this.provider = 'Provider offline',
     this.taskRepository,
     this.verificationRepository,
+    this.browserVerificationRepository,
     this.devServerRepository,
     this.browserRepository,
     this.onCommand,
@@ -174,6 +175,7 @@ class DesktopShell extends StatefulWidget {
   final String provider;
   final TaskRepository? taskRepository;
   final VerificationRepository? verificationRepository;
+  final BrowserVerificationRepository? browserVerificationRepository;
   final DevServerRepository? devServerRepository;
   final BrowserRepository? browserRepository;
   final ValueChanged<ShellCommand>? onCommand;
@@ -189,12 +191,15 @@ class _DesktopShellState extends State<DesktopShell> {
       InMemoryTaskRepository.demo();
   late final InMemoryVerificationRepository _offlineVerification =
       InMemoryVerificationRepository.demo();
+  late final InMemoryBrowserVerificationRepository _offlineBrowserVerification =
+      InMemoryBrowserVerificationRepository();
   late final InMemoryDevServerRepository _offlineDevServers =
       InMemoryDevServerRepository.demo();
   late final InMemoryBrowserRepository _offlineBrowser =
       InMemoryBrowserRepository.demo();
   CoreTaskRepository? _coreTasks;
   CoreVerificationRepository? _coreVerification;
+  CoreBrowserVerificationRepository? _coreBrowserVerification;
   CoreDevServerRepository? _coreDevServers;
   CoreBrowserRepository? _coreBrowser;
   DevServerController? _devServerController;
@@ -223,6 +228,7 @@ class _DesktopShellState extends State<DesktopShell> {
     if (oldWidget.core != widget.core) {
       _coreTasks = null;
       _coreVerification = null;
+      _coreBrowserVerification = null;
       _coreDevServers = null;
       unawaited(_coreBrowser?.dispose());
       _coreBrowser = null;
@@ -238,6 +244,10 @@ class _DesktopShellState extends State<DesktopShell> {
     if (oldWidget.browserRepository != widget.browserRepository) {
       unawaited(_coreBrowser?.dispose());
       _coreBrowser = null;
+    }
+    if (oldWidget.browserVerificationRepository !=
+        widget.browserVerificationRepository) {
+      _coreBrowserVerification = null;
     }
   }
 
@@ -261,6 +271,7 @@ class _DesktopShellState extends State<DesktopShell> {
     _devServerController?.dispose();
     _devServerController = null;
     _devServerControllerRepository = null;
+    _coreBrowserVerification = null;
     unawaited(_coreBrowser?.dispose());
     _coreBrowser = null;
     if (mounted) setState(() {});
@@ -300,6 +311,7 @@ class _DesktopShellState extends State<DesktopShell> {
           context,
           repository: _taskRepository,
           verificationRepository: _verificationRepository,
+          browserVerificationRepository: _browserVerificationRepository,
           devServerRepository: _devServerRepository,
           onOpenPreview: _openBrowserPreview,
           projectId: widget.projectController?.current?.id,
@@ -350,6 +362,20 @@ class _DesktopShellState extends State<DesktopShell> {
       return _offlineVerification;
     }
     return _coreVerification ??= CoreVerificationRepository.fromCore(core);
+  }
+
+  BrowserVerificationRepository get _browserVerificationRepository {
+    final override = widget.browserVerificationRepository;
+    if (override != null) return override;
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      return _offlineBrowserVerification;
+    }
+    return _coreBrowserVerification ??=
+        CoreBrowserVerificationRepository.fromCore(
+          core,
+          projectId: widget.projectController?.current?.id ?? 'local-project',
+        );
   }
 
   DevServerRepository get _devServerRepository {

@@ -1,3 +1,8 @@
+export 'browser_verification_controller.dart';
+export 'browser_verification_models.dart';
+export 'browser_verification_panel.dart';
+export 'browser_verification_repository.dart';
+export 'core_browser_verification_repository.dart';
 export 'core_verification_repository.dart';
 export 'verification_controller.dart';
 export 'verification_models.dart';

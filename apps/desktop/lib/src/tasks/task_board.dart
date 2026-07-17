@@ -15,6 +15,7 @@ class TaskBoardDialog extends StatelessWidget {
     required this.verificationRepository,
     super.key,
     this.devServerRepository,
+    this.browserVerificationRepository,
     this.onOpenPreview,
     this.projectId,
     this.projectPath,
@@ -23,6 +24,7 @@ class TaskBoardDialog extends StatelessWidget {
   final TaskRepository repository;
   final VerificationRepository verificationRepository;
   final DevServerRepository? devServerRepository;
+  final BrowserVerificationRepository? browserVerificationRepository;
   final Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview;
   final String? projectId;
   final String? projectPath;
@@ -32,6 +34,7 @@ class TaskBoardDialog extends StatelessWidget {
     required TaskRepository repository,
     required VerificationRepository verificationRepository,
     DevServerRepository? devServerRepository,
+    BrowserVerificationRepository? browserVerificationRepository,
     Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview,
     String? projectId,
     String? projectPath,
@@ -41,6 +44,7 @@ class TaskBoardDialog extends StatelessWidget {
       repository: repository,
       verificationRepository: verificationRepository,
       devServerRepository: devServerRepository,
+      browserVerificationRepository: browserVerificationRepository,
       onOpenPreview: onOpenPreview,
       projectId: projectId,
       projectPath: projectPath,
@@ -82,6 +86,7 @@ class TaskBoardDialog extends StatelessWidget {
               repository: repository,
               verificationRepository: verificationRepository,
               devServerRepository: devServerRepository,
+              browserVerificationRepository: browserVerificationRepository,
               onOpenPreview: onOpenPreview,
               projectId: projectId,
               projectPath: projectPath,
@@ -99,6 +104,7 @@ class TaskBoardPanel extends StatefulWidget {
     super.key,
     this.verificationRepository,
     this.devServerRepository,
+    this.browserVerificationRepository,
     this.onOpenPreview,
     this.projectId,
     this.projectPath,
@@ -107,6 +113,7 @@ class TaskBoardPanel extends StatefulWidget {
   final TaskRepository repository;
   final VerificationRepository? verificationRepository;
   final DevServerRepository? devServerRepository;
+  final BrowserVerificationRepository? browserVerificationRepository;
   final Future<void> Function(DevServerPreviewMetadata preview)? onOpenPreview;
   final String? projectId;
   final String? projectPath;
@@ -119,8 +126,11 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
   late final TaskBoardController _controller;
   late final VerificationRepository _verificationRepository;
   late final DevServerRepository _devServerRepository;
+  late final BrowserVerificationRepository _browserVerificationRepository;
   late final DevServerController _devServerController;
   final _verificationControllers = <String, VerificationController>{};
+  final _browserVerificationControllers =
+      <String, BrowserVerificationController>{};
   final _search = TextEditingController();
 
   @override
@@ -130,6 +140,9 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
         widget.verificationRepository ?? InMemoryVerificationRepository.demo();
     _devServerRepository =
         widget.devServerRepository ?? InMemoryDevServerRepository.demo();
+    _browserVerificationRepository =
+        widget.browserVerificationRepository ??
+        InMemoryBrowserVerificationRepository();
     _devServerController = DevServerController(
       repository: _devServerRepository,
       projectId: widget.projectId ?? 'local-project',
@@ -140,7 +153,8 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
       repository: widget.repository,
       projectId: widget.projectId,
       verificationAllowsCompletion: (taskId) =>
-          _verificationControllers[taskId]?.allowsCompletion ?? false,
+          (_verificationControllers[taskId]?.allowsCompletion ?? false) &&
+          (_browserVerificationControllers[taskId]?.allowsCompletion ?? false),
     );
     unawaited(_controller.refresh());
     unawaited(_devServerController.load());
@@ -152,6 +166,9 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
     _controller.dispose();
     _devServerController.dispose();
     for (final controller in _verificationControllers.values) {
+      controller.dispose();
+    }
+    for (final controller in _browserVerificationControllers.values) {
       controller.dispose();
     }
     super.dispose();
@@ -194,6 +211,9 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
                       verification: selected == null
                           ? null
                           : _verificationFor(selected),
+                      browserVerification: selected == null
+                          ? null
+                          : _browserVerificationFor(selected),
                     );
                     if (narrow) {
                       return Row(
@@ -226,6 +246,20 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
           taskId: task.id,
           projectId: widget.projectId,
           projectPath: widget.projectPath,
+        );
+        unawaited(controller.load());
+        return controller;
+      });
+
+  BrowserVerificationController _browserVerificationFor(RoadmapTask task) =>
+      _browserVerificationControllers.putIfAbsent(task.id, () {
+        final controller = BrowserVerificationController(
+          repository: _browserVerificationRepository,
+          taskId: task.id,
+          devServerInstanceId: () {
+            final id = _devServerController.snapshot?.instanceId;
+            return id == null || id.isEmpty ? null : id;
+          },
         );
         unawaited(controller.load());
         return controller;
@@ -468,9 +502,11 @@ class _TaskDetail extends StatelessWidget {
     required this.controller,
     required this.verification,
     required this.devServer,
+    required this.browserVerification,
   });
   final TaskBoardController controller;
   final VerificationController? verification;
+  final BrowserVerificationController? browserVerification;
   final DevServerController devServer;
 
   @override
@@ -482,13 +518,19 @@ class _TaskDetail extends StatelessWidget {
       );
     }
     final verification = this.verification!;
+    final browserVerification = this.browserVerification!;
     return AnimatedBuilder(
-      animation: Listenable.merge([verification, devServer]),
+      animation: Listenable.merge([
+        verification,
+        browserVerification,
+        devServer,
+      ]),
       builder: (context, _) => RetconPanel(
         key: Key('task-detail-${task.id}'),
         label: 'Task plan',
         padding: const EdgeInsets.all(RetconSpacing.md),
         child: ListView(
+          key: const Key('task-detail-scroll'),
           children: [
             Text(task.title, style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: RetconSpacing.xs),
@@ -584,14 +626,17 @@ class _TaskDetail extends StatelessWidget {
               task: task,
               onOpenPreview: devServer.startAndOpenPreview,
               previewReady: devServer.canOpenPreview,
+              browserController: browserVerification,
             ),
             Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const SizedBox(height: RetconSpacing.md),
-                if (!task.canComplete || !verification.allowsCompletion)
+                if (!task.canComplete ||
+                    !verification.allowsCompletion ||
+                    !browserVerification.allowsCompletion)
                   Text(
-                    _gateMessage(task, verification),
+                    _gateMessage(task, verification, browserVerification),
                     key: const Key('completion-gate-message'),
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
@@ -600,7 +645,10 @@ class _TaskDetail extends StatelessWidget {
                 const SizedBox(height: RetconSpacing.sm),
                 FilledButton.icon(
                   key: const Key('complete-task'),
-                  onPressed: task.canComplete && verification.allowsCompletion
+                  onPressed:
+                      task.canComplete &&
+                          verification.allowsCompletion &&
+                          browserVerification.allowsCompletion
                       ? () => controller.setTaskStatus(TaskStatus.complete)
                       : null,
                   icon: const Icon(Icons.task_alt),
@@ -773,7 +821,11 @@ class _CriterionTile extends StatelessWidget {
   );
 }
 
-String _gateMessage(RoadmapTask task, VerificationController verification) {
+String _gateMessage(
+  RoadmapTask task,
+  VerificationController verification,
+  BrowserVerificationController browserVerification,
+) {
   final missing = <String>[];
   if (!task.planApproved) missing.add('approve the plan');
   if (!task.stepsComplete) missing.add('complete every plan step');
@@ -783,6 +835,16 @@ String _gateMessage(RoadmapTask task, VerificationController verification) {
   if (!verification.allowsCompletion) {
     final blocker =
         verification.completionBlocker ?? 'pass required verification gates';
+    missing.add(
+      blocker.endsWith('.')
+          ? blocker.substring(0, blocker.length - 1)
+          : blocker,
+    );
+  }
+  if (!browserVerification.allowsCompletion) {
+    final blocker =
+        browserVerification.completionBlocker ??
+        'pass required browser verification';
     missing.add(
       blocker.endsWith('.')
           ? blocker.substring(0, blocker.length - 1)
