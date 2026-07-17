@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::CoreError;
-use crate::dev_servers::{DevServerRuntime, NoopDevServerRuntime};
+use crate::dev_servers::{DevServerRuntime, DurableDevServerRuntime};
 use crate::event::EventBus;
 use crate::jobs::JobSupervisor;
 use crate::session_rpc::SessionRegistry;
@@ -48,7 +48,7 @@ impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, Arc::new(NoopDevServerRuntime))
+        Self::from_storage(storage, verification_runner, None)
     }
 
     pub fn new_with_verification_runner(
@@ -56,7 +56,7 @@ impl CoreState {
         verification_runner: Arc<dyn VerificationRunner>,
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
-        Self::from_storage(storage, verification_runner, Arc::new(NoopDevServerRuntime))
+        Self::from_storage(storage, verification_runner, None)
     }
 
     pub fn new_with_dev_server_runtime(
@@ -65,13 +65,13 @@ impl CoreState {
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, dev_server_runtime)
+        Self::from_storage(storage, verification_runner, Some(dev_server_runtime))
     }
 
     fn from_storage(
         storage: Storage,
         verification_runner: Arc<dyn VerificationRunner>,
-        dev_server_runtime: Arc<dyn DevServerRuntime>,
+        dev_server_runtime: Option<Arc<dyn DevServerRuntime>>,
     ) -> Result<Self, CoreError> {
         let (shutdown, _) = watch::channel(false);
         let schema_version = storage.database().schema_version().ok();
@@ -81,6 +81,12 @@ impl CoreState {
             retcon_permissions::dev_bypass_enabled(),
         );
         let events = EventBus::open(storage.database().clone())?;
+        let dev_server_runtime = dev_server_runtime.unwrap_or_else(|| {
+            Arc::new(DurableDevServerRuntime::new(
+                storage.clone(),
+                events.clone(),
+            ))
+        });
         if recovery.changed_state() {
             events.emit(
                 "system.recovery",
@@ -164,6 +170,9 @@ impl CoreState {
         self.inner.sessions.shutdown().await;
         self.inner.browser.shutdown().await;
         self.inner.filesystem.shutdown();
+        if let Err(error) = self.inner.dev_server_runtime.shutdown().await {
+            tracing::warn!(%error, "development-server cleanup failed during shutdown");
+        }
     }
 
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {

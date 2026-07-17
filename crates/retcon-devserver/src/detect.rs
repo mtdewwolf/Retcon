@@ -72,21 +72,23 @@ fn command_candidate(
     root: &Path,
     configured: &ProjectCommand,
 ) -> Option<Result<(usize, DevServerCommand), DevServerError>> {
-    let text = format!(
-        "{} {} {}",
-        configured.key, configured.kind, configured.command
-    )
-    .to_ascii_lowercase();
-    if text.contains("test") || text.contains("check") || text.contains("lint") {
-        return None;
-    }
-    let priority = if has_word(&text, "dev") {
+    let identity = format!("{} {}", configured.key, configured.kind).to_ascii_lowercase();
+    let command = configured.command.to_ascii_lowercase();
+    let priority = if has_word(&identity, "dev") {
         0
-    } else if has_word(&text, "start") {
+    } else if has_word(&identity, "start") {
         1
-    } else if has_word(&text, "serve") || has_word(&text, "server") {
+    } else if has_word(&identity, "serve") || has_word(&identity, "server") {
         2
-    } else if configured.kind == "custom" && has_word(&text, "run") {
+    } else if command.contains("test") || command.contains("check") || command.contains("lint") {
+        return None;
+    } else if has_word(&command, "dev") {
+        0
+    } else if has_word(&command, "start") {
+        1
+    } else if has_word(&command, "serve") || has_word(&command, "server") {
+        2
+    } else if configured.kind == "custom" && has_word(&command, "run") {
         3
     } else {
         return None;

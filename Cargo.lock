@@ -777,6 +777,7 @@ dependencies = [
  "fs2",
  "retcon-agents",
  "retcon-checkpoints",
+ "retcon-devserver",
  "retcon-filesystem",
  "retcon-git",
  "retcon-permissions",

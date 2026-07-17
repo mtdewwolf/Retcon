@@ -179,6 +179,10 @@ impl DevServerRepository<'_> {
         self.0.read(|db| { let mut s=db.prepare("SELECT id,project_id,worktree_id,name,command,cwd,host,preferred_port,auto_start,env_allowlist_json,environment_json,created_at,updated_at FROM dev_server_configs WHERE project_id=?1 ORDER BY name,id")?; s.query_map([project_id.as_bytes()], row_config)?.collect() })
     }
 
+    pub fn list_auto_start_configs(&self) -> Result<Vec<DevServerConfig>> {
+        self.0.read(|db| { let mut s=db.prepare("SELECT id,project_id,worktree_id,name,command,cwd,host,preferred_port,auto_start,env_allowlist_json,environment_json,created_at,updated_at FROM dev_server_configs WHERE auto_start=1 ORDER BY project_id,worktree_id,name,id")?; s.query_map([], row_config)?.collect() })
+    }
+
     pub fn set_auto_start(&self, id: Uuid, enabled: bool) -> Result<Option<DevServerConfig>> {
         let changed = self.0.execute(
             "UPDATE dev_server_configs SET auto_start=?2,updated_at=?3 WHERE id=?1",
@@ -313,6 +317,101 @@ impl DevServerRepository<'_> {
             actor,
             false,
         )
+    }
+
+    pub fn mark_exited(&self, id: Uuid, actor: &str) -> Result<Option<DevServerInstance>> {
+        validate_actor(actor)?;
+        map_validation(self.0.transaction(|tx| {
+            let Some((config_id, project_id, current_status)) = tx
+                .query_row(
+                    "SELECT config_id,project_id,status FROM dev_server_instances WHERE id=?1",
+                    [id.as_bytes()],
+                    |row| Ok((uuid(row, 0)?, uuid(row, 1)?, row.get::<_, String>(2)?)),
+                )
+                .optional()?
+            else {
+                return Ok(false);
+            };
+            if current_status != "running" {
+                return Err(validation_error(format!(
+                    "cannot record a runtime exit while development server is '{current_status}'"
+                )));
+            }
+            let now = now_ms();
+            tx.execute(
+                "UPDATE dev_server_instances SET status='stopped',stopped_at=?2 WHERE id=?1",
+                params![id.as_bytes(), now],
+            )?;
+            tx.execute(
+                "UPDATE dev_server_port_leases SET status='released',released_at=?2 WHERE instance_id=?1 AND status='active'",
+                params![id.as_bytes(), now],
+            )?;
+            record_event(
+                tx,
+                id,
+                config_id,
+                project_id,
+                "runtime_exited",
+                actor,
+                &json!({}),
+            )?;
+            Ok(true)
+        }))?;
+        self.instance(id)
+    }
+
+    pub fn reassign_instance_port(
+        &self,
+        id: Uuid,
+        port: i64,
+        actor: &str,
+    ) -> Result<Option<DevServerInstance>> {
+        validate_port(port)?;
+        validate_actor(actor)?;
+        map_validation(self.0.transaction(|tx| {
+            let Some((config_id,project_id,current_port,current_status))=tx.query_row("SELECT config_id,project_id,port,status FROM dev_server_instances WHERE id=?1",[id.as_bytes()],|row|Ok((uuid(row,0)?,uuid(row,1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?))).optional()? else{return Ok(false)};
+            if current_status != "starting" {
+                return Err(validation_error("only a starting development server may reassign its port"));
+            }
+            if current_port == port { return Ok(true); }
+            let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dev_server_port_leases WHERE port=?1 AND status='active' AND ifnull(hex(instance_id),'')<>hex(?2))",params![port,id.as_bytes()],|row|row.get(0))?;
+            if occupied { return Err(validation_error(format!("port {port} is already leased"))); }
+            let changed = tx.execute("UPDATE dev_server_port_leases SET port=?2 WHERE instance_id=?1 AND status='active'",params![id.as_bytes(),port])?;
+            if changed != 1 { return Err(validation_error("development server has no active port lease")); }
+            tx.execute("UPDATE dev_server_instances SET port=?2 WHERE id=?1",params![id.as_bytes(),port])?;
+            record_event(tx,id,config_id,project_id,"port_changed",actor,&json!({"from":current_port,"to":port}))?;
+            Ok(true)
+        }))?;
+        self.instance(id)
+    }
+
+    pub fn record_runtime_event(
+        &self,
+        id: Uuid,
+        kind: &str,
+        actor: &str,
+        payload: &Value,
+    ) -> Result<bool> {
+        validate_actor(actor)?;
+        if kind.trim().is_empty() {
+            return Err(StorageError::Validation(
+                "development server event kind cannot be empty".into(),
+            ));
+        }
+        self.0.transaction(|tx| {
+            let Some((config_id, project_id)) = tx
+                .query_row(
+                    "SELECT config_id,project_id FROM dev_server_instances WHERE id=?1",
+                    [id.as_bytes()],
+                    |row| Ok((uuid(row, 0)?, uuid(row, 1)?)),
+                )
+                .optional()?
+            else {
+                return Ok(false);
+            };
+            record_event(tx, id, config_id, project_id, kind, actor, payload)?;
+            Ok(true)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -124,14 +124,14 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(v) => v,
                 Err(e) => return invalid(id, e.to_string()),
             };
-            start(&state, id, input.config_id, input.task_id)
+            start(&state, id, input.config_id, input.task_id).await
         }
         "devServer.stop" => {
             let instance_id = match uuid_param(&params, "instanceId") {
                 Ok(v) => v,
                 Err(e) => return invalid(id, e),
             };
-            stop(&state, id, instance_id)
+            stop(&state, id, instance_id).await
         }
         "devServer.restart" => {
             let instance_id = match uuid_param(&params, "instanceId") {
@@ -144,11 +144,11 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             }) else {
                 return missing(id, "server instance");
             };
-            let stopped = stop(&state, id, instance_id);
+            let stopped = stop(&state, id, instance_id).await;
             if stopped.error.is_some() {
                 return stopped;
             }
-            start(&state, id, instance.config_id, instance.task_id)
+            start(&state, id, instance.config_id, instance.task_id).await
         }
         "devServer.logs" => {
             let instance_id = match uuid_param(&params, "instanceId") {
@@ -312,7 +312,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
     }
 }
 
-fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid>) -> Response {
+async fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid>) -> Response {
     let repo = state.storage().database().dev_servers();
     let instance = match repo.prepare_start(config_id, task_id, ACTOR) {
         Ok(v) => v,
@@ -324,12 +324,12 @@ fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid>) -> 
     }) else {
         return missing(id, "server config");
     };
-    match state.dev_server_runtime().start(&config, &instance) {
+    match state.dev_server_runtime().start(&config, &instance).await {
         Ok(started) => {
             let started = match validate_runtime_report(&instance, started) {
                 Ok(started) => started,
                 Err(error) => {
-                    let _ = state.dev_server_runtime().stop(&instance);
+                    let _ = state.dev_server_runtime().stop(&instance).await;
                     let _ = repo.mark_failed(instance.id, &error, "runtime");
                     return Response::error(
                         id,
@@ -349,11 +349,11 @@ fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid>) -> 
                     Response::ok(id, json!({"instance":value}))
                 }
                 Ok(None) => {
-                    let _ = state.dev_server_runtime().stop(&instance);
+                    let _ = state.dev_server_runtime().stop(&instance).await;
                     missing(id, "server instance")
                 }
                 Err(e) => {
-                    let _ = state.dev_server_runtime().stop(&instance);
+                    let _ = state.dev_server_runtime().stop(&instance).await;
                     let failure = sanitize_runtime_message(&e.to_string());
                     let _ = repo.mark_failed(instance.id, &failure, "storage");
                     storage_error(id, e)
@@ -374,7 +374,7 @@ fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid>) -> 
         }
     }
 }
-fn stop(state: &CoreState, id: u64, instance_id: Uuid) -> Response {
+async fn stop(state: &CoreState, id: u64, instance_id: Uuid) -> Response {
     let repo = state.storage().database().dev_servers();
     let Some(instance) = (match repo.begin_stop(instance_id, ACTOR) {
         Ok(v) => v,
@@ -382,7 +382,7 @@ fn stop(state: &CoreState, id: u64, instance_id: Uuid) -> Response {
     }) else {
         return missing(id, "server instance");
     };
-    match state.dev_server_runtime().stop(&instance) {
+    match state.dev_server_runtime().stop(&instance).await {
         Ok(logs) => {
             if let Err(e) = persist_logs(state, instance.id, &logs) {
                 let failure = sanitize_runtime_message(&e.to_string());
@@ -574,6 +574,32 @@ fn detect(project_id: Uuid, root: &Path) -> Vec<Value> {
     out
 }
 
+pub(crate) async fn auto_start(state: CoreState) {
+    let configs = match state
+        .storage()
+        .database()
+        .dev_servers()
+        .list_auto_start_configs()
+    {
+        Ok(configs) => configs,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load auto-start development servers");
+            return;
+        }
+    };
+    for config in configs {
+        let response = start(&state, 0, config.id, None).await;
+        if let Some(error) = response.error {
+            state.emit(
+                "dev_server.auto_start_failed",
+                json!({"configId": config.id, "error": error}),
+            );
+        } else {
+            state.emit("dev_server.auto_started", json!({"configId": config.id}));
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -583,19 +609,24 @@ mod tests {
     use std::sync::Arc;
     struct Fake;
     impl DevServerRuntime for Fake {
-        fn start(
-            &self,
-            _: &DevServerLaunchConfig,
-            i: &DevServerInstance,
-        ) -> Result<DevServerStarted, String> {
-            Ok(DevServerStarted {
-                pid: Some(7),
-                url: format!("http://127.0.0.1:{}", i.port),
-                preview: json!({"title":"preview","token":"preview-secret"}),
+        fn start<'a>(
+            &'a self,
+            _: &'a DevServerLaunchConfig,
+            i: &'a DevServerInstance,
+        ) -> crate::dev_servers::DevServerFuture<'a, DevServerStarted> {
+            Box::pin(async move {
+                Ok(DevServerStarted {
+                    pid: Some(7),
+                    url: format!("http://127.0.0.1:{}", i.port),
+                    preview: json!({"title":"preview","token":"preview-secret"}),
+                })
             })
         }
-        fn stop(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
-            Ok(b"stopped".to_vec())
+        fn stop<'a>(
+            &'a self,
+            _: &'a DevServerInstance,
+        ) -> crate::dev_servers::DevServerFuture<'a, Vec<u8>> {
+            Box::pin(async { Ok(b"stopped".to_vec()) })
         }
         fn logs(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
             let mut bytes =
@@ -708,19 +739,24 @@ mod tests {
 
     struct Spoof;
     impl DevServerRuntime for Spoof {
-        fn start(
-            &self,
-            _: &DevServerLaunchConfig,
-            i: &DevServerInstance,
-        ) -> Result<DevServerStarted, String> {
-            Ok(DevServerStarted {
-                pid: Some(-1),
-                url: format!("https://evil.example:{}", i.port),
-                preview: json!({}),
+        fn start<'a>(
+            &'a self,
+            _: &'a DevServerLaunchConfig,
+            i: &'a DevServerInstance,
+        ) -> crate::dev_servers::DevServerFuture<'a, DevServerStarted> {
+            Box::pin(async move {
+                Ok(DevServerStarted {
+                    pid: Some(-1),
+                    url: format!("https://evil.example:{}", i.port),
+                    preview: json!({}),
+                })
             })
         }
-        fn stop(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
-            Ok(Vec::new())
+        fn stop<'a>(
+            &'a self,
+            _: &'a DevServerInstance,
+        ) -> crate::dev_servers::DevServerFuture<'a, Vec<u8>> {
+            Box::pin(async { Ok(Vec::new()) })
         }
         fn logs(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
             Ok(Vec::new())
@@ -729,19 +765,24 @@ mod tests {
 
     struct StopFailure;
     impl DevServerRuntime for StopFailure {
-        fn start(
-            &self,
-            _: &DevServerLaunchConfig,
-            i: &DevServerInstance,
-        ) -> Result<DevServerStarted, String> {
-            Ok(DevServerStarted {
-                pid: Some(77),
-                url: format!("http://localhost:{}", i.port),
-                preview: json!({}),
+        fn start<'a>(
+            &'a self,
+            _: &'a DevServerLaunchConfig,
+            i: &'a DevServerInstance,
+        ) -> crate::dev_servers::DevServerFuture<'a, DevServerStarted> {
+            Box::pin(async move {
+                Ok(DevServerStarted {
+                    pid: Some(77),
+                    url: format!("http://localhost:{}", i.port),
+                    preview: json!({}),
+                })
             })
         }
-        fn stop(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
-            Err("password=hunter2".into())
+        fn stop<'a>(
+            &'a self,
+            _: &'a DevServerInstance,
+        ) -> crate::dev_servers::DevServerFuture<'a, Vec<u8>> {
+            Box::pin(async { Err("password=hunter2".into()) })
         }
         fn logs(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
             Ok(Vec::new())

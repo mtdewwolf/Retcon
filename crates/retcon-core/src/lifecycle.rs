@@ -56,6 +56,10 @@ impl CoreRuntime {
             "system.ready",
             serde_json::json!({"transport": endpoint.kind, "path": endpoint.path_string(), "version": env!("CARGO_PKG_VERSION")}),
         );
+        let auto_start_state = state.clone();
+        tokio::spawn(async move {
+            crate::dev_servers_rpc::auto_start(auto_start_state).await;
+        });
 
         Ok(Self {
             config,
