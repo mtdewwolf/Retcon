@@ -33,6 +33,22 @@ class ProtocolV1 {
     'session.resume',
     'turn.send',
     'turn.cancel',
+    'task.create',
+    'task.get',
+    'task.list',
+    'task.update',
+    'task.delete',
+    'task.status.set',
+    'task.dependencies.replace',
+    'task.plan.get',
+    'task.plan.replace',
+    'task.acceptance.list',
+    'task.acceptance.create',
+    'task.acceptance.update',
+    'task.acceptance.delete',
+    'task.acceptance.evidence',
+    'task.acceptance.evaluate',
+    'task.acceptance.override',
     'terminal.detectShells',
     'terminal.start',
     'terminal.input',
@@ -118,10 +134,7 @@ class Discovery {
 }
 
 class ClientHello {
-  const ClientHello({
-    required this.clientVersion,
-    this.features = const [],
-  });
+  const ClientHello({required this.clientVersion, this.features = const []});
 
   Map<String, dynamic> toJson() => {
     'kind': 'client.hello',

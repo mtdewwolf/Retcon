@@ -54,10 +54,7 @@ class Discovery {
 }
 
 class ClientHello {
-  const ClientHello({
-    required this.clientVersion,
-    this.features = const [],
-  });
+  const ClientHello({required this.clientVersion, this.features = const []});
 
   Map<String, dynamic> toJson() => {
     'kind': 'client.hello',
