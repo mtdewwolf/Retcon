@@ -19,6 +19,11 @@ use crate::state::CoreState;
 const ACTOR: &str = "local_user";
 const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 const MAX_PATHS: usize = 64;
+const MAX_SERVICE_ARTIFACTS: usize = 16;
+const MAX_SERVICE_ARTIFACT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SERVICE_METADATA_BYTES: usize = 256 * 1024;
+const MAX_LOG_ENTRIES: usize = 1_000;
+const MAX_LOG_ENTRY_BYTES: usize = 64 * 1024;
 
 pub async fn handle(state: CoreState, request: Request) -> Response {
     let Request { id, method, params } = request;
@@ -140,9 +145,22 @@ async fn start_session(state: &CoreState, id: u64, params: &Value) -> Response {
                     return storage_error(id, error);
                 }
             };
-            let initial_tab = started.initial_tab.as_ref().and_then(|tab| {
-                persist_tab(&repository, session_id, tab, &session.network_policy).ok()
-            });
+            let initial_tab = match started.initial_tab.as_ref() {
+                Some(tab) => {
+                    match persist_tab(&repository, session_id, tab, &session.network_policy) {
+                        Ok(tab) => Some(tab),
+                        Err(error) => {
+                            let failure = scrub(&format!(
+                                "browser service returned an invalid initial tab: {error}"
+                            ));
+                            fail_closed_service_session(state, &repository, &session, &failure)
+                                .await;
+                            return service_error(id, "launch browser session", failure);
+                        }
+                    }
+                }
+                None => None,
+            };
             emit(
                 state,
                 "browser.session_started",
@@ -325,8 +343,27 @@ async fn call_operation(
         .await
     {
         Ok(value) => value,
-        Err(error) => return service_error(id, service_method, scrub(&error.to_string())),
+        Err(error) => {
+            let failure = scrub(&error.to_string());
+            if error.is_fatal() {
+                let _ = repository.mark_orphaned(session.id, &failure, "service");
+                emit(
+                    state,
+                    "browser.session_orphaned",
+                    &session,
+                    json!({"failure":failure}),
+                );
+            }
+            return service_error(id, service_method, failure);
+        }
     };
+    if let Err(error) = validate_service_result(&session, rpc_method, &result) {
+        let failure = scrub(&format!(
+            "browser service violated its response contract: {error}"
+        ));
+        fail_closed_service_session(state, &repository, &session, &failure).await;
+        return service_error(id, service_method, failure);
+    }
     match persist_call_result(state, &session, tab.as_ref(), rpc_method, result) {
         Ok((value, artifacts, stored_tab)) => {
             let _ = repository.record_event(
@@ -356,12 +393,16 @@ fn validate_operation(
     method: &str,
     params: &mut Value,
 ) -> Result<(), String> {
-    if method == "browser.navigate" {
-        let url = params
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "browser.navigate requires url".to_owned())?;
-        validate_url(url, &session.network_policy)?;
+    if matches!(method, "browser.navigate" | "browser.tab.open") {
+        let url = params.get("url").and_then(Value::as_str);
+        if method == "browser.navigate" && url.is_none() {
+            return Err("browser.navigate requires url".to_owned());
+        }
+        if let Some(url) = url
+            && url != "about:blank"
+        {
+            validate_url(url, &session.network_policy)?;
+        }
     }
     if method == "browser.automation.script" {
         let script = params
@@ -420,6 +461,125 @@ fn validate_operation(
     Ok(())
 }
 
+fn validate_service_result(
+    session: &DurableBrowserSession,
+    method: &str,
+    result: &BrowserCallResult,
+) -> Result<(), String> {
+    if matches!(
+        method,
+        "browser.tab.open"
+            | "browser.navigate"
+            | "browser.back"
+            | "browser.forward"
+            | "browser.reload"
+    ) {
+        let url = result.value.get("url").and_then(Value::as_str);
+        if matches!(method, "browser.tab.open" | "browser.navigate") && url.is_none() {
+            return Err(format!("{method} response omitted url"));
+        }
+        if let Some(url) = url
+            && url != "about:blank"
+        {
+            validate_url(url, &session.network_policy)?;
+        }
+    }
+    Ok(())
+}
+
+async fn fail_closed_service_session(
+    state: &CoreState,
+    repository: &retcon_storage::BrowserRepository<'_>,
+    session: &DurableBrowserSession,
+    failure: &str,
+) {
+    let terminal_status = if state.browser_service().close(session.id).await.is_ok() {
+        let _ = repository.mark_failed(session.id, failure, "service");
+        "failed"
+    } else {
+        let _ = repository.mark_orphaned(session.id, failure, "service");
+        "orphaned"
+    };
+    emit(
+        state,
+        "browser.session_failed_closed",
+        session,
+        json!({"failure":failure,"terminalStatus":terminal_status}),
+    );
+}
+
+fn validate_log_entries(entries: &[Value], kind: &str) -> retcon_storage::Result<()> {
+    if entries.len() > MAX_LOG_ENTRIES {
+        return Err(StorageError::Validation(format!(
+            "browser {kind} log response exceeds {MAX_LOG_ENTRIES} entries"
+        )));
+    }
+    for entry in entries {
+        let size = serde_json::to_vec(entry)
+            .map_err(|error| {
+                StorageError::Validation(format!("could not encode browser {kind} log: {error}"))
+            })?
+            .len();
+        if size > MAX_LOG_ENTRY_BYTES {
+            return Err(StorageError::Validation(format!(
+                "browser {kind} log entry exceeds 64 KiB"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_service_artifacts(artifacts: &[BrowserServiceArtifact]) -> retcon_storage::Result<()> {
+    if artifacts.len() > MAX_SERVICE_ARTIFACTS {
+        return Err(StorageError::Validation(format!(
+            "browser service returned more than {MAX_SERVICE_ARTIFACTS} artifacts"
+        )));
+    }
+    let mut total = 0_usize;
+    for artifact in artifacts {
+        total = total.checked_add(artifact.bytes.len()).ok_or_else(|| {
+            StorageError::Validation("browser artifact byte count overflowed".into())
+        })?;
+        if artifact.bytes.len() > MAX_SERVICE_ARTIFACT_BYTES
+            || total > MAX_SERVICE_ARTIFACT_TOTAL_BYTES
+        {
+            return Err(StorageError::Validation(
+                "browser service artifacts exceed configured byte limits".into(),
+            ));
+        }
+        if artifact.kind.is_empty()
+            || artifact.kind.len() > 64
+            || !artifact
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || artifact.mime_type.is_empty()
+            || artifact.mime_type.len() > 128
+            || artifact
+                .mime_type
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+        {
+            return Err(StorageError::Validation(
+                "browser artifact kind or MIME type is invalid".into(),
+            ));
+        }
+        let metadata_size = serde_json::to_vec(&artifact.metadata)
+            .map_err(|error| {
+                StorageError::Validation(format!(
+                    "could not encode browser artifact metadata: {error}"
+                ))
+            })?
+            .len();
+        if metadata_size > MAX_SERVICE_METADATA_BYTES {
+            return Err(StorageError::Validation(
+                "browser artifact metadata exceeds 256 KiB".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn persist_call_result(
     state: &CoreState,
     session: &DurableBrowserSession,
@@ -441,12 +601,19 @@ fn persist_call_result(
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let repository = state.storage().database().durable_browsers();
-        repository.append_console(session.id, &console)?;
-        repository.append_network(session.id, &network)?;
+        validate_log_entries(&console, "console")?;
+        validate_log_entries(&network, "network")?;
         let bytes = serde_json::to_vec(&result.value).map_err(|error| {
             StorageError::Validation(format!("could not encode browser log artifact: {error}"))
         })?;
+        if bytes.len() > MAX_SERVICE_ARTIFACT_BYTES {
+            return Err(StorageError::Validation(
+                "browser log artifact exceeds 16 MiB".into(),
+            ));
+        }
+        let repository = state.storage().database().durable_browsers();
+        repository.append_console(session.id, &console)?;
+        repository.append_network(session.id, &network)?;
         result.artifacts.push(BrowserServiceArtifact {
             kind: "logs".into(),
             mime_type: "application/json".into(),
@@ -454,6 +621,7 @@ fn persist_call_result(
             metadata: json!({"bounded":true}),
         });
     }
+    validate_service_artifacts(&result.artifacts)?;
     let repository = state.storage().database().durable_browsers();
     let mut observations = Vec::new();
     for service_artifact in result.artifacts {
@@ -472,6 +640,12 @@ fn persist_call_result(
             .storage()
             .artifacts()
             .store_bytes(&service_artifact.bytes)?;
+        let verified = state.storage().artifacts().verify(&artifact.hash)?;
+        if verified.size != artifact.size {
+            return Err(StorageError::Validation(
+                "browser artifact size changed while storing".into(),
+            ));
+        }
         observations.push(repository.record_observation(
             session.id,
             tab.map(|value| value.id),
@@ -495,7 +669,10 @@ fn persist_call_result(
             repository.close_tab(session.id, tab.id, ACTOR)?;
         }
         None
-    } else if method == "browser.navigate" {
+    } else if matches!(
+        method,
+        "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload"
+    ) {
         if let Some(tab) = tab {
             let reported_url = result.value.get("url").and_then(Value::as_str);
             if let Some(url) = reported_url {
@@ -567,7 +744,8 @@ async fn takeover_start(state: &CoreState, id: u64, params: &Value) -> Response 
         Ok(value) => value,
         Err(error) => return invalid(id, error),
     };
-    let reason = params.get("reason").and_then(Value::as_str);
+    let reason = params.get("reason").and_then(Value::as_str).map(scrub);
+    let reason = reason.as_deref();
     let repository = state.storage().database().durable_browsers();
     let takeover = match repository.start_takeover(session_id, ACTOR, reason) {
         Ok(value) => value,
@@ -591,7 +769,11 @@ async fn takeover_start(state: &CoreState, id: u64, params: &Value) -> Response 
         }
         Err(error) => {
             let _ = repository.stop_takeover(session_id, "service", "service_error");
-            service_error(id, "start browser takeover", scrub(&error.to_string()))
+            let failure = scrub(&error.to_string());
+            if error.is_fatal() {
+                let _ = repository.mark_orphaned(session_id, &failure, "service");
+            }
+            service_error(id, "start browser takeover", failure)
         }
     }
 }
@@ -606,7 +788,15 @@ async fn takeover_stop(state: &CoreState, id: u64, params: &Value) -> Response {
         .call(session_id, "browser.takeover.stop", json!({}))
         .await
     {
-        return service_error(id, "stop browser takeover", scrub(&error.to_string()));
+        let failure = scrub(&error.to_string());
+        if error.is_fatal() {
+            let _ = state
+                .storage()
+                .database()
+                .durable_browsers()
+                .mark_orphaned(session_id, &failure, "service");
+        }
+        return service_error(id, "stop browser takeover", failure);
     }
     match state
         .storage()
@@ -680,6 +870,18 @@ fn contained_project_path(root: &Path, path: PathBuf, must_exist: bool) -> Resul
             .map_err(|_| "browser upload file does not exist".to_owned())?;
         if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
             return Err("browser upload path escapes the project root".into());
+        }
+        return Ok(canonical);
+    }
+    if let Ok(metadata) = path.symlink_metadata() {
+        if metadata.file_type().is_symlink() {
+            return Err("browser download destination cannot be a symbolic link".into());
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| "browser download destination could not be resolved".to_owned())?;
+        if !metadata.is_file() || !canonical.starts_with(&canonical_root) {
+            return Err("browser download destination escapes the project root".into());
         }
         return Ok(canonical);
     }
@@ -892,7 +1094,7 @@ mod tests {
     async fn durable_lifecycle_navigation_observation_and_takeover() {
         let directory = tempfile::tempdir().unwrap();
         let service = Arc::new(FakeService::default());
-        let state = CoreState::new_with_browser_service(directory.path(), service).unwrap();
+        let state = CoreState::new_with_browser_service(directory.path(), service.clone()).unwrap();
         let project = state
             .storage()
             .database()
@@ -916,6 +1118,23 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
+        let rejected_open = handle(
+            state.clone(),
+            Request {
+                id: 9,
+                method: "browser.tab.open".into(),
+                params: json!({"sessionId":session_id,"url":"https://example.com"}),
+            },
+        )
+        .await;
+        assert!(rejected_open.error.is_some());
+        assert!(
+            !service
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"browser.tab.open".into())
+        );
         let navigated = handle(
             state.clone(),
             Request {
@@ -997,5 +1216,105 @@ mod tests {
         assert!(validate_url("https://example.com", "network").is_ok());
         assert!(safe_project_path(Path::new("C:/repo"), "../secret").is_err());
         assert!(safe_project_path(Path::new("C:/repo"), "assets/file.txt").is_ok());
+    }
+
+    #[test]
+    fn rejects_existing_symlink_as_download_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, b"outside").unwrap();
+        let link = root.path().join("download.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&outside_file, &link).is_err() {
+            return;
+        }
+        assert!(contained_project_path(root.path(), link, false).is_err());
+    }
+
+    #[derive(Default)]
+    struct InvalidInitialTabService {
+        closed: Mutex<bool>,
+    }
+
+    impl BrowserService for InvalidInitialTabService {
+        fn diagnostics(&self) -> Result<BrowserServiceDiagnostics, BrowserServiceError> {
+            Ok(BrowserServiceDiagnostics {
+                service_version: "0.1.0".into(),
+                protocol_version: BROWSER_SERVICE_PROTOCOL,
+                features: vec![],
+                healthy: true,
+            })
+        }
+
+        fn launch<'a>(
+            &'a self,
+            request: &'a BrowserLaunchRequest,
+        ) -> BrowserFuture<'a, BrowserLaunchResult> {
+            Box::pin(async move {
+                Ok(BrowserLaunchResult {
+                    service_session_id: format!("service-{}", request.session_id),
+                    initial_tab: Some(json!({
+                        "serviceTabId":"tab-1",
+                        "url":"https://example.com"
+                    })),
+                })
+            })
+        }
+
+        fn close<'a>(&'a self, _session_id: Uuid) -> BrowserFuture<'a, ()> {
+            *self.closed.lock().unwrap() = true;
+            Box::pin(async { Ok(()) })
+        }
+
+        fn call<'a>(
+            &'a self,
+            _session_id: Uuid,
+            _method: &'a str,
+            _params: Value,
+        ) -> BrowserFuture<'a, BrowserCallResult> {
+            Box::pin(async { Ok(BrowserCallResult::value(json!({}))) })
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_initial_tab_fails_closed_and_releases_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Arc::new(InvalidInitialTabService::default());
+        let state = CoreState::new_with_browser_service(directory.path(), service.clone()).unwrap();
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&NewProject::new("Web"))
+            .unwrap();
+        let response = handle(
+            state.clone(),
+            Request {
+                id: 1,
+                method: "browser.session.start".into(),
+                params: json!({"projectId":project.id}),
+            },
+        )
+        .await;
+        assert!(response.error.is_some());
+        assert!(*service.closed.lock().unwrap());
+        let sessions = state
+            .storage()
+            .database()
+            .durable_browsers()
+            .list_sessions(project.id)
+            .unwrap();
+        assert_eq!(sessions[0].status, "failed");
+        let profile = state
+            .storage()
+            .database()
+            .durable_browsers()
+            .profile(sessions[0].profile_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.status, "released");
     }
 }

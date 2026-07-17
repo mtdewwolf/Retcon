@@ -31,6 +31,12 @@ impl BrowserServiceDiagnostics {
         self.healthy
             && self.protocol_version == BROWSER_SERVICE_PROTOCOL
             && !self.service_version.trim().is_empty()
+            && self.service_version.len() <= 128
+            && self.features.len() <= 64
+            && self
+                .features
+                .iter()
+                .all(|feature| !feature.trim().is_empty() && feature.len() <= 128)
     }
 }
 
@@ -86,6 +92,14 @@ impl BrowserServiceError {
             code: code.into(),
             message: message.into(),
         }
+    }
+
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "closed" | "crashed" | "decode" | "eof" | "transport" | "unavailable"
+        )
     }
 }
 
@@ -173,9 +187,14 @@ impl<T: BrowserTransport> BrowserService for TransportBrowserService<T> {
         params: Value,
     ) -> BrowserFuture<'a, BrowserCallResult> {
         Box::pin(async move {
+            let mut params = params.as_object().cloned().ok_or_else(|| {
+                BrowserServiceError::new("encode", "browser service params must be an object")
+            })?;
+            params.remove("approvalId");
+            params.insert("sessionId".into(), Value::String(session_id.to_string()));
             let value = self
                 .transport
-                .request(method, json!({"sessionId":session_id,"params":params}))
+                .request(method, Value::Object(params))
                 .await?;
             Ok(BrowserCallResult::value(value))
         })
@@ -223,5 +242,77 @@ impl BrowserService for UnavailableBrowserService {
                 "browser service is not installed",
             ))
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        request: Mutex<Option<(String, Value)>>,
+    }
+
+    impl BrowserTransport for RecordingTransport {
+        fn request<'a>(&'a self, method: &'a str, params: Value) -> BrowserFuture<'a, Value> {
+            *self.request.lock().unwrap() = Some((method.into(), params));
+            Box::pin(async { Ok(json!({"ok":true})) })
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_flattens_service_params_and_strips_approval() {
+        let transport = Arc::new(RecordingTransport::default());
+        let service = TransportBrowserService::new(
+            transport.clone(),
+            BrowserServiceDiagnostics {
+                service_version: "0.1.0".into(),
+                protocol_version: BROWSER_SERVICE_PROTOCOL,
+                features: vec!["tabs".into()],
+                healthy: true,
+            },
+        );
+        let session_id = Uuid::new_v4();
+        service
+            .call(
+                session_id,
+                "browser.navigate",
+                json!({"url":"http://127.0.0.1:3000","approvalId":Uuid::new_v4()}),
+            )
+            .await
+            .unwrap();
+
+        let recorded = transport.request.lock().unwrap().clone().unwrap();
+        assert_eq!(recorded.0, "browser.navigate");
+        assert_eq!(recorded.1["sessionId"], session_id.to_string());
+        assert_eq!(recorded.1["url"], "http://127.0.0.1:3000");
+        assert!(recorded.1.get("approvalId").is_none());
+        assert!(recorded.1.get("params").is_none());
+    }
+
+    #[test]
+    fn diagnostics_reject_unbounded_or_empty_identity_fields() {
+        assert!(
+            !BrowserServiceDiagnostics {
+                service_version: "x".repeat(129),
+                protocol_version: BROWSER_SERVICE_PROTOCOL,
+                features: vec![],
+                healthy: true,
+            }
+            .compatible()
+        );
+        assert!(
+            !BrowserServiceDiagnostics {
+                service_version: "0.1.0".into(),
+                protocol_version: BROWSER_SERVICE_PROTOCOL,
+                features: vec![String::new()],
+                healthy: true,
+            }
+            .compatible()
+        );
     }
 }

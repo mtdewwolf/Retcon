@@ -34,6 +34,9 @@ const SENSITIVE_KEYS: &[&str] = &[
     "privatekey",
     "credential",
     "credentials",
+    "cookie",
+    "cookies",
+    "set_cookie",
     "prompt",
 ];
 
@@ -159,5 +162,16 @@ mod tests {
                 .unwrap()
                 .contains("[REDACTED]")
         );
+    }
+
+    #[test]
+    fn scrub_json_redacts_cookie_containers_and_headers() {
+        let scrubbed = scrub_json(json!({
+            "cookies": [{"name": "session", "value": "plain-cookie-value"}],
+            "headers": {"Cookie": "session=plain-cookie-value", "Authorization": "Bearer secret"}
+        }));
+        assert_eq!(scrubbed["cookies"], "[REDACTED]");
+        assert_eq!(scrubbed["headers"]["Cookie"], "[REDACTED]");
+        assert_eq!(scrubbed["headers"]["Authorization"], "[REDACTED]");
     }
 }

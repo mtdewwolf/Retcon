@@ -184,7 +184,14 @@ impl BrowserRepository<'_> {
         service_protocol: i64,
         actor: &str,
     ) -> Result<Option<DurableBrowserSession>> {
-        if service_session_id.trim().is_empty() || service_version.trim().is_empty() {
+        if service_session_id.trim().is_empty()
+            || service_session_id.len() > 256
+            || service_session_id.chars().any(char::is_control)
+            || service_version.trim().is_empty()
+            || service_version.len() > 128
+            || service_version.chars().any(char::is_control)
+            || service_protocol <= 0
+        {
             return Err(StorageError::Validation(
                 "browser service identity cannot be empty".into(),
             ));
@@ -239,11 +246,11 @@ impl BrowserRepository<'_> {
             if !valid{return Err(validation_error(format!("cannot transition browser session from '{current}' to '{next}'")));}
             let now=now_ms();
             let (service_id,version,protocol)=service.map_or((None,None,None),|(id,version,protocol)|(Some(id),Some(version),Some(protocol)));
-            tx.execute("UPDATE browser_sessions SET status=?2,service_session_id=COALESCE(?3,service_session_id),service_version=COALESCE(?4,service_version),service_protocol=COALESCE(?5,service_protocol),failure=?6,updated_at=?7,ended_at=CASE WHEN ?2 IN ('stopped','failed') THEN ?7 ELSE ended_at END WHERE id=?1",params![id.as_bytes(),next,service_id,version,protocol,failure,now])?;
+            tx.execute("UPDATE browser_sessions SET status=?2,service_session_id=COALESCE(?3,service_session_id),service_version=COALESCE(?4,service_version),service_protocol=COALESCE(?5,service_protocol),failure=?6,updated_at=?7,ended_at=CASE WHEN ?2 IN ('stopped','failed','orphaned') THEN ?7 ELSE ended_at END WHERE id=?1",params![id.as_bytes(),next,service_id,version,protocol,failure,now])?;
             if matches!(next,"stopped"|"failed") {
                 tx.execute("UPDATE browser_profiles SET status=CASE WHEN persistent=1 THEN 'available' ELSE 'released' END,updated_at=?2,released_at=?2 WHERE id=?1 AND status='active'",params![profile_id.as_bytes(),now])?;
-                tx.execute("UPDATE browser_takeovers SET ended_at=?2,end_reason=?3 WHERE browser_session_id=?1 AND ended_at IS NULL",params![id.as_bytes(),now,next])?;
             }
+            if matches!(next,"stopped"|"failed"|"orphaned") { tx.execute("UPDATE browser_takeovers SET ended_at=?2,end_reason=?3 WHERE browser_session_id=?1 AND ended_at IS NULL",params![id.as_bytes(),now,next])?; }
             record_event(tx,id,project_id,next,actor,&json!({"failure":failure}))?;
             Ok(true)
         }))?;
@@ -270,7 +277,12 @@ impl BrowserRepository<'_> {
         title: Option<&str>,
         actor: &str,
     ) -> Result<BrowserTab> {
-        if service_tab_id.trim().is_empty() {
+        if service_tab_id.trim().is_empty()
+            || service_tab_id.len() > 256
+            || service_tab_id.chars().any(char::is_control)
+            || url.is_some_and(|value| value.len() > 8_192 || value.chars().any(char::is_control))
+            || title.is_some_and(|value| value.len() > 4_096 || value.chars().any(char::is_control))
+        {
             return Err(StorageError::Validation(
                 "browser tab id cannot be empty".into(),
             ));
@@ -321,7 +333,12 @@ impl BrowserRepository<'_> {
     ) -> Result<BrowserObservation> {
         validate_actor(actor)?;
         validate_hash(artifact_hash)?;
-        if kind.trim().is_empty() || mime_type.trim().is_empty() || size_bytes < 0 {
+        if kind.trim().is_empty()
+            || kind.len() > 64
+            || mime_type.trim().is_empty()
+            || mime_type.len() > 128
+            || size_bytes < 0
+        {
             return Err(StorageError::Validation(
                 "invalid browser observation metadata".into(),
             ));
@@ -329,6 +346,11 @@ impl BrowserRepository<'_> {
         let id = Uuid::new_v4();
         let encoded =
             serde_json::to_string(metadata).map_err(json_error("encode browser observation"))?;
+        if encoded.len() > 256 * 1024 {
+            return Err(StorageError::Validation(
+                "browser observation metadata exceeds 256 KiB".into(),
+            ));
+        }
         map_validation(self.0.transaction(|tx|{let project_id=session_project(tx,session_id)?;if let Some(tab_id)=tab_id{let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM browser_tabs WHERE id=?1 AND browser_session_id=?2)",params![tab_id.as_bytes(),session_id.as_bytes()],|row|row.get(0))?;if !exists{return Err(validation_error("browser observation tab does not belong to session"));}}let now=now_ms();tx.execute("INSERT INTO browser_observations(id,browser_session_id,tab_id,kind,artifact_hash,mime_type,size_bytes,metadata_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id.as_bytes(),session_id.as_bytes(),optional_uuid_bytes(tab_id),kind,artifact_hash,mime_type,size_bytes,encoded,now])?;record_event(tx,session_id,project_id,"observation_recorded",actor,&json!({"observationId":id,"kind":kind,"artifactHash":artifact_hash,"sizeBytes":size_bytes}))?;Ok(())}))?;
         self.observation(id)?
             .ok_or_else(|| StorageError::Validation("browser observation disappeared".into()))
@@ -381,6 +403,11 @@ impl BrowserRepository<'_> {
         reason: Option<&str>,
     ) -> Result<BrowserTakeover> {
         validate_actor(actor)?;
+        if reason.is_some_and(|value| value.len() > 4_096 || value.contains('\0')) {
+            return Err(StorageError::Validation(
+                "browser takeover reason is invalid".into(),
+            ));
+        }
         let id = Uuid::new_v4();
         map_validation(self.0.transaction(|tx|{let project_id=session_project(tx,session_id)?;let status:String=tx.query_row("SELECT status FROM browser_sessions WHERE id=?1",[session_id.as_bytes()],|row|row.get(0))?;if status!="running"{return Err(validation_error("browser takeover requires a running session"));}let now=now_ms();tx.execute("INSERT INTO browser_takeovers(id,browser_session_id,actor,reason,started_at) VALUES (?1,?2,?3,?4,?5)",params![id.as_bytes(),session_id.as_bytes(),actor,reason,now])?;record_event(tx,session_id,project_id,"takeover_started",actor,&json!({"takeoverId":id,"reason":reason}))?;Ok(())}))?;
         self.takeover(id)?
@@ -425,7 +452,10 @@ impl BrowserRepository<'_> {
 
 fn validate_new_session(input: &NewDurableBrowserSession, actor: &str) -> Result<()> {
     validate_actor(actor)?;
-    if input.profile_path.trim().is_empty() || input.profile_path.contains('\0') {
+    if input.profile_path.trim().is_empty()
+        || input.profile_path.len() > 32_768
+        || input.profile_path.contains('\0')
+    {
         return Err(StorageError::Validation(
             "browser profile path is invalid".into(),
         ));
@@ -496,9 +526,9 @@ fn browser_scope(
                 "browser development server is not running",
             ));
         }
-        if task_id.is_some() && task.is_some() && task_id != task {
+        if task_id.is_some() && task_id != task {
             return Err(validation_error(
-                "browser task and development server task differ",
+                "browser task and development server task scope differ",
             ));
         }
         if worktree_id.is_some() && worktree.is_some() && worktree_id != worktree {
@@ -664,7 +694,7 @@ fn row_takeover(row: &Row<'_>) -> rusqlite::Result<BrowserTakeover> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{NewProject, NewTask};
+    use crate::{NewDevServerConfig, NewProject, NewTask};
 
     #[test]
     fn lifecycle_tabs_observations_takeover_and_bounded_logs_round_trip() {
@@ -769,6 +799,42 @@ mod tests {
     }
 
     #[test]
+    fn rejects_task_scoped_browser_for_project_scoped_development_server() {
+        let database = Database::open_in_memory().unwrap();
+        let project = database.projects().create(&NewProject::new("Web")).unwrap();
+        let mut task = NewTask::new("Task preview");
+        task.project_id = Some(project.id);
+        let task = database.tasks().create(&task).unwrap();
+        let config = database
+            .dev_servers()
+            .save_config(&NewDevServerConfig::new(project.id, "web", "serve", "."))
+            .unwrap();
+        let instance = database
+            .dev_servers()
+            .prepare_start(config.id, None, "test")
+            .unwrap();
+        database
+            .dev_servers()
+            .mark_running(
+                instance.id,
+                Some(42),
+                "http://127.0.0.1:3000",
+                &json!({}),
+                "test",
+            )
+            .unwrap();
+        let mut input = NewDurableBrowserSession::new(project.id, "C:/profiles/mismatch");
+        input.task_id = Some(task.id);
+        input.dev_server_instance_id = Some(instance.id);
+        assert!(
+            database
+                .durable_browsers()
+                .prepare_session(&input, "test")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn recovery_interrupts_sessions_takeovers_and_profiles() {
         let database = Database::open_in_memory().unwrap();
         let project = database
@@ -798,5 +864,37 @@ mod tests {
             "orphaned"
         );
         assert!(repository.active_takeover(session.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn orphaning_session_closes_takeover_but_preserves_profile_ownership() {
+        let database = Database::open_in_memory().unwrap();
+        let project = database.projects().create(&NewProject::new("Web")).unwrap();
+        let input = NewDurableBrowserSession::new(project.id, "C:/profiles/orphaned");
+        let repository = database.durable_browsers();
+        let session = repository.prepare_session(&input, "test").unwrap();
+        repository
+            .mark_running(session.id, "service", "0.1.0", 1, "test")
+            .unwrap();
+        repository
+            .start_takeover(session.id, "user", Some("inspect"))
+            .unwrap();
+
+        let orphaned = repository
+            .mark_orphaned(session.id, "transport closed", "service")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(orphaned.status, "orphaned");
+        assert!(orphaned.ended_at.is_some());
+        assert!(repository.active_takeover(session.id).unwrap().is_none());
+        assert_eq!(
+            repository
+                .profile(session.profile_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "active"
+        );
     }
 }

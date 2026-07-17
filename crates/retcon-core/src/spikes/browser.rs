@@ -134,6 +134,7 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             while let Ok(Some(line)) = read_capped_line(&mut reader).await {
+                let line = retcon_secrets::redact_text(&line);
                 tracing::debug!(target: "retcon_browser_service", "{line}");
             }
         });
@@ -149,6 +150,7 @@ async fn start_service(state: CoreState, id: u64, params: &Value) -> Response {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            let value = retcon_secrets::scrub_json(value);
             if let Some(reply_id) = value.get("id").and_then(Value::as_u64) {
                 if let Some(sender) = reader_pending.lock().await.remove(&reply_id) {
                     let _ = sender.send(value);
