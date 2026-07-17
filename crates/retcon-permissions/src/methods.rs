@@ -29,7 +29,9 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
             | "git.discardHunk"
             | "git.commit"
             | "git.push" => Some(ApprovalCategory::Git),
-        "terminal.start" | "terminal.input" => Some(ApprovalCategory::Terminal),
+        "terminal.start" | "terminal.input" | "verification.start" | "verification.rerun" => {
+            Some(ApprovalCategory::Terminal)
+        }
         "file.write" => Some(ApprovalCategory::File),
         "task.acceptance.override" | "task.acceptance.delete" => {
             Some(ApprovalCategory::System)
@@ -67,6 +69,8 @@ pub fn method_summary(method: &str) -> &'static str {
         "file.write" => "Write a file",
         "task.acceptance.override" => "Override a task acceptance criterion",
         "task.acceptance.delete" => "Delete a task acceptance criterion",
+        "verification.start" => "Start project verification commands",
+        "verification.rerun" => "Rerun project verification commands",
         _ => "Perform a protected operation",
     }
 }

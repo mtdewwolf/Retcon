@@ -8,6 +8,7 @@ mod recovery;
 mod repositories;
 mod storage;
 mod task_planning;
+mod verification;
 
 pub use artifacts::{Artifact, ArtifactCleanup, ArtifactStore};
 pub use database::{Database, IntegrityReport, MaintenanceReport};
@@ -29,4 +30,10 @@ pub use storage::{
 pub use task_planning::{
     AcceptanceCriterion, AcceptanceCriterionEvent, CompletionBlockers, NewAcceptanceCriterion,
     PlanStepDraft, TaskDetails, TaskMutation, TaskPatch, TaskPlanningRepository, TaskStep,
+};
+pub use verification::{
+    CompletionReport, NewVerificationArtifact, NewVerificationCommand, NewVerificationTestResult,
+    VerificationArtifactRef, VerificationCommand, VerificationEvent, VerificationGate,
+    VerificationMutation, VerificationRepository, VerificationRun, VerificationRunDetails,
+    VerificationTestResult,
 };

@@ -24,11 +24,13 @@ mod file_rpc;
 mod git_rpc;
 mod checkpoints_rpc;
 mod tasks_rpc;
+mod verification_rpc;
 pub mod rpc;
 pub mod server;
 pub mod session_engine;
 pub mod spikes;
 pub mod state;
+pub mod verification;
 
 pub use error::{CoreError, ErrorCode, ErrorSource};
 pub use lifecycle::{CoreConfig, CoreRuntime};

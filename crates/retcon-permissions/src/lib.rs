@@ -100,6 +100,8 @@ mod tests {
             "file.write",
             "task.acceptance.override",
             "task.acceptance.delete",
+            "verification.start",
+            "verification.rerun",
         ] {
             assert_eq!(
                 check_rpc_method_with_bypass(method, true),
@@ -174,7 +176,12 @@ mod tests {
 
     #[test]
     fn deny_terminal_start_and_input_by_default() {
-        for method in ["terminal.start", "terminal.input"] {
+        for method in [
+            "terminal.start",
+            "terminal.input",
+            "verification.start",
+            "verification.rerun",
+        ] {
             let decision = check_rpc_method_with_bypass(method, false);
             assert!(
                 matches!(decision, RpcPermission::Denied { .. }),

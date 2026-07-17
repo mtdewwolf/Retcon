@@ -220,6 +220,84 @@ pub struct PlanStepInput {
     pub dependency_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerificationCommandInput {
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    pub key: String,
+    pub kind: String,
+    pub command: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub timeout_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerificationCommandsConfigureParams {
+    pub project_id: Uuid,
+    pub commands: Vec<VerificationCommandInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerificationCreateParams {
+    pub task_id: Uuid,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerificationTestResultInput {
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub suite: Option<String>,
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub line: Option<i64>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default = "default_object")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerificationRecordParams {
+    pub run_id: Uuid,
+    pub gate_id: Uuid,
+    pub status: String,
+    #[serde(default = "default_object")]
+    pub summary: Value,
+    #[serde(default)]
+    pub results: Vec<VerificationTestResultInput>,
+    #[serde(default)]
+    pub stdout: Option<String>,
+    #[serde(default)]
+    pub stderr: Option<String>,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+fn default_object() -> Value {
+    serde_json::json!({})
+}
+
 fn default_step_status() -> String {
     "pending".into()
 }

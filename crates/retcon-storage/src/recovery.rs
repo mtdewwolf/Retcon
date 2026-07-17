@@ -16,6 +16,7 @@ pub struct RecoveryReport {
     pub orphaned_jobs: u64,
     pub interrupted_terminals: u64,
     pub interrupted_browsers: u64,
+    pub interrupted_verifications: u64,
     pub pending_approvals: u64,
     pub active_tasks: u64,
 }
@@ -28,6 +29,7 @@ impl RecoveryReport {
             + self.orphaned_jobs
             + self.interrupted_terminals
             + self.interrupted_browsers
+            + self.interrupted_verifications
             > 0
     }
 }
@@ -41,9 +43,14 @@ impl Database {
             let orphaned_jobs = tx.execute("UPDATE background_jobs SET status='orphaned',finished_at=?1,failure_class='internal',failure='core process restarted before job completion' WHERE status IN ('queued','running','stuck')", [now_ms()])? as u64;
             let interrupted_terminals = tx.execute("UPDATE terminal_sessions SET status='interrupted',ended_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
             let interrupted_browsers = tx.execute("UPDATE browser_sessions SET status='interrupted',ended_at=?1 WHERE status IN ('starting','running')", [now_ms()])? as u64;
+            let recovered_at = now_ms();
+            let interrupted_verifications = tx.query_row("SELECT count(*) FROM verification_runs WHERE status='running'", [], |row| row.get::<_,u64>(0))?;
+            tx.execute("INSERT INTO verification_events(run_id,task_id,gate_id,kind,actor,payload_json,created_at) SELECT id,task_id,NULL,'interrupted','system','{\"reason\":\"process_restart\"}',?1 FROM verification_runs WHERE status='running'", [recovered_at])?;
+            tx.execute("UPDATE verification_gates SET status='error',completed_at=?1,summary_json='{\"reason\":\"process_restart\"}' WHERE run_id IN (SELECT id FROM verification_runs WHERE status='running') AND status IN ('pending','running')", [recovered_at])?;
+            tx.execute("UPDATE verification_runs SET status='error',completed_at=?1,summary_json='{\"reason\":\"process_restart\"}' WHERE status='running'", [recovered_at])?;
             let pending_approvals = tx.query_row("SELECT count(*) FROM approvals WHERE status='pending'", [], |row| row.get::<_,u64>(0))?;
             let active_tasks = tx.query_row("SELECT count(*) FROM tasks WHERE status NOT IN ('completed','cancelled','failed')", [], |row| row.get::<_,u64>(0))?;
-            Ok(RecoveryReport { recovered_at: now_ms(), interrupted_sessions, interrupted_turns, orphaned_jobs, interrupted_terminals, interrupted_browsers, pending_approvals, active_tasks })
+            Ok(RecoveryReport { recovered_at, interrupted_sessions, interrupted_turns, orphaned_jobs, interrupted_terminals, interrupted_browsers, interrupted_verifications, pending_approvals, active_tasks })
         })
     }
 }
