@@ -31,6 +31,9 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
             | "git.push" => Some(ApprovalCategory::Git),
         "terminal.start" | "terminal.input" => Some(ApprovalCategory::Terminal),
         "file.write" => Some(ApprovalCategory::File),
+        "task.acceptance.override" | "task.acceptance.delete" => {
+            Some(ApprovalCategory::System)
+        }
         _ => None,
     }
 }
@@ -62,6 +65,8 @@ pub fn method_summary(method: &str) -> &'static str {
         "terminal.start" => "Start a terminal session",
         "terminal.input" => "Send terminal input",
         "file.write" => "Write a file",
+        "task.acceptance.override" => "Override a task acceptance criterion",
+        "task.acceptance.delete" => "Delete a task acceptance criterion",
         _ => "Perform a protected operation",
     }
 }

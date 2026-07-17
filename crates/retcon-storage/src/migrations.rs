@@ -6,7 +6,7 @@ pub(crate) struct Migration {
     pub sql: &'static str,
 }
 
-pub(crate) const LATEST_VERSION: u32 = 5;
+pub(crate) const LATEST_VERSION: u32 = 6;
 
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -33,5 +33,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "task planning and acceptance gates",
         sql: include_str!("migrations/0005_task_planning.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "immutable task acceptance audit history",
+        sql: include_str!("migrations/0006_task_acceptance_audit.sql"),
     },
 ];

@@ -27,6 +27,6 @@ pub use storage::{
     RecoverAction, RecoverOptions, Storage, StorageRecoverReport, StorageStatusReport,
 };
 pub use task_planning::{
-    AcceptanceCriterion, CompletionBlockers, NewAcceptanceCriterion, PlanStepDraft, TaskDetails,
-    TaskPatch, TaskPlanningRepository, TaskStep,
+    AcceptanceCriterion, AcceptanceCriterionEvent, CompletionBlockers, NewAcceptanceCriterion,
+    PlanStepDraft, TaskDetails, TaskMutation, TaskPatch, TaskPlanningRepository, TaskStep,
 };

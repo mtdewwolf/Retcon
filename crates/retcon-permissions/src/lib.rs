@@ -98,6 +98,8 @@ mod tests {
             "terminal.start",
             "terminal.input",
             "file.write",
+            "task.acceptance.override",
+            "task.acceptance.delete",
         ] {
             assert_eq!(
                 check_rpc_method_with_bypass(method, true),
@@ -225,6 +227,16 @@ mod tests {
     fn deny_file_write_by_default() {
         let decision = check_rpc_method_with_bypass("file.write", false);
         assert!(matches!(decision, RpcPermission::Denied { .. }));
+    }
+
+    #[test]
+    fn deny_acceptance_override_and_delete_by_default() {
+        for method in ["task.acceptance.override", "task.acceptance.delete"] {
+            assert!(matches!(
+                check_rpc_method_with_bypass(method, false),
+                RpcPermission::Denied { .. }
+            ));
+        }
     }
 
     #[test]

@@ -843,16 +843,44 @@ impl TurnRepository<'_> {
 
 impl TaskRepository<'_> {
     pub fn create(&self, task: &NewTask) -> Result<Task> {
+        crate::task_planning::validate_new_task_fields(task)?;
         let now = now_ms();
         let session_id = task.session_id.map(|id| id.as_bytes().to_vec());
-        let project_id = task.project_id.map(|id| id.as_bytes().to_vec());
         let parent_task_id = task.parent_task_id.map(|id| id.as_bytes().to_vec());
         let worktree_id = task.worktree_id.map(|id| id.as_bytes().to_vec());
-        self.0.execute("INSERT INTO tasks (id,session_id,project_id,parent_task_id,worktree_id,branch,worktree_path,agent,provider,title,description,status,priority,estimated_cost_micros,actual_cost_micros,cost_currency,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)", &[&task.id.as_bytes(), &session_id, &project_id, &parent_task_id, &worktree_id, &task.branch, &task.worktree_path, &task.agent, &task.provider, &task.title, &task.description, &task.status, &task.priority, &task.estimated_cost_micros, &task.actual_cost_micros, &task.cost_currency, &now])?;
+        let started_at = (task.status == "in_progress").then_some(now);
+        let completed_at = matches!(task.status.as_str(), "completed" | "done").then_some(now);
+        let effective_project = crate::task_planning::map_validation(self.0.transaction(|tx| {
+            let effective_project = match (task.project_id, task.session_id, task.worktree_id) {
+                (Some(project_id), _, _) => Some(project_id),
+                (None, Some(session_id), _) => Some(tx.query_row(
+                    "SELECT project_id FROM sessions WHERE id=?1",
+                    [session_id.as_bytes()],
+                    |row| uuid(row, 0),
+                )?),
+                (None, None, Some(worktree_id)) => Some(tx.query_row(
+                    "SELECT r.project_id FROM git_worktrees w JOIN repository_locations r ON r.id=w.repository_location_id WHERE w.id=?1",
+                    [worktree_id.as_bytes()],
+                    |row| uuid(row, 0),
+                )?),
+                (None, None, None) => None,
+            };
+            crate::task_planning::validate_task_relationships(
+                tx,
+                task.id,
+                effective_project,
+                task.session_id,
+                task.parent_task_id,
+                task.worktree_id,
+            )?;
+            let project_id = effective_project.map(|id| id.as_bytes().to_vec());
+            tx.execute("INSERT INTO tasks (id,session_id,project_id,parent_task_id,worktree_id,branch,worktree_path,agent,provider,title,description,status,priority,estimated_cost_micros,actual_cost_micros,cost_currency,created_at,updated_at,started_at,completed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17,?18,?19)", params![task.id.as_bytes(), session_id, project_id, parent_task_id, worktree_id, task.branch, task.worktree_path, task.agent, task.provider, task.title, task.description, task.status, task.priority, task.estimated_cost_micros, task.actual_cost_micros, task.cost_currency, now, started_at, completed_at])?;
+            Ok(effective_project)
+        }))?;
         Ok(Task {
             id: task.id,
             session_id: task.session_id,
-            project_id: task.project_id,
+            project_id: effective_project,
             parent_task_id: task.parent_task_id,
             worktree_id: task.worktree_id,
             branch: task.branch.clone(),
@@ -868,8 +896,8 @@ impl TaskRepository<'_> {
             cost_currency: task.cost_currency.clone(),
             created_at: now,
             updated_at: now,
-            started_at: None,
-            completed_at: None,
+            started_at,
+            completed_at,
         })
     }
     pub fn get(&self, id: Uuid) -> Result<Option<Task>> {

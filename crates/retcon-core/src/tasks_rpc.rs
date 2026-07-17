@@ -9,6 +9,8 @@ use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
 
+const LOCAL_ACTOR: &str = "local_user";
+
 fn error(id: u64, error: CoreError) -> Response {
     Response::error(id, &error)
 }
@@ -54,12 +56,17 @@ fn required_uuid(params: &Value, name: &str) -> Result<Uuid, String> {
 }
 
 fn optional_uuid(params: &Value, name: &str) -> Result<Option<Uuid>, String> {
-    params
-        .get(name)
-        .and_then(Value::as_str)
-        .map(Uuid::parse_str)
-        .transpose()
-        .map_err(|_| format!("invalid '{name}' UUID"))
+    let Some(value) = params.get(name) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .ok_or_else(|| format!("'{name}' must be a UUID string or null"))
+        .and_then(|raw| Uuid::parse_str(raw).map_err(|_| format!("invalid '{name}' UUID")))
+        .map(Some)
 }
 
 fn uuid_list(params: &Value, name: &str) -> Result<Vec<Uuid>, String> {
@@ -111,6 +118,43 @@ fn emit_changed(state: &CoreState, task_id: Uuid, operation: &str) {
     state.emit(
         "task.changed",
         json!({"taskId": task_id, "operation": operation}),
+    );
+}
+
+fn emit_mutation(state: &CoreState, task_id: Uuid, operation: &str, reopened: bool) {
+    state.emit(
+        "task.changed",
+        json!({"taskId": task_id, "operation": operation, "reopened": reopened}),
+    );
+    if reopened {
+        state.emit(
+            "task.reopened",
+            json!({"taskId": task_id, "reason": operation, "actor": LOCAL_ACTOR}),
+        );
+    }
+}
+
+fn emit_acceptance_audit(
+    state: &CoreState,
+    operation: &str,
+    mutation: &retcon_storage::TaskMutation<retcon_storage::AcceptanceCriterion>,
+) {
+    let audit_kind = format!("task.acceptance.{operation}");
+    state.emit(
+        &audit_kind,
+        json!({
+            "taskId": mutation.task_id,
+            "criterionId": mutation.value.id,
+            "operation": operation,
+            "actor": LOCAL_ACTOR,
+            "reopened": mutation.reopened,
+        }),
+    );
+    emit_mutation(
+        state,
+        mutation.task_id,
+        &format!("acceptance.{operation}"),
+        mutation.reopened,
     );
 }
 
@@ -198,11 +242,14 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(value) => value,
                 Err(message) => return invalid(id, message),
             };
-            match repository.list_tasks(
-                project_id,
-                session_id,
-                params.get("status").and_then(Value::as_str),
-            ) {
+            let status = match params.get("status") {
+                None | Some(Value::Null) => None,
+                Some(value) => match serde_json::from_value::<TaskStatus>(value.clone()) {
+                    Ok(status) => Some(status),
+                    Err(error) => return invalid(id, format!("invalid 'status': {error}")),
+                },
+            };
+            match repository.list_tasks(project_id, session_id, status.map(TaskStatus::as_str)) {
                 Ok(tasks) => Response::ok(id, json!({"tasks": tasks})),
                 Err(error) => storage_error(id, error),
             }
@@ -266,8 +313,8 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Err(message) => return invalid(id, message),
             };
             match repository.replace_dependencies(task_id, &dependencies) {
-                Ok(()) => {
-                    emit_changed(&state, task_id, "dependencies");
+                Ok(mutation) => {
+                    emit_mutation(&state, task_id, "dependencies", mutation.reopened);
                     Response::ok(id, json!({"dependencyIds": dependencies}))
                 }
                 Err(error) => storage_error(id, error),
@@ -295,9 +342,12 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Ok(value) => value,
                 Err(message) => return invalid(id, message),
             };
-            match repository.delete_criterion(criterion_id) {
-                Ok(true) => Response::ok(id, json!({"deleted": true})),
-                Ok(false) => missing(id, "acceptance criterion"),
+            match repository.delete_criterion(criterion_id, LOCAL_ACTOR) {
+                Ok(Some(mutation)) => {
+                    emit_acceptance_audit(&state, "deleted", &mutation);
+                    Response::ok(id, json!({"deleted": true}))
+                }
+                Ok(None) => missing(id, "acceptance criterion"),
                 Err(error) => storage_error(id, error),
             }
         }
@@ -309,7 +359,12 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let Some(evidence) = params.get("evidence").cloned() else {
                 return invalid(id, "missing 'evidence' parameter");
             };
-            criterion_result(id, repository.add_evidence(criterion_id, evidence))
+            criterion_result(
+                &state,
+                id,
+                "evidence_added",
+                repository.add_evidence(criterion_id, evidence, LOCAL_ACTOR),
+            )
         }
         "task.acceptance.evaluate" => {
             let criterion_id = match required_uuid(&params, "criterionId") {
@@ -320,11 +375,14 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 return invalid(id, "missing boolean 'passed' parameter");
             };
             criterion_result(
+                &state,
                 id,
+                "evaluated",
                 repository.evaluate_criterion(
                     criterion_id,
                     passed,
                     params.get("evidence").cloned(),
+                    LOCAL_ACTOR,
                 ),
             )
         }
@@ -336,12 +394,11 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             let Some(reason) = params.get("reason").and_then(Value::as_str) else {
                 return invalid(id, "missing 'reason' parameter");
             };
-            let Some(actor) = params.get("actor").and_then(Value::as_str) else {
-                return invalid(id, "missing 'actor' parameter");
-            };
             criterion_result(
+                &state,
                 id,
-                repository.override_criterion(criterion_id, reason, actor),
+                "overridden",
+                repository.override_criterion(criterion_id, reason, LOCAL_ACTOR),
             )
         }
         _ => error(
@@ -357,6 +414,15 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
 }
 
 fn task_patch(params: &Value) -> Result<TaskPatch, String> {
+    let title = match params.get("title") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| "'title' must be a string".to_owned())?
+                .to_owned(),
+        ),
+    };
     Ok(TaskPatch {
         session_id: nullable_uuid(params, "sessionId")?,
         project_id: nullable_uuid(params, "projectId")?,
@@ -366,10 +432,7 @@ fn task_patch(params: &Value) -> Result<TaskPatch, String> {
         worktree_path: nullable_string(params, "worktreePath")?,
         agent: nullable_string(params, "agent")?,
         provider: nullable_string(params, "provider")?,
-        title: params
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        title,
         description: nullable_string(params, "description")?,
         priority: params
             .get("priority")
@@ -456,9 +519,9 @@ fn replace_plan(state: &CoreState, id: u64, params: &Value) -> Response {
         .task_planning()
         .replace_plan(task_id, &steps)
     {
-        Ok(steps) => {
-            emit_changed(state, task_id, "plan");
-            Response::ok(id, json!({"steps": steps}))
+        Ok(mutation) => {
+            emit_mutation(state, task_id, "plan", mutation.reopened);
+            Response::ok(id, json!({"steps": mutation.value}))
         }
         Err(error) => storage_error(id, error),
     }
@@ -477,20 +540,29 @@ fn create_criterion(state: &CoreState, id: u64, params: &Value) -> Response {
         Ok(value) => value.unwrap_or_else(Uuid::new_v4),
         Err(message) => return invalid(id, message),
     };
-    criterion.sort_order = params.get("sortOrder").and_then(Value::as_i64).unwrap_or(0);
-    criterion.is_required = params
-        .get("required")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    criterion.sort_order = match params.get("sortOrder") {
+        None => 0,
+        Some(value) => match value.as_i64() {
+            Some(value) => value,
+            None => return invalid(id, "'sortOrder' must be an integer"),
+        },
+    };
+    criterion.is_required = match params.get("required") {
+        None => true,
+        Some(value) => match value.as_bool() {
+            Some(value) => value,
+            None => return invalid(id, "'required' must be a boolean"),
+        },
+    };
     match state
         .storage()
         .database()
         .task_planning()
-        .create_criterion(&criterion)
+        .create_criterion(&criterion, LOCAL_ACTOR)
     {
-        Ok(criterion) => {
-            emit_changed(state, task_id, "acceptance");
-            Response::ok(id, json!({"acceptanceCriterion": criterion}))
+        Ok(mutation) => {
+            emit_acceptance_audit(state, "created", &mutation);
+            Response::ok(id, json!({"acceptanceCriterion": mutation.value}))
         }
         Err(error) => storage_error(id, error),
     }
@@ -501,24 +573,57 @@ fn update_criterion(state: &CoreState, id: u64, params: &Value) -> Response {
         Ok(value) => value,
         Err(message) => return invalid(id, message),
     };
+    let sort_order = match params.get("sortOrder") {
+        None => None,
+        Some(value) => match value.as_i64() {
+            Some(value) => Some(value),
+            None => return invalid(id, "'sortOrder' must be an integer"),
+        },
+    };
+    let required = match params.get("required") {
+        None => None,
+        Some(value) => match value.as_bool() {
+            Some(value) => Some(value),
+            None => return invalid(id, "'required' must be a boolean"),
+        },
+    };
+    let description = match params.get("description") {
+        None => None,
+        Some(value) => match value.as_str() {
+            Some(value) => Some(value),
+            None => return invalid(id, "'description' must be a string"),
+        },
+    };
     match state.storage().database().task_planning().update_criterion(
         criterion_id,
-        params.get("description").and_then(Value::as_str),
-        params.get("sortOrder").and_then(Value::as_i64),
-        params.get("required").and_then(Value::as_bool),
+        description,
+        sort_order,
+        required,
+        LOCAL_ACTOR,
     ) {
-        Ok(true) => Response::ok(id, json!({"updated": true})),
-        Ok(false) => missing(id, "acceptance criterion"),
+        Ok(Some(mutation)) => {
+            emit_acceptance_audit(state, "updated", &mutation);
+            Response::ok(id, json!({"acceptanceCriterion": mutation.value}))
+        }
+        Ok(None) => missing(id, "acceptance criterion"),
         Err(error) => storage_error(id, error),
     }
 }
 
 fn criterion_result(
+    state: &CoreState,
     id: u64,
-    result: Result<Option<retcon_storage::AcceptanceCriterion>, StorageError>,
+    operation: &str,
+    result: Result<
+        Option<retcon_storage::TaskMutation<retcon_storage::AcceptanceCriterion>>,
+        StorageError,
+    >,
 ) -> Response {
     match result {
-        Ok(Some(criterion)) => Response::ok(id, json!({"acceptanceCriterion": criterion})),
+        Ok(Some(mutation)) => {
+            emit_acceptance_audit(state, operation, &mutation);
+            Response::ok(id, json!({"acceptanceCriterion": mutation.value}))
+        }
         Ok(None) => missing(id, "acceptance criterion"),
         Err(error) => storage_error(id, error),
     }
@@ -589,5 +694,81 @@ mod tests {
         )
         .await;
         assert!(completed.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn rpc_rejects_wrong_typed_filters_instead_of_broadening_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = CoreState::new(dir.path()).unwrap();
+        let response = handle(
+            state,
+            Request {
+                id: 1,
+                method: "task.list".into(),
+                params: json!({"projectId": 42, "status": true}),
+            },
+        )
+        .await;
+        assert!(response.result.is_none());
+        assert_eq!(response.error.unwrap()["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn rpc_uses_server_actor_and_emits_audit_for_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = CoreState::new(dir.path()).unwrap();
+        let created = handle(
+            state.clone(),
+            Request {
+                id: 1,
+                method: "task.create".into(),
+                params: json!({"title":"Audited task"}),
+            },
+        )
+        .await;
+        let task_id = created.result.unwrap()["task"]["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let criterion = handle(
+            state.clone(),
+            Request {
+                id: 2,
+                method: "task.acceptance.create".into(),
+                params: json!({"taskId":task_id,"description":"Manual review"}),
+            },
+        )
+        .await;
+        let criterion_id = criterion.result.unwrap()["acceptanceCriterion"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let override_response = handle(
+            state.clone(),
+            Request {
+                id: 3,
+                method: "task.acceptance.override".into(),
+                params: json!({
+                    "criterionId": criterion_id,
+                    "reason": "Accepted locally",
+                    "actor": "spoofed_remote_actor"
+                }),
+            },
+        )
+        .await;
+        assert_eq!(
+            override_response.result.unwrap()["acceptanceCriterion"]["overriddenBy"],
+            LOCAL_ACTOR
+        );
+        let history = state
+            .storage()
+            .database()
+            .task_planning()
+            .criterion_history(Uuid::parse_str(&criterion_id).unwrap())
+            .unwrap();
+        assert_eq!(history.last().unwrap().actor, LOCAL_ACTOR);
+        assert!(state.events().replay(0, 100).iter().any(|event| {
+            event.kind == "task.acceptance.overridden" && event.payload["actor"] == LOCAL_ACTOR
+        }));
     }
 }
