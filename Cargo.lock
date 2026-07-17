@@ -872,6 +872,7 @@ dependencies = [
  "retcon-secrets",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

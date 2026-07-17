@@ -7,6 +7,7 @@ mod migrations;
 mod recovery;
 mod repositories;
 mod storage;
+mod task_planning;
 
 pub use artifacts::{Artifact, ArtifactCleanup, ArtifactStore};
 pub use database::{Database, IntegrityReport, MaintenanceReport};
@@ -19,9 +20,13 @@ pub use repositories::{
     NewApproval, NewBrowserSession, NewCommand, NewFileChange, NewGitCheckpoint, NewGitWorktree,
     NewLayout, NewMessage, NewPermissionRule, NewProject, NewSession, NewTask, NewTerminalSession,
     NewToolCall, NewTurn, PermissionRule, PermissionRuleRepository, Project, ProjectRepository,
-    Session, SessionRepository, Setting, SettingsRepository, Task, TaskRepository,
-    TerminalSession, TerminalSessionRepository, ToolCall, ToolCallRepository, Turn, TurnRepository,
+    Session, SessionRepository, Setting, SettingsRepository, Task, TaskRepository, TerminalSession,
+    TerminalSessionRepository, ToolCall, ToolCallRepository, Turn, TurnRepository,
 };
 pub use storage::{
     RecoverAction, RecoverOptions, Storage, StorageRecoverReport, StorageStatusReport,
+};
+pub use task_planning::{
+    AcceptanceCriterion, CompletionBlockers, NewAcceptanceCriterion, PlanStepDraft, TaskDetails,
+    TaskPatch, TaskPlanningRepository, TaskStep,
 };

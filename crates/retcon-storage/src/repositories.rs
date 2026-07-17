@@ -101,15 +101,29 @@ impl NewTurn {
 }
 
 /// A persisted task and its current progress state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: Uuid,
     pub session_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
+    pub worktree_id: Option<Uuid>,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub agent: Option<String>,
+    pub provider: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub status: String,
+    pub priority: i64,
+    pub estimated_cost_micros: Option<i64>,
+    pub actual_cost_micros: Option<i64>,
+    pub cost_currency: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
 }
 
 /// Values used to create a task.
@@ -117,9 +131,20 @@ pub struct Task {
 pub struct NewTask {
     pub id: Uuid,
     pub session_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
+    pub worktree_id: Option<Uuid>,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub agent: Option<String>,
+    pub provider: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub status: String,
+    pub priority: i64,
+    pub estimated_cost_micros: Option<i64>,
+    pub actual_cost_micros: Option<i64>,
+    pub cost_currency: String,
 }
 
 impl NewTask {
@@ -128,9 +153,20 @@ impl NewTask {
         Self {
             id: Uuid::new_v4(),
             session_id: None,
+            project_id: None,
+            parent_task_id: None,
+            worktree_id: None,
+            branch: None,
+            worktree_path: None,
+            agent: None,
+            provider: None,
             title: title.into(),
             description: None,
             status: "pending".into(),
+            priority: 0,
+            estimated_cost_micros: None,
+            actual_cost_micros: None,
+            cost_currency: "USD".into(),
         }
     }
 }
@@ -809,23 +845,38 @@ impl TaskRepository<'_> {
     pub fn create(&self, task: &NewTask) -> Result<Task> {
         let now = now_ms();
         let session_id = task.session_id.map(|id| id.as_bytes().to_vec());
-        self.0.execute("INSERT INTO tasks (id,session_id,title,description,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?6)", &[&task.id.as_bytes(), &session_id, &task.title, &task.description, &task.status, &now])?;
+        let project_id = task.project_id.map(|id| id.as_bytes().to_vec());
+        let parent_task_id = task.parent_task_id.map(|id| id.as_bytes().to_vec());
+        let worktree_id = task.worktree_id.map(|id| id.as_bytes().to_vec());
+        self.0.execute("INSERT INTO tasks (id,session_id,project_id,parent_task_id,worktree_id,branch,worktree_path,agent,provider,title,description,status,priority,estimated_cost_micros,actual_cost_micros,cost_currency,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)", &[&task.id.as_bytes(), &session_id, &project_id, &parent_task_id, &worktree_id, &task.branch, &task.worktree_path, &task.agent, &task.provider, &task.title, &task.description, &task.status, &task.priority, &task.estimated_cost_micros, &task.actual_cost_micros, &task.cost_currency, &now])?;
         Ok(Task {
             id: task.id,
             session_id: task.session_id,
+            project_id: task.project_id,
+            parent_task_id: task.parent_task_id,
+            worktree_id: task.worktree_id,
+            branch: task.branch.clone(),
+            worktree_path: task.worktree_path.clone(),
+            agent: task.agent.clone(),
+            provider: task.provider.clone(),
             title: task.title.clone(),
             description: task.description.clone(),
             status: task.status.clone(),
+            priority: task.priority,
+            estimated_cost_micros: task.estimated_cost_micros,
+            actual_cost_micros: task.actual_cost_micros,
+            cost_currency: task.cost_currency.clone(),
             created_at: now,
             updated_at: now,
+            started_at: None,
+            completed_at: None,
         })
     }
     pub fn get(&self, id: Uuid) -> Result<Option<Task>> {
-        self.0.read(|db| db.query_row("SELECT id,session_id,title,description,status,created_at,updated_at FROM tasks WHERE id=?1", [id.as_bytes()], row_task).optional())
+        self.0.read(|db| db.query_row("SELECT id,session_id,project_id,parent_task_id,worktree_id,branch,worktree_path,agent,provider,title,description,status,priority,estimated_cost_micros,actual_cost_micros,cost_currency,created_at,updated_at,started_at,completed_at FROM tasks WHERE id=?1", [id.as_bytes()], row_task).optional())
     }
     pub fn set_status(&self, id: Uuid, status: &str) -> Result<bool> {
-        let now = now_ms();
-        Ok(self.0.execute("UPDATE tasks SET status=?2,updated_at=?3,completed_at=CASE WHEN ?2='completed' THEN ?3 ELSE completed_at END WHERE id=?1", &[&id.as_bytes(), &status, &now])? > 0)
+        self.0.task_planning().set_task_status(id, status)
     }
 }
 
@@ -1406,12 +1457,7 @@ impl ApprovalRepository<'_> {
         })
     }
 
-    pub fn decide(
-        &self,
-        id: Uuid,
-        status: &str,
-        decision: &serde_json::Value,
-    ) -> Result<Approval> {
+    pub fn decide(&self, id: Uuid, status: &str, decision: &serde_json::Value) -> Result<Approval> {
         let now = now_ms();
         let encoded = encode_json(decision)?;
         let updated = self.0.execute(
@@ -1508,7 +1554,10 @@ impl LayoutRepository<'_> {
                     &[&workspace_id.as_bytes()],
                 )?;
             } else {
-                self.0.execute("UPDATE layouts SET is_active=0 WHERE workspace_id IS NULL", &[])?;
+                self.0.execute(
+                    "UPDATE layouts SET is_active=0 WHERE workspace_id IS NULL",
+                    &[],
+                )?;
             }
         }
         self.0.execute(
@@ -1623,17 +1672,31 @@ fn row_turn(row: &Row<'_>) -> rusqlite::Result<Turn> {
 }
 fn row_task(row: &Row<'_>) -> rusqlite::Result<Task> {
     let session: Option<Vec<u8>> = row.get(1)?;
+    let project: Option<Vec<u8>> = row.get(2)?;
     Ok(Task {
         id: uuid(row, 0)?,
         session_id: session
             .map(|bytes| Uuid::from_slice(&bytes))
             .transpose()
             .map_err(from_uuid)?,
-        title: row.get(2)?,
-        description: row.get(3)?,
-        status: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        project_id: optional_uuid_from_bytes(project)?,
+        parent_task_id: optional_uuid_from_bytes(row.get(3)?)?,
+        worktree_id: optional_uuid_from_bytes(row.get(4)?)?,
+        branch: row.get(5)?,
+        worktree_path: row.get(6)?,
+        agent: row.get(7)?,
+        provider: row.get(8)?,
+        title: row.get(9)?,
+        description: row.get(10)?,
+        status: row.get(11)?,
+        priority: row.get(12)?,
+        estimated_cost_micros: row.get(13)?,
+        actual_cost_micros: row.get(14)?,
+        cost_currency: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+        started_at: row.get(18)?,
+        completed_at: row.get(19)?,
     })
 }
 fn row_message(row: &Row<'_>) -> rusqlite::Result<Message> {

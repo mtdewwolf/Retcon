@@ -651,7 +651,7 @@ mod tests {
         drop(connection);
 
         let upgraded = Database::open(path).unwrap();
-        assert_eq!(upgraded.schema_version().unwrap(), 4);
+        assert_eq!(upgraded.schema_version().unwrap(), LATEST_VERSION);
         let job_id = Uuid::new_v4();
         upgraded
             .execute(

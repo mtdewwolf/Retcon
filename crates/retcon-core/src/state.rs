@@ -164,6 +164,8 @@ impl CoreState {
             "filesystem": true,
             "approval_engine": true,
             "checkpoints": true,
+            "task_planning": true,
+            "acceptance_gates": true,
         })
     }
 

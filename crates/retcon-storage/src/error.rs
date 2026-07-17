@@ -56,6 +56,9 @@ pub enum StorageError {
         /// Details suitable for diagnostics.
         details: String,
     },
+    /// A caller supplied a task-planning value that violates a domain invariant.
+    #[error("invalid persisted state: {0}")]
+    Validation(String),
 }
 
 impl StorageError {

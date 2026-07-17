@@ -23,6 +23,7 @@ mod session_rpc;
 mod file_rpc;
 mod git_rpc;
 mod checkpoints_rpc;
+mod tasks_rpc;
 pub mod rpc;
 pub mod server;
 pub mod session_engine;

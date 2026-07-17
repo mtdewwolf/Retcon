@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 pub const VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -126,6 +127,103 @@ pub struct Pong {
     pub kind: PongKind,
 }
 
+/// Stable task-board states accepted by the Phase 21 API.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    #[default]
+    Backlog,
+    Planned,
+    Pending,
+    Ready,
+    InProgress,
+    Blocked,
+    Review,
+    Completed,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+impl TaskStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Planned => "planned",
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
+            Self::Review => "review",
+            Self::Completed => "completed",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskCreateParams {
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    #[serde(default)]
+    pub parent_task_id: Option<Uuid>,
+    #[serde(default)]
+    pub worktree_id: Option<Uuid>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub status: TaskStatus,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub estimated_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub actual_cost_micros: Option<i64>,
+    #[serde(default = "default_currency")]
+    pub cost_currency: String,
+    #[serde(default)]
+    pub dependency_ids: Vec<Uuid>,
+}
+
+fn default_currency() -> String {
+    "USD".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStepInput {
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_step_status")]
+    pub status: String,
+    #[serde(default)]
+    pub dependency_ids: Vec<Uuid>,
+}
+
+fn default_step_status() -> String {
+    "pending".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PongKind {
     #[serde(rename = "pong")]
@@ -153,9 +251,10 @@ impl ClientMessage {
             return Ok(Self::Ping);
         }
         if value.get("kind").and_then(Value::as_str) == Some("request.cancel") {
-            let cancel: CancelRequest = serde_json::from_value(value).map_err(|error| ParseError {
-                technical_message: error.to_string(),
-            })?;
+            let cancel: CancelRequest =
+                serde_json::from_value(value).map_err(|error| ParseError {
+                    technical_message: error.to_string(),
+                })?;
             return Ok(Self::Cancel(cancel));
         }
         let request: Request = serde_json::from_value(value).map_err(|error| ParseError {
@@ -186,7 +285,13 @@ pub fn redact_line_for_trace(line: &str) -> String {
         return serde_json::to_string(&redact_value(value)).unwrap_or_else(|_| "[REDACTED]".into());
     }
     line.chars()
-        .map(|character| if character.is_control() { '?' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
@@ -211,12 +316,7 @@ pub fn method_catalog() -> &'static [(&'static str, &'static [&'static str])] {
         ("events", &["events.replay", "events.emit"]),
         (
             "jobs",
-            &[
-                "jobs.list",
-                "jobs.get",
-                "jobs.cancel",
-                "jobs.forceStop",
-            ],
+            &["jobs.list", "jobs.get", "jobs.cancel", "jobs.forceStop"],
         ),
         (
             "project",
@@ -242,6 +342,27 @@ pub fn method_catalog() -> &'static [(&'static str, &'static [&'static str])] {
             ],
         ),
         ("turn", &["turn.send", "turn.cancel"]),
+        (
+            "task",
+            &[
+                "task.create",
+                "task.get",
+                "task.list",
+                "task.update",
+                "task.delete",
+                "task.status.set",
+                "task.dependencies.replace",
+                "task.plan.get",
+                "task.plan.replace",
+                "task.acceptance.list",
+                "task.acceptance.create",
+                "task.acceptance.update",
+                "task.acceptance.delete",
+                "task.acceptance.evidence",
+                "task.acceptance.evaluate",
+                "task.acceptance.override",
+            ],
+        ),
         (
             "terminal",
             &[
@@ -389,8 +510,9 @@ mod tests {
 
     #[test]
     fn method_catalog_matches_schema_file() {
-        let schema = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../schemas/protocol/v1.json"))
+        let schema = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/protocol/v1.json"),
+        )
         .expect("read protocol schema");
         let root: Value = serde_json::from_str(&schema).expect("parse schema");
         let catalog = root
@@ -403,18 +525,14 @@ mod tests {
                 .and_then(Value::as_array)
                 .expect("namespace present");
             let expected: Vec<_> = methods.iter().copied().collect();
-            let actual: Vec<_> = listed
-                .iter()
-                .filter_map(Value::as_str)
-                .collect();
+            let actual: Vec<_> = listed.iter().filter_map(Value::as_str).collect();
             assert_eq!(expected, actual, "namespace {namespace}");
         }
     }
 
     #[test]
     fn protocol_fixtures_round_trip_or_reject() {
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/protocol");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/protocol");
         for entry in std::fs::read_dir(&fixtures).expect("read fixtures dir") {
             let entry = entry.expect("fixture entry");
             let path = entry.path();
