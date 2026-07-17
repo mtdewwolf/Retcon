@@ -286,11 +286,22 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             | "permission.rules.delete"
             | "secrets.scan"
     ) {
-        let project_id = request
-            .params
-            .get("projectId")
-            .and_then(|value| value.as_str())
-            .and_then(|raw| Uuid::parse_str(raw).ok());
+        let project_id = permission_project_id(state, &request);
+        if matches!(
+            request.method.as_str(),
+            "devServer.start" | "devServer.stop" | "devServer.restart" | "devServer.autoStart.set"
+        ) && project_id.is_none()
+        {
+            return Response::error(
+                request.id,
+                &CoreError::new(
+                    ErrorCode::NotFound,
+                    ErrorSource::Rpc,
+                    "The requested development server information was not found.",
+                    "development server permission owner not found",
+                ),
+            );
+        }
         let check = state
             .permissions()
             .check_rpc(&request.method, &request.params, project_id);
@@ -428,6 +439,40 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
     }
 }
 
+fn permission_project_id(state: &CoreState, request: &Request) -> Option<Uuid> {
+    if let Some(project_id) = request
+        .params
+        .get("projectId")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    {
+        return Some(project_id);
+    }
+    if !request.method.starts_with("devServer.") {
+        return None;
+    }
+    let repository = state.storage().database().dev_servers();
+    if let Some(config_id) = request
+        .params
+        .get("configId")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    {
+        return repository
+            .config(config_id)
+            .ok()
+            .flatten()
+            .map(|config| config.project_id);
+    }
+    request
+        .params
+        .get("instanceId")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+        .and_then(|instance_id| repository.instance(instance_id).ok().flatten())
+        .map(|instance| instance.project_id)
+}
+
 fn invalid_request(technical_message: impl Into<String>) -> CoreError {
     CoreError::new(
         ErrorCode::InvalidRequest,
@@ -562,6 +607,61 @@ mod tests {
         state.request_shutdown();
         server_task.await.unwrap();
         let _ = directory2;
+    }
+
+    #[test]
+    fn derives_dev_server_permission_scope_from_durable_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = CoreState::new(directory.path()).unwrap();
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&retcon_storage::NewProject::new("Web"))
+            .unwrap();
+        let config = state
+            .storage()
+            .database()
+            .dev_servers()
+            .save_config(&retcon_storage::NewDevServerConfig::new(
+                project.id, "web", "serve", ".",
+            ))
+            .unwrap();
+        let request = Request {
+            id: 1,
+            method: "devServer.start".into(),
+            params: json!({"configId":config.id}),
+        };
+        assert_eq!(permission_project_id(&state, &request), Some(project.id));
+        let instance = state
+            .storage()
+            .database()
+            .dev_servers()
+            .prepare_start(config.id, None, "test")
+            .unwrap();
+        let request = Request {
+            id: 2,
+            method: "devServer.stop".into(),
+            params: json!({"instanceId":instance.id}),
+        };
+        assert_eq!(permission_project_id(&state, &request), Some(project.id));
+    }
+
+    #[tokio::test]
+    async fn missing_dev_server_cannot_create_a_global_lifecycle_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = CoreState::new(directory.path()).unwrap();
+        let response = dispatch(
+            Request {
+                id: 1,
+                method: "devServer.start".into(),
+                params: json!({"configId":Uuid::new_v4()}),
+            },
+            &state,
+        )
+        .await;
+        assert!(response.error.is_some());
+        assert_eq!(state.permissions().pending_count().unwrap(), 0);
     }
 
     #[tokio::test]

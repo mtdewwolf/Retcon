@@ -192,6 +192,13 @@ impl ApprovalEngine {
             .get("method")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        let remembered_project_id = project_id.or_else(|| {
+            approval
+                .request
+                .get("projectId")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+        });
         let status = match decision {
             ApprovalDecision::Approve => "approved",
             ApprovalDecision::Deny => "denied",
@@ -221,7 +228,7 @@ impl ApprovalEngine {
                 .unwrap_or_else(|| json!({"method": method}));
             let rule = NewPermissionRule {
                 id: Uuid::new_v4(),
-                project_id,
+                project_id: remembered_project_id,
                 scope: "rpc".into(),
                 effect: "allow".into(),
                 matcher: matcher.clone(),
@@ -310,7 +317,7 @@ fn approval_request(
     project_id: Option<Uuid>,
     fingerprint: &str,
 ) -> Value {
-    let scrubbed_params = retcon_secrets::scrub_json(params_without_approval_id(params));
+    let scrubbed_params = scrub_rpc_params(method, params_without_approval_id(params));
     json!({
         "kind": "rpc",
         "method": method,
@@ -321,6 +328,21 @@ fn approval_request(
         "fingerprint": fingerprint,
         "matcher": {"method": method},
     })
+}
+
+fn scrub_rpc_params(method: &str, params: Value) -> Value {
+    let mut scrubbed = retcon_secrets::scrub_json(params);
+    if method == "devServer.configure"
+        && let Some(environment) = scrubbed
+            .as_object_mut()
+            .and_then(|params| params.get_mut("environment"))
+            .and_then(Value::as_object_mut)
+    {
+        for value in environment.values_mut() {
+            *value = Value::String("[REDACTED]".into());
+        }
+    }
+    scrubbed
 }
 
 fn approval_matches(approval: &Approval, method: &str, params: &Value) -> bool {
@@ -419,5 +441,70 @@ mod tests {
             None,
         );
         assert!(retry.permission.is_allowed());
+    }
+
+    #[test]
+    fn dev_server_approval_never_persists_environment_values() {
+        let engine = engine();
+        let check = engine.check_rpc(
+            "devServer.configure",
+            &json!({
+                "projectId": Uuid::new_v4(),
+                "name": "web",
+                "command": "serve",
+                "cwd": ".",
+                "envAllowlist": ["PUBLIC_URL"],
+                "environment": {"PUBLIC_URL": "not-pattern-shaped-but-private"}
+            }),
+            None,
+        );
+        let encoded = check.audit[0].payload.to_string();
+        assert!(!encoded.contains("not-pattern-shaped-but-private"));
+        assert!(encoded.contains("PUBLIC_URL"));
+        assert!(encoded.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn remembered_dev_server_approval_stays_project_scoped() {
+        let engine = engine();
+        let project = engine
+            .database()
+            .projects()
+            .create(&NewProject::new("First"))
+            .unwrap()
+            .id;
+        let other_project = engine
+            .database()
+            .projects()
+            .create(&NewProject::new("Second"))
+            .unwrap()
+            .id;
+        let params = json!({"configId": Uuid::new_v4()});
+        let first = engine.check_rpc("devServer.start", &params, Some(project));
+        let approval_id = first.audit[0].payload["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        engine
+            .decide(
+                approval_id,
+                ApprovalDecision::Approve,
+                RememberScope::Always,
+                None,
+            )
+            .unwrap();
+        assert!(
+            engine
+                .check_rpc("devServer.start", &params, Some(project))
+                .permission
+                .is_allowed()
+        );
+        assert!(
+            !engine
+                .check_rpc("devServer.start", &params, Some(other_project))
+                .permission
+                .is_allowed()
+        );
     }
 }

@@ -9,9 +9,9 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 mod checkpoints_rpc;
+pub mod dev_servers;
 mod dev_servers_rpc;
 pub mod error;
-pub mod dev_servers;
 pub mod event;
 mod file_rpc;
 pub mod frame;

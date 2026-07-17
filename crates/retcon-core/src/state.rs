@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::CoreError;
-use crate::event::EventBus;
 use crate::dev_servers::{DevServerRuntime, NoopDevServerRuntime};
+use crate::event::EventBus;
 use crate::jobs::JobSupervisor;
 use crate::session_rpc::SessionRegistry;
 use crate::spikes::agent::AgentRegistry;

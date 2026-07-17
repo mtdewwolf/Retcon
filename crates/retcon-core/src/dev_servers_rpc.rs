@@ -4,10 +4,11 @@ use std::io::Read;
 use std::path::Path;
 
 use retcon_protocol::{DevServerConfigureParams, DevServerPortParams, DevServerStartParams};
-use retcon_storage::{NewDevServerConfig, StorageError};
+use retcon_storage::{DevServerInstance, NewDevServerConfig, StorageError};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::dev_servers::DevServerStarted;
 use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
@@ -169,7 +170,10 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                     Err(e) => {
                         return Response::error(
                             id,
-                            &runtime_error("read development server logs", e),
+                            &runtime_error(
+                                "read development server logs",
+                                sanitize_instance_runtime_message(&state, &instance, &e),
+                            ),
                         );
                     }
                 }
@@ -222,10 +226,21 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 Err(e) => return invalid(id, e),
             };
             match repo.instance(iid) {
-                Ok(Some(v)) => Response::ok(
-                    id,
-                    json!({"instanceId":v.id,"status":v.status,"url":v.url,"preview":v.preview,"port":v.port}),
-                ),
+                Ok(Some(v)) if v.status != "running" => {
+                    invalid(id, "development server preview is not running")
+                }
+                Ok(Some(v)) => {
+                    let Some(url) = v.url.as_deref() else {
+                        return invalid(id, "development server preview URL is unavailable");
+                    };
+                    if !is_local_preview_url(url, v.port) {
+                        return invalid(id, "development server preview URL is invalid");
+                    }
+                    Response::ok(
+                        id,
+                        json!({"instanceId":v.id,"status":v.status,"url":v.url,"preview":v.preview,"port":v.port}),
+                    )
+                }
                 Ok(None) => missing(id, "server instance"),
                 Err(e) => storage_error(id, e),
             }
@@ -310,21 +325,46 @@ fn start(state: &CoreState, id: u64, config_id: Uuid, task_id: Option<Uuid>) -> 
         return missing(id, "server config");
     };
     match state.dev_server_runtime().start(&config, &instance) {
-        Ok(started) => match repo.mark_running(
-            instance.id,
-            started.pid,
-            &started.url,
-            &started.preview,
-            ACTOR,
-        ) {
-            Ok(Some(value)) => {
-                state.emit("dev_server.started",json!({"instanceId":value.id,"configId":value.config_id,"projectId":value.project_id,"taskId":value.task_id,"port":value.port,"url":value.url}));
-                Response::ok(id, json!({"instance":value}))
+        Ok(started) => {
+            let started = match validate_runtime_report(&instance, started) {
+                Ok(started) => started,
+                Err(error) => {
+                    let _ = state.dev_server_runtime().stop(&instance);
+                    let _ = repo.mark_failed(instance.id, &error, "runtime");
+                    return Response::error(
+                        id,
+                        &runtime_error("validate development server startup", error),
+                    );
+                }
+            };
+            match repo.mark_running(
+                instance.id,
+                started.pid,
+                &started.url,
+                &started.preview,
+                ACTOR,
+            ) {
+                Ok(Some(value)) => {
+                    state.emit("dev_server.started",json!({"instanceId":value.id,"configId":value.config_id,"projectId":value.project_id,"taskId":value.task_id,"port":value.port,"url":value.url}));
+                    Response::ok(id, json!({"instance":value}))
+                }
+                Ok(None) => {
+                    let _ = state.dev_server_runtime().stop(&instance);
+                    missing(id, "server instance")
+                }
+                Err(e) => {
+                    let _ = state.dev_server_runtime().stop(&instance);
+                    let failure = sanitize_runtime_message(&e.to_string());
+                    let _ = repo.mark_failed(instance.id, &failure, "storage");
+                    storage_error(id, e)
+                }
             }
-            Ok(None) => missing(id, "server instance"),
-            Err(e) => storage_error(id, e),
-        },
+        }
         Err(error) => {
+            let error = sanitize_runtime_message_with_values(
+                &error,
+                config.environment.values().map(String::as_str),
+            );
             let _ = repo.mark_failed(instance.id, &error, "runtime");
             state.emit(
                 "dev_server.failed",
@@ -345,6 +385,8 @@ fn stop(state: &CoreState, id: u64, instance_id: Uuid) -> Response {
     match state.dev_server_runtime().stop(&instance) {
         Ok(logs) => {
             if let Err(e) = persist_logs(state, instance.id, &logs) {
+                let failure = sanitize_runtime_message(&e.to_string());
+                let _ = repo.mark_failed(instance.id, &failure, "storage");
                 return storage_error(id, e);
             }
             match repo.mark_stopped(instance.id, ACTOR) {
@@ -353,11 +395,20 @@ fn stop(state: &CoreState, id: u64, instance_id: Uuid) -> Response {
                     Response::ok(id, json!({"instance":value}))
                 }
                 Ok(None) => missing(id, "server instance"),
-                Err(e) => storage_error(id, e),
+                Err(e) => {
+                    let failure = sanitize_runtime_message(&e.to_string());
+                    let _ = repo.mark_failed(instance.id, &failure, "storage");
+                    storage_error(id, e)
+                }
             }
         }
         Err(error) => {
-            let _ = repo.mark_failed(instance.id, &error, "runtime");
+            let error = sanitize_instance_runtime_message(state, &instance, &error);
+            let _ = repo.mark_orphaned(instance.id, &error, "runtime");
+            state.emit(
+                "dev_server.orphaned",
+                json!({"instanceId":instance.id,"configId":instance.config_id,"projectId":instance.project_id,"reason":error}),
+            );
             Response::error(id, &runtime_error("stop development server", error))
         }
     }
@@ -368,15 +419,138 @@ fn persist_logs(
     bytes: &[u8],
 ) -> retcon_storage::Result<Value> {
     let retained = &bytes[..bytes.len().min(MAX_LOG_BYTES)];
-    let artifact = state.storage().artifacts().store_bytes(retained)?;
+    let mut redacted = redact_sensitive_text(&String::from_utf8_lossy(retained));
+    let repository = state.storage().database().dev_servers();
+    if let Some(instance) = repository.instance(instance_id)?
+        && let Some(config) = repository.launch_config(instance.config_id)?
+    {
+        redacted = redact_exact_values(redacted, config.environment.values().map(String::as_str));
+    }
+    let redacted = bounded_utf8(redacted, MAX_LOG_BYTES);
+    let artifact = state
+        .storage()
+        .artifacts()
+        .store_bytes(redacted.as_bytes())?;
     state
         .storage()
         .database()
         .dev_servers()
         .set_log_artifact(instance_id, &artifact.hash)?;
     Ok(
-        json!({"artifactHash":artifact.hash,"retainedBytes":artifact.size,"originalBytes":bytes.len(),"truncated":bytes.len()>retained.len(),"text":String::from_utf8_lossy(retained)}),
+        json!({"artifactHash":artifact.hash,"retainedBytes":artifact.size,"originalBytes":bytes.len(),"truncated":bytes.len()>retained.len(),"redacted":redacted.as_bytes()!=retained,"text":redacted}),
     )
+}
+fn validate_runtime_report(
+    instance: &DevServerInstance,
+    mut started: DevServerStarted,
+) -> Result<DevServerStarted, String> {
+    if started.pid.is_some_and(|pid| pid <= 0) {
+        return Err("development server runtime returned an invalid process identifier".into());
+    }
+    if !is_local_preview_url(&started.url, instance.port) {
+        return Err(
+            "development server runtime returned a preview URL outside the leased local port"
+                .into(),
+        );
+    }
+    started.preview = retcon_secrets::scrub_json(started.preview);
+    Ok(started)
+}
+fn is_local_preview_url(url: &str, port: i64) -> bool {
+    let Some(remainder) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let expected = port.to_string();
+    !url.chars().any(char::is_control)
+        && (authority == format!("localhost:{expected}")
+            || authority == format!("127.0.0.1:{expected}")
+            || authority == format!("[::1]:{expected}"))
+}
+fn sanitize_runtime_message(message: &str) -> String {
+    bounded_utf8(redact_sensitive_text(message), 4096)
+}
+fn sanitize_runtime_message_with_values<'a>(
+    message: &str,
+    values: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let redacted = redact_exact_values(message.to_owned(), values);
+    sanitize_runtime_message(&redacted)
+}
+fn sanitize_instance_runtime_message(
+    state: &CoreState,
+    instance: &DevServerInstance,
+    message: &str,
+) -> String {
+    let repository = state.storage().database().dev_servers();
+    let values = repository
+        .launch_config(instance.config_id)
+        .ok()
+        .flatten()
+        .map(|config| config.environment.into_values().collect::<Vec<_>>())
+        .unwrap_or_default();
+    sanitize_runtime_message_with_values(message, values.iter().map(String::as_str))
+}
+fn redact_exact_values<'a>(mut text: String, values: impl IntoIterator<Item = &'a str>) -> String {
+    for value in values {
+        if !value.is_empty() {
+            text = text.replace(value, "[REDACTED]");
+        }
+    }
+    text
+}
+fn redact_sensitive_text(text: &str) -> String {
+    let findings = retcon_secrets::scan_text(text).findings;
+    let sensitive_values = findings
+        .iter()
+        .filter_map(|finding| text.get(finding.start..finding.end))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut ranges = findings
+        .into_iter()
+        .map(|finding| (finding.start, finding.end))
+        .filter(|(start, end)| {
+            start < end
+                && *end <= text.len()
+                && text.is_char_boundary(*start)
+                && text.is_char_boundary(*end)
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        if end <= cursor {
+            continue;
+        }
+        let start = start.max(cursor);
+        output.push_str(&text[cursor..start]);
+        output.push_str("[REDACTED]");
+        cursor = end;
+    }
+    output.push_str(&text[cursor..]);
+    for value in sensitive_values {
+        output = output.replace(&value, "[REDACTED]");
+    }
+    output
+}
+fn bounded_utf8(mut text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text.truncate(boundary);
+    text
 }
 fn runtime_error(operation: &str, error: String) -> CoreError {
     CoreError::new(
@@ -417,14 +591,17 @@ mod tests {
             Ok(DevServerStarted {
                 pid: Some(7),
                 url: format!("http://127.0.0.1:{}", i.port),
-                preview: json!({"title":"preview"}),
+                preview: json!({"title":"preview","token":"preview-secret"}),
             })
         }
         fn stop(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
             Ok(b"stopped".to_vec())
         }
         fn logs(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
-            Ok(vec![b'x'; MAX_LOG_BYTES + 10])
+            let mut bytes =
+                b"password=hunter2\nPUBLIC_URL=not-pattern-shaped-but-private\n".to_vec();
+            bytes.resize(MAX_LOG_BYTES + 10, b'x');
+            Ok(bytes)
         }
     }
     #[tokio::test]
@@ -437,7 +614,7 @@ mod tests {
             .projects()
             .create(&NewProject::new("Web"))
             .unwrap();
-        let configured=handle(state.clone(),Request{id:1,method:"devServer.configure".into(),params:json!({"projectId":p.id,"name":"web","command":"serve","cwd":".","envAllowlist":["PUBLIC_URL"],"environment":{"PUBLIC_URL":"private"}})}).await;
+        let configured=handle(state.clone(),Request{id:1,method:"devServer.configure".into(),params:json!({"projectId":p.id,"name":"web","command":"serve","cwd":".","envAllowlist":["PUBLIC_URL"],"environment":{"PUBLIC_URL":"not-pattern-shaped-but-private"}})}).await;
         assert!(
             !configured
                 .result
@@ -459,6 +636,14 @@ mod tests {
             },
         )
         .await;
+        assert!(
+            !started
+                .result
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("preview-secret")
+        );
         let iid = started.result.unwrap()["instance"]["id"]
             .as_str()
             .unwrap()
@@ -472,11 +657,43 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(
-            logs.result.as_ref().unwrap()["log"]["retainedBytes"],
-            MAX_LOG_BYTES as u64
+        assert!(
+            logs.result.as_ref().unwrap()["log"]["retainedBytes"]
+                .as_u64()
+                .unwrap()
+                <= MAX_LOG_BYTES as u64
         );
         assert_eq!(logs.result.as_ref().unwrap()["log"]["truncated"], true);
+        assert_eq!(logs.result.as_ref().unwrap()["log"]["redacted"], true);
+        assert!(
+            !logs
+                .result
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("hunter2")
+        );
+        assert!(
+            !logs
+                .result
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("not-pattern-shaped-but-private")
+        );
+        let hash = logs.result.as_ref().unwrap()["log"]["artifactHash"]
+            .as_str()
+            .unwrap();
+        let mut artifact = String::new();
+        state
+            .storage()
+            .artifacts()
+            .get(hash)
+            .unwrap()
+            .read_to_string(&mut artifact)
+            .unwrap();
+        assert!(!artifact.contains("hunter2"));
+        assert!(!artifact.contains("not-pattern-shaped-but-private"));
         let stopped = handle(
             state,
             Request {
@@ -487,5 +704,161 @@ mod tests {
         )
         .await;
         assert_eq!(stopped.result.unwrap()["instance"]["status"], "stopped");
+    }
+
+    struct Spoof;
+    impl DevServerRuntime for Spoof {
+        fn start(
+            &self,
+            _: &DevServerLaunchConfig,
+            i: &DevServerInstance,
+        ) -> Result<DevServerStarted, String> {
+            Ok(DevServerStarted {
+                pid: Some(-1),
+                url: format!("https://evil.example:{}", i.port),
+                preview: json!({}),
+            })
+        }
+        fn stop(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+        fn logs(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StopFailure;
+    impl DevServerRuntime for StopFailure {
+        fn start(
+            &self,
+            _: &DevServerLaunchConfig,
+            i: &DevServerInstance,
+        ) -> Result<DevServerStarted, String> {
+            Ok(DevServerStarted {
+                pid: Some(77),
+                url: format!("http://localhost:{}", i.port),
+                preview: json!({}),
+            })
+        }
+        fn stop(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
+            Err("password=hunter2".into())
+        }
+        fn logs(&self, _: &DevServerInstance) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_spoofed_runtime_reports_and_quarantines_stop_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = CoreState::new_with_dev_server_runtime(dir.path(), Arc::new(Spoof)).unwrap();
+        let project = state
+            .storage()
+            .database()
+            .projects()
+            .create(&NewProject::new("Spoof"))
+            .unwrap();
+        let mut input = NewDevServerConfig::new(project.id, "web", "serve", ".");
+        input.preferred_port = Some(4321);
+        let config = state
+            .storage()
+            .database()
+            .dev_servers()
+            .save_config(&input)
+            .unwrap();
+        let response = handle(
+            state.clone(),
+            Request {
+                id: 1,
+                method: "devServer.start".into(),
+                params: json!({"configId":config.id}),
+            },
+        )
+        .await;
+        assert!(response.error.is_some());
+        let instance = state
+            .storage()
+            .database()
+            .dev_servers()
+            .list_instances(project.id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(instance.status, "failed");
+        assert!(
+            state
+                .storage()
+                .database()
+                .dev_servers()
+                .assign_port(config.id, None, 4321, "test")
+                .is_ok()
+        );
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = CoreState::new_with_dev_server_runtime(other_dir.path(), Arc::new(StopFailure))
+            .unwrap();
+        let project = other
+            .storage()
+            .database()
+            .projects()
+            .create(&NewProject::new("Stop"))
+            .unwrap();
+        let mut input = NewDevServerConfig::new(project.id, "web", "serve", ".");
+        input.preferred_port = Some(4322);
+        let config = other
+            .storage()
+            .database()
+            .dev_servers()
+            .save_config(&input)
+            .unwrap();
+        let started = handle(
+            other.clone(),
+            Request {
+                id: 2,
+                method: "devServer.start".into(),
+                params: json!({"configId":config.id}),
+            },
+        )
+        .await;
+        let instance_id = started.result.unwrap()["instance"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let stopped = handle(
+            other.clone(),
+            Request {
+                id: 3,
+                method: "devServer.stop".into(),
+                params: json!({"instanceId":instance_id}),
+            },
+        )
+        .await;
+        assert!(stopped.error.is_some());
+        assert!(!serde_json::to_string(&stopped).unwrap().contains("hunter2"));
+        let instance = other
+            .storage()
+            .database()
+            .dev_servers()
+            .instance(Uuid::parse_str(&instance_id).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.status, "orphaned");
+        assert!(
+            other
+                .storage()
+                .database()
+                .dev_servers()
+                .assign_port(config.id, None, 4323, "test")
+                .is_err()
+        );
+        other.storage().database().recover_interrupted().unwrap();
+        assert!(
+            other
+                .storage()
+                .database()
+                .dev_servers()
+                .assign_port(config.id, None, 4323, "test")
+                .is_ok()
+        );
     }
 }

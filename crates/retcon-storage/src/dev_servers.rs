@@ -150,7 +150,12 @@ impl DevServerRepository<'_> {
                 if project != input.project_id { return Err(validation_error("dev server worktree belongs to a different project")); }
             }
             let now = now_ms();
-            tx.execute("INSERT INTO dev_server_configs(id,project_id,worktree_id,name,command,cwd,host,preferred_port,auto_start,env_allowlist_json,environment_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12) ON CONFLICT(id) DO UPDATE SET worktree_id=excluded.worktree_id,name=excluded.name,command=excluded.command,cwd=excluded.cwd,host=excluded.host,preferred_port=excluded.preferred_port,auto_start=excluded.auto_start,env_allowlist_json=excluded.env_allowlist_json,environment_json=excluded.environment_json,updated_at=excluded.updated_at WHERE project_id=excluded.project_id", params![input.id.as_bytes(), input.project_id.as_bytes(), optional_uuid_bytes(input.worktree_id), input.name.trim(), input.command.trim(), input.cwd.trim(), input.host.trim(), input.preferred_port, input.auto_start, allowlist, environment, now])?;
+            let changed = tx.execute("INSERT INTO dev_server_configs(id,project_id,worktree_id,name,command,cwd,host,preferred_port,auto_start,env_allowlist_json,environment_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12) ON CONFLICT(id) DO UPDATE SET worktree_id=excluded.worktree_id,name=excluded.name,command=excluded.command,cwd=excluded.cwd,host=excluded.host,preferred_port=excluded.preferred_port,auto_start=excluded.auto_start,env_allowlist_json=excluded.env_allowlist_json,environment_json=excluded.environment_json,updated_at=excluded.updated_at WHERE project_id=excluded.project_id", params![input.id.as_bytes(), input.project_id.as_bytes(), optional_uuid_bytes(input.worktree_id), input.name.trim(), input.command.trim(), input.cwd.trim(), input.host.trim(), input.preferred_port, input.auto_start, allowlist, environment, now])?;
+            if changed == 0 {
+                return Err(validation_error(
+                    "dev server config belongs to a different project",
+                ));
+            }
             Ok(())
         }))?;
         self.config(input.id)?
@@ -193,8 +198,15 @@ impl DevServerRepository<'_> {
         validate_actor(actor)?;
         let lease_id = Uuid::new_v4();
         map_validation(self.0.transaction(|tx| {
-            let (project_id, worktree_id) = config_identity(tx, config_id)?;
-            validate_task_project(tx, task_id, project_id)?;
+            let (project_id, config_worktree_id) = config_identity(tx, config_id)?;
+            let worktree_id =
+                validate_task_scope(tx, task_id, project_id, config_worktree_id)?;
+            let active_instance: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dev_server_instances i WHERE i.config_id=?1 AND ifnull(hex(i.task_id),'')=ifnull(hex(?2),'') AND (i.status IN ('starting','running','stopping') OR (i.status='orphaned' AND EXISTS(SELECT 1 FROM dev_server_port_leases l WHERE l.instance_id=i.id AND l.status='active'))))",params![config_id.as_bytes(),optional_uuid_bytes(task_id)],|row|row.get(0))?;
+            if active_instance {
+                return Err(validation_error(
+                    "cannot change the port of an active development server",
+                ));
+            }
             let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dev_server_port_leases WHERE port=?1 AND status='active')", [port], |row| row.get(0))?;
             if occupied { return Err(validation_error(format!("port {port} is already leased"))); }
             let now=now_ms();
@@ -207,11 +219,19 @@ impl DevServerRepository<'_> {
     }
 
     pub fn release_port(&self, config_id: Uuid, task_id: Option<Uuid>) -> Result<bool> {
-        let Some(config) = self.config(config_id)? else {
-            return Ok(false);
-        };
-        let now = now_ms();
-        Ok(self.0.execute("UPDATE dev_server_port_leases SET status='released',released_at=?1 WHERE project_id=?2 AND ifnull(hex(worktree_id),'')=ifnull(hex(?3),'') AND ifnull(hex(task_id),'')=ifnull(hex(?4),'') AND config_id=?5 AND status='active'", &[&now,&config.project_id.as_bytes(),&optional_uuid_bytes(config.worktree_id),&optional_uuid_bytes(task_id),&config_id.as_bytes()])?>0)
+        map_validation(self.0.transaction(|tx| {
+            let (project_id, config_worktree_id) = config_identity(tx, config_id)?;
+            let worktree_id =
+                validate_task_scope(tx, task_id, project_id, config_worktree_id)?;
+            let active_instance: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dev_server_instances i WHERE i.config_id=?1 AND ifnull(hex(i.task_id),'')=ifnull(hex(?2),'') AND (i.status IN ('starting','running','stopping') OR (i.status='orphaned' AND EXISTS(SELECT 1 FROM dev_server_port_leases l WHERE l.instance_id=i.id AND l.status='active'))))",params![config_id.as_bytes(),optional_uuid_bytes(task_id)],|row|row.get(0))?;
+            if active_instance {
+                return Err(validation_error(
+                    "cannot release the port of an active development server",
+                ));
+            }
+            let now = now_ms();
+            Ok(tx.execute("UPDATE dev_server_port_leases SET status='released',released_at=?1 WHERE project_id=?2 AND ifnull(hex(worktree_id),'')=ifnull(hex(?3),'') AND ifnull(hex(task_id),'')=ifnull(hex(?4),'') AND config_id=?5 AND status='active'", params![now,project_id.as_bytes(),optional_uuid_bytes(worktree_id),optional_uuid_bytes(task_id),config_id.as_bytes()])?>0)
+        }))
     }
 
     pub fn prepare_start(
@@ -223,8 +243,9 @@ impl DevServerRepository<'_> {
         validate_actor(actor)?;
         let instance_id = Uuid::new_v4();
         map_validation(self.0.transaction(|tx| {
-            let (project_id,worktree_id)=config_identity(tx,config_id)?; validate_task_project(tx,task_id,project_id)?;
-            let already_active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dev_server_instances WHERE config_id=?1 AND ifnull(hex(task_id),'')=ifnull(hex(?2),'') AND status IN ('starting','running','stopping'))",params![config_id.as_bytes(),optional_uuid_bytes(task_id)],|row|row.get(0))?;
+            let (project_id,config_worktree_id)=config_identity(tx,config_id)?;
+            let worktree_id=validate_task_scope(tx,task_id,project_id,config_worktree_id)?;
+            let already_active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dev_server_instances i WHERE i.config_id=?1 AND ifnull(hex(i.task_id),'')=ifnull(hex(?2),'') AND (i.status IN ('starting','running','stopping') OR (i.status='orphaned' AND EXISTS(SELECT 1 FROM dev_server_port_leases l WHERE l.instance_id=i.id AND l.status='active'))))",params![config_id.as_bytes(),optional_uuid_bytes(task_id)],|row|row.get(0))?;
             if already_active { return Err(validation_error("this development server already has an active instance")); }
             let preferred: Option<i64>=tx.query_row("SELECT preferred_port FROM dev_server_configs WHERE id=?1",[config_id.as_bytes()],|row|row.get(0))?;
             let existing: Option<(Vec<u8>,i64)>=tx.query_row("SELECT id,port FROM dev_server_port_leases WHERE project_id=?1 AND ifnull(hex(worktree_id),'')=ifnull(hex(?2),'') AND ifnull(hex(task_id),'')=ifnull(hex(?3),'') AND config_id=?4 AND status='active'",params![project_id.as_bytes(),optional_uuid_bytes(worktree_id),optional_uuid_bytes(task_id),config_id.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -276,6 +297,24 @@ impl DevServerRepository<'_> {
         self.transition(id, "failed", None, None, None, Some(failure), actor, true)
     }
 
+    pub fn mark_orphaned(
+        &self,
+        id: Uuid,
+        failure: &str,
+        actor: &str,
+    ) -> Result<Option<DevServerInstance>> {
+        self.transition(
+            id,
+            "orphaned",
+            None,
+            None,
+            None,
+            Some(failure),
+            actor,
+            false,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn transition(
         &self,
@@ -294,9 +333,22 @@ impl DevServerRepository<'_> {
             .transpose()
             .map_err(json_error("encode dev server preview"))?;
         map_validation(self.0.transaction(|tx| {
-            let Some((config_id,project_id,current_status))=tx.query_row("SELECT config_id,project_id,status FROM dev_server_instances WHERE id=?1",[id.as_bytes()],|row|Ok((uuid(row,0)?,uuid(row,1)?,row.get::<_,String>(2)?))).optional()? else{return Ok(false)};
-            let valid=match status {"running"=>current_status=="starting","stopping"=>matches!(current_status.as_str(),"starting"|"running"),"stopped"=>current_status=="stopping","failed"=>matches!(current_status.as_str(),"starting"|"running"|"stopping"),_=>true};
+            let Some((config_id,project_id,current_status,port))=tx.query_row("SELECT config_id,project_id,status,port FROM dev_server_instances WHERE id=?1",[id.as_bytes()],|row|Ok((uuid(row,0)?,uuid(row,1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?))).optional()? else{return Ok(false)};
+            let valid=match status {"running"=>current_status=="starting","stopping"=>matches!(current_status.as_str(),"starting"|"running"),"stopped"=>current_status=="stopping","failed"|"orphaned"=>matches!(current_status.as_str(),"starting"|"running"|"stopping"),_=>false};
             if !valid{return Err(validation_error(format!("cannot transition development server from '{current_status}' to '{status}'")));}
+            if status == "running" {
+                if pid.is_some_and(|value| value <= 0) {
+                    return Err(validation_error(
+                        "development server runtime returned an invalid process identifier",
+                    ));
+                }
+                let Some(url) = url else {
+                    return Err(validation_error(
+                        "development server runtime did not return a preview URL",
+                    ));
+                };
+                validate_local_preview_url(url, port)?;
+            }
             let now=now_ms(); tx.execute("UPDATE dev_server_instances SET status=?2,pid=COALESCE(?3,pid),url=COALESCE(?4,url),preview_json=COALESCE(?5,preview_json),failure=?6,started_at=CASE WHEN ?2='running' THEN COALESCE(started_at,?7) ELSE started_at END,stopped_at=CASE WHEN ?2 IN ('stopped','failed') THEN ?7 ELSE stopped_at END WHERE id=?1",params![id.as_bytes(),status,pid,url,encoded,failure,now])?; if release {tx.execute("UPDATE dev_server_port_leases SET status='released',released_at=?2 WHERE instance_id=?1 AND status='active'",params![id.as_bytes(),now])?;} record_event(tx,id,config_id,project_id,status,actor,&json!({"failure":failure}))?; Ok(true)
         }))?;
         self.instance(id)
@@ -324,9 +376,27 @@ impl DevServerRepository<'_> {
 }
 
 fn validate_config(c: &NewDevServerConfig) -> Result<()> {
-    if c.name.trim().is_empty() || c.command.trim().is_empty() || c.cwd.trim().is_empty() {
+    if c.name.trim().is_empty()
+        || c.command.trim().is_empty()
+        || c.cwd.trim().is_empty()
+        || c.host.trim().is_empty()
+    {
         return Err(StorageError::Validation(
-            "dev server name, command, and cwd cannot be empty".into(),
+            "dev server name, command, cwd, and host cannot be empty".into(),
+        ));
+    }
+    if [
+        c.name.as_str(),
+        c.command.as_str(),
+        c.cwd.as_str(),
+        c.host.as_str(),
+    ]
+    .iter()
+    .any(|value| value.contains('\0'))
+        || c.environment.values().any(|value| value.contains('\0'))
+    {
+        return Err(StorageError::Validation(
+            "dev server configuration cannot contain NUL bytes".into(),
         ));
     }
     if let Some(p) = c.preferred_port {
@@ -336,6 +406,11 @@ fn validate_config(c: &NewDevServerConfig) -> Result<()> {
     if allowed.len() != c.env_allowlist.len() {
         return Err(StorageError::Validation(
             "environment allowlist keys must be unique".into(),
+        ));
+    }
+    if c.env_allowlist.iter().any(|key| !valid_env_key(key)) {
+        return Err(StorageError::Validation(
+            "environment allowlist contains an invalid key".into(),
         ));
     }
     for key in c.environment.keys() {
@@ -361,6 +436,27 @@ fn validate_port(p: i64) -> Result<()> {
             "dev server port must be between 1024 and 65535".into(),
         ))
     }
+}
+fn validate_local_preview_url(url: &str, port: i64) -> rusqlite::Result<()> {
+    let remainder = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| validation_error("development server preview URL must use HTTP or HTTPS"))?;
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let expected = port.to_string();
+    let valid_authority = authority == format!("localhost:{expected}")
+        || authority == format!("127.0.0.1:{expected}")
+        || authority == format!("[::1]:{expected}");
+    if !valid_authority || url.chars().any(char::is_control) {
+        return Err(validation_error(
+            "development server preview URL must target the leased local port",
+        ));
+    }
+    Ok(())
 }
 fn validate_actor(a: &str) -> Result<()> {
     if a.trim().is_empty() {
@@ -395,27 +491,39 @@ fn config_identity(tx: &Transaction<'_>, id: Uuid) -> rusqlite::Result<(Uuid, Op
     .optional()?
     .ok_or_else(|| validation_error("dev server config does not exist"))
 }
-fn validate_task_project(
+fn validate_task_scope(
     tx: &Transaction<'_>,
     task: Option<Uuid>,
     project: Uuid,
-) -> rusqlite::Result<()> {
+    config_worktree: Option<Uuid>,
+) -> rusqlite::Result<Option<Uuid>> {
     if let Some(id) = task {
-        let p = tx
+        let (task_project, task_worktree, worktree_project) = tx
             .query_row(
-                "SELECT project_id FROM tasks WHERE id=?1",
+                "SELECT t.project_id,t.worktree_id,r.project_id FROM tasks t LEFT JOIN git_worktrees w ON w.id=t.worktree_id LEFT JOIN repository_locations r ON r.id=w.repository_location_id WHERE t.id=?1",
                 [id.as_bytes()],
-                |row| optional_uuid(row, 0),
+                |row| Ok((optional_uuid(row, 0)?, optional_uuid(row, 1)?, optional_uuid(row, 2)?)),
             )
             .optional()?
             .ok_or_else(|| validation_error("dev server task does not exist"))?;
-        if p != Some(project) {
+        if task_project != Some(project) {
             return Err(validation_error(
                 "dev server task belongs to a different project",
             ));
         }
+        if task_worktree.is_some() && worktree_project != Some(project) {
+            return Err(validation_error(
+                "dev server task worktree belongs to a different project",
+            ));
+        }
+        if config_worktree.is_some() && task_worktree != config_worktree {
+            return Err(validation_error(
+                "dev server task belongs to a different worktree",
+            ));
+        }
+        return Ok(config_worktree.or(task_worktree));
     }
-    Ok(())
+    Ok(config_worktree)
 }
 fn find_available_port(tx: &Transaction<'_>, preferred: Option<i64>) -> rusqlite::Result<i64> {
     if let Some(p) = preferred {
@@ -557,7 +665,7 @@ fn row_event(r: &Row<'_>) -> rusqlite::Result<DevServerEvent> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::NewProject;
+    use crate::{NewGitWorktree, NewProject, NewTask};
     #[test]
     fn config_ports_lifecycle_and_redaction_round_trip() {
         let db = Database::open_in_memory().unwrap();
@@ -584,6 +692,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(i.status, "running");
+        assert!(
+            db.dev_servers()
+                .assign_port(c.id, None, 4174, "test")
+                .is_err()
+        );
+        assert!(db.dev_servers().release_port(c.id, None).is_err());
         db.dev_servers().begin_stop(i.id, "test").unwrap();
         let i = db
             .dev_servers()
@@ -592,6 +706,11 @@ mod tests {
             .unwrap();
         assert_eq!(i.status, "stopped");
         assert_eq!(db.dev_servers().history(i.id).unwrap().len(), 4);
+        assert!(
+            db.dev_servers()
+                .assign_port(c.id, None, 4174, "test")
+                .is_ok()
+        );
     }
     #[test]
     fn rejects_unallowlisted_environment_and_duplicate_ports() {
@@ -626,6 +745,15 @@ mod tests {
             .dev_servers()
             .save_config(&NewDevServerConfig::new(project.id, "web", "serve", "."))
             .unwrap();
+        let reserved = db
+            .dev_servers()
+            .save_config(&NewDevServerConfig::new(
+                project.id, "reserved", "serve", ".",
+            ))
+            .unwrap();
+        db.dev_servers()
+            .assign_port(reserved.id, None, 4100, "test")
+            .unwrap();
         let instance = db
             .dev_servers()
             .prepare_start(config.id, None, "test")
@@ -655,11 +783,90 @@ mod tests {
                 .status,
             "orphaned"
         );
+        assert_eq!(
+            db.dev_servers().instance(instance.id).unwrap().unwrap().pid,
+            None
+        );
         assert_eq!(db.dev_servers().history(instance.id).unwrap().len(), 3);
         assert!(
             db.dev_servers()
                 .assign_port(config.id, None, 3000, "test")
                 .is_ok()
         );
+        assert!(
+            db.dev_servers()
+                .assign_port(config.id, None, 4100, "test")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_cross_project_config_overwrite() {
+        let db = Database::open_in_memory().unwrap();
+        let first = db.projects().create(&NewProject::new("First")).unwrap();
+        let second = db.projects().create(&NewProject::new("Second")).unwrap();
+        let mut input = NewDevServerConfig::new(first.id, "web", "serve", ".");
+        let stored = db.dev_servers().save_config(&input).unwrap();
+        input.project_id = second.id;
+        input.name = "spoofed".into();
+        assert!(db.dev_servers().save_config(&input).is_err());
+        let unchanged = db.dev_servers().config(stored.id).unwrap().unwrap();
+        assert_eq!(unchanged.project_id, first.id);
+        assert_eq!(unchanged.name, "web");
+    }
+
+    #[test]
+    fn enforces_task_worktree_scope_and_inherits_task_worktree() {
+        let db = Database::open_in_memory().unwrap();
+        let project = db.projects().create(&NewProject::new("Web")).unwrap();
+        db.projects()
+            .add_location(project.id, "C:/web-one", None)
+            .unwrap();
+        db.projects()
+            .add_location(project.id, "C:/web-two", None)
+            .unwrap();
+        let first_location = db
+            .projects()
+            .location_id_by_path("C:/web-one")
+            .unwrap()
+            .unwrap();
+        let second_location = db
+            .projects()
+            .location_id_by_path("C:/web-two")
+            .unwrap()
+            .unwrap();
+        let first_worktree = db
+            .git_worktrees()
+            .create(&NewGitWorktree::new(first_location, "C:/web-one/wt"))
+            .unwrap();
+        let second_worktree = db
+            .git_worktrees()
+            .create(&NewGitWorktree::new(second_location, "C:/web-two/wt"))
+            .unwrap();
+        let mut task = NewTask::new("Run web");
+        task.project_id = Some(project.id);
+        task.worktree_id = Some(second_worktree.id);
+        let task = db.tasks().create(&task).unwrap();
+
+        let mut scoped = NewDevServerConfig::new(project.id, "scoped", "serve", ".");
+        scoped.worktree_id = Some(first_worktree.id);
+        let scoped = db.dev_servers().save_config(&scoped).unwrap();
+        assert!(
+            db.dev_servers()
+                .prepare_start(scoped.id, Some(task.id), "test")
+                .is_err()
+        );
+
+        let project_config = db
+            .dev_servers()
+            .save_config(&NewDevServerConfig::new(
+                project.id, "project", "serve", ".",
+            ))
+            .unwrap();
+        let instance = db
+            .dev_servers()
+            .prepare_start(project_config.id, Some(task.id), "test")
+            .unwrap();
+        assert_eq!(instance.worktree_id, Some(second_worktree.id));
     }
 }
