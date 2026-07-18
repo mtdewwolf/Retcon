@@ -7,9 +7,9 @@ something breaks.
 
 > Status: **pre-alpha** — Phases 0–5 and 6–14 (foundation) implemented with automated
 > test evidence; Phases 15–20 (safe code changes) landed in Wave 4 with gate-partial
-> coverage (Milestone 4 foundation). Phases 21–24 task planning, verification,
-> dev-server management, and the managed browser service are implemented and verified;
-> Phase 25 browser verification is underway. Phase 2 platform matrix and Milestone 3
+> coverage (Milestone 4 foundation). Phases 21–25 task planning, verification,
+> dev-server management, managed browser service, and browser verification are implemented
+> and verified; Phase 26 diagnostics and observability is underway. Phase 2 platform matrix and Milestone 3
 > live E2E evidence remain pending. See `docs/phase-4-20-tracker.md`.
 
 ## What Retcon will do
