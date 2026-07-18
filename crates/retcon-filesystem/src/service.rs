@@ -1,11 +1,14 @@
 //! Directory listing, reading, and writing within a project root.
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::error::FilesystemError;
 
@@ -102,6 +105,17 @@ pub struct FileReadResult {
     pub binary: bool,
     /// Detected language hint for syntax highlighting.
     pub language: String,
+    /// SHA-256 revision of the complete file content.
+    pub revision: String,
+}
+
+/// Required optimistic-concurrency condition for a file write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileWriteCondition {
+    /// Replace an existing file only when its revision still matches.
+    IfMatch(String),
+    /// Create a new file only when no file exists at the requested path.
+    IfNoneMatch,
 }
 
 /// Filesystem operations scoped to a project root.
@@ -194,13 +208,8 @@ impl FileService {
             });
         }
 
-        let truncated = size > limit;
-        let read_len = if truncated { limit } else { size } as usize;
-        let bytes = if truncated {
-            read_prefix(&file_path, read_len)?
-        } else {
-            fs::read(&file_path)?
-        };
+        let (bytes, actual_size, revision) = read_with_revision(&file_path, limit)?;
+        let truncated = actual_size > limit;
         let binary = is_probably_binary(&bytes);
         let language = language_for_path(&file_path);
         let (content, content_base64) = if binary {
@@ -213,10 +222,11 @@ impl FileService {
             path: file_path.to_string_lossy().into_owned(),
             content,
             content_base64,
-            size,
+            size: actual_size,
             truncated,
             binary,
             language,
+            revision,
         };
         metric.succeed();
         Ok(result)
@@ -229,6 +239,7 @@ impl FileService {
         path: &str,
         content: &str,
         limit: u64,
+        condition: FileWriteCondition,
     ) -> Result<FileWriteResult, FilesystemError> {
         let mut metric = FilesystemMetric::new("write");
         let bytes = content.as_bytes();
@@ -238,21 +249,64 @@ impl FileService {
                 bytes.len()
             )));
         }
-        let file_path = resolve_within_root(root, path)?;
+        let root = canonical_root(root)?;
+        let file_path = resolve_within_canonical_root(&root, path)?;
         if file_path.is_dir() {
             return Err(FilesystemError::InvalidRequest(format!(
                 "path is a directory: {}",
                 file_path.display()
             )));
         }
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent)?;
+        verify_write_condition(&file_path, &condition)?;
+        let parent = file_path.parent().ok_or_else(|| {
+            FilesystemError::InvalidRequest("file path has no parent directory".to_owned())
+        })?;
+        ensure_directories_within_root(&root, parent)?;
+        // Re-resolve after directory creation to catch a symlink/junction introduced by a race.
+        let file_path = resolve_within_canonical_root(&root, path)?;
+
+        let temp_path = parent.join(format!(".retcon-{}.tmp", Uuid::new_v4()));
+        let mut cleanup = TempFileGuard::new(temp_path.clone());
+        let mut staged = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        if let Ok(metadata) = fs::metadata(&file_path) {
+            staged.set_permissions(metadata.permissions())?;
         }
-        fs::write(&file_path, bytes)?;
+        staged.write_all(bytes)?;
+        staged.flush()?;
+        staged.sync_all()?;
+        drop(staged);
+
+        // This is intentionally the last operation before commit. A stale writer never mutates
+        // the destination, and create races are resolved by an atomic hard-link insertion.
+        let file_path = resolve_within_canonical_root(&root, path)?;
+        verify_write_condition(&file_path, &condition)?;
+        match condition {
+            FileWriteCondition::IfMatch(_) => atomic_replace(&temp_path, &file_path)?,
+            FileWriteCondition::IfNoneMatch => {
+                fs::hard_link(&temp_path, &file_path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        FilesystemError::Conflict {
+                            current_revision: revision_for_file(&file_path).ok().flatten(),
+                        }
+                    } else {
+                        FilesystemError::Io(error)
+                    }
+                })?;
+                let _ = fs::remove_file(&temp_path);
+            }
+        }
+        cleanup.disarm();
+        sync_parent(parent)?;
         let size = fs::metadata(&file_path)?.len();
+        let revision = revision_for_file(&file_path)?
+            .ok_or_else(|| FilesystemError::NotFound(file_path.clone()))?;
         let result = FileWriteResult {
             path: file_path.to_string_lossy().into_owned(),
             size,
+            revision,
         };
         metric.succeed();
         Ok(result)
@@ -267,20 +321,29 @@ pub struct FileWriteResult {
     pub path: String,
     /// Resulting file size in bytes.
     pub size: u64,
+    /// SHA-256 revision of the resulting complete file content.
+    pub revision: String,
 }
 
 /// Resolves `path` under `root`, rejecting traversal outside the root.
 pub fn resolve_within_root(root: &Path, path: &str) -> Result<PathBuf, FilesystemError> {
-    let root = fs::canonicalize(root).map_err(|error| {
+    let root = canonical_root(root)?;
+    resolve_within_canonical_root(&root, path)
+}
+
+fn canonical_root(root: &Path) -> Result<PathBuf, FilesystemError> {
+    fs::canonicalize(root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             FilesystemError::NotFound(root.to_path_buf())
         } else {
             FilesystemError::Io(error)
         }
-    })?;
+    })
+}
 
+fn resolve_within_canonical_root(root: &Path, path: &str) -> Result<PathBuf, FilesystemError> {
     if path.is_empty() {
-        return Ok(root);
+        return Ok(root.to_path_buf());
     }
 
     let requested = Path::new(path);
@@ -290,10 +353,11 @@ pub fn resolve_within_root(root: &Path, path: &str) -> Result<PathBuf, Filesyste
         normalize_path(&root.join(requested))
     };
 
-    if !joined.starts_with(&root) {
+    if !joined.starts_with(root) {
         return Err(FilesystemError::OutsideRoot(joined));
     }
 
+    reject_symlink_traversal(root, &joined)?;
     Ok(joined)
 }
 
@@ -312,13 +376,197 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn read_prefix(path: &Path, len: usize) -> Result<Vec<u8>, FilesystemError> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-    let mut buffer = vec![0_u8; len];
-    let read = file.read(&mut buffer)?;
-    buffer.truncate(read);
-    Ok(buffer)
+fn read_with_revision(path: &Path, limit: u64) -> Result<(Vec<u8>, u64, String), FilesystemError> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut returned = Vec::with_capacity(limit.min(64 * 1024) as usize);
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        let remaining = limit.saturating_sub(returned.len() as u64) as usize;
+        returned.extend_from_slice(&buffer[..read.min(remaining)]);
+        size = size.saturating_add(read as u64);
+    }
+    Ok((returned, size, format!("{:x}", hasher.finalize())))
+}
+
+/// Computes the revision of a regular file, returning `None` when it is absent.
+pub(crate) fn revision_for_file(path: &Path) -> Result<Option<String>, FilesystemError> {
+    match File::open(path) {
+        Ok(mut file) => {
+            let mut hasher = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(Some(format!("{:x}", hasher.finalize())))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn verify_write_condition(
+    path: &Path,
+    condition: &FileWriteCondition,
+) -> Result<(), FilesystemError> {
+    let current_revision = revision_for_file(path)?;
+    let matches = match condition {
+        FileWriteCondition::IfMatch(expected) => current_revision.as_ref() == Some(expected),
+        FileWriteCondition::IfNoneMatch => current_revision.is_none(),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(FilesystemError::Conflict { current_revision })
+    }
+}
+
+fn reject_symlink_traversal(root: &Path, path: &Path) -> Result<(), FilesystemError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| FilesystemError::OutsideRoot(path.to_path_buf()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(FilesystemError::OutsideRoot(path.to_path_buf()));
+        }
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(FilesystemError::OutsideRoot(current));
+                }
+                let canonical = fs::canonicalize(&current)?;
+                if !canonical.starts_with(root) {
+                    return Err(FilesystemError::OutsideRoot(canonical));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_directories_within_root(root: &Path, directory: &Path) -> Result<(), FilesystemError> {
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| FilesystemError::OutsideRoot(directory.to_path_buf()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(FilesystemError::OutsideRoot(directory.to_path_buf()));
+        };
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(FilesystemError::OutsideRoot(current));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let canonical = fs::canonicalize(&current)?;
+        if !canonical.starts_with(root) {
+            return Err(FilesystemError::OutsideRoot(canonical));
+        }
+    }
+    Ok(())
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn atomic_replace(from: &Path, to: &Path) -> Result<(), FilesystemError> {
+    fs::rename(from, to)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn atomic_replace(from: &Path, to: &Path) -> Result<(), FilesystemError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    let from = from
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let to = to
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that remain alive for the call.
+    let result = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error().into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn atomic_replace(from: &Path, to: &Path) -> Result<(), FilesystemError> {
+    fs::rename(from, to)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent(parent: &Path) -> Result<(), FilesystemError> {
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_parent: &Path) -> Result<(), FilesystemError> {
+    Ok(())
 }
 
 fn is_probably_binary(bytes: &[u8]) -> bool {
@@ -534,6 +782,7 @@ mod tests {
         let read = service.read(root, "README.md", DEFAULT_READ_LIMIT).unwrap();
         assert_eq!(read.content.as_deref(), Some("# hello"));
         assert_eq!(read.language, "markdown");
+        assert_eq!(read.revision.len(), 64);
     }
 
     #[tokio::test]
@@ -548,17 +797,228 @@ mod tests {
     }
 
     #[test]
-    fn write_persists_changes() {
+    fn conditional_write_persists_changes() {
         let temp = tempfile::tempdir().unwrap();
         let service = FileService;
+        fs::write(temp.path().join("notes.txt"), "original").unwrap();
+        let revision = service
+            .read(temp.path(), "notes.txt", DEFAULT_READ_LIMIT)
+            .unwrap()
+            .revision;
         let result = service
-            .write(temp.path(), "notes.txt", "updated", DEFAULT_WRITE_LIMIT)
+            .write(
+                temp.path(),
+                "notes.txt",
+                "updated",
+                DEFAULT_WRITE_LIMIT,
+                FileWriteCondition::IfMatch(revision),
+            )
             .unwrap();
         assert_eq!(result.size, 7);
+        assert_eq!(result.revision.len(), 64);
         let read = service
             .read(temp.path(), "notes.txt", DEFAULT_READ_LIMIT)
             .unwrap();
         assert_eq!(read.content.as_deref(), Some("updated"));
+        assert_eq!(read.revision, result.revision);
+    }
+
+    #[test]
+    fn stale_writer_conflicts_without_changing_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = FileService;
+        fs::write(temp.path().join("notes.txt"), "first").unwrap();
+        let stale = service
+            .read(temp.path(), "notes.txt", DEFAULT_READ_LIMIT)
+            .unwrap()
+            .revision;
+        fs::write(temp.path().join("notes.txt"), "external change").unwrap();
+        let current = service
+            .read(temp.path(), "notes.txt", DEFAULT_READ_LIMIT)
+            .unwrap()
+            .revision;
+
+        let error = service
+            .write(
+                temp.path(),
+                "notes.txt",
+                "stale writer",
+                DEFAULT_WRITE_LIMIT,
+                FileWriteCondition::IfMatch(stale),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            FilesystemError::Conflict {
+                current_revision: Some(revision)
+            } if revision == current
+        ));
+        assert_eq!(
+            fs::read_to_string(temp.path().join("notes.txt")).unwrap(),
+            "external change"
+        );
+    }
+
+    #[test]
+    fn concurrent_create_has_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = Arc::new(temp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut writers = Vec::new();
+        for content in ["writer one", "writer two"] {
+            let root = Arc::clone(&root);
+            let barrier = Arc::clone(&barrier);
+            writers.push(thread::spawn(move || {
+                barrier.wait();
+                FileService.write(
+                    &root,
+                    "created.txt",
+                    content,
+                    DEFAULT_WRITE_LIMIT,
+                    FileWriteCondition::IfNoneMatch,
+                )
+            }));
+        }
+        barrier.wait();
+        let results = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(FilesystemError::Conflict { .. })))
+                .count(),
+            1
+        );
+        let content = fs::read_to_string(root.join("created.txt")).unwrap();
+        assert!(content == "writer one" || content == "writer two");
+        assert!(fs::read_dir(&*root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".retcon-")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_atomic_replacement_never_exposes_partial_content() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = Arc::new(temp.path().to_path_buf());
+        let path = root.join("atomic.txt");
+        let first = "a".repeat(128 * 1024);
+        let second = "b".repeat(128 * 1024);
+        fs::write(&path, &first).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let reader_root = Arc::clone(&root);
+        let reader_running = Arc::clone(&running);
+        let first_for_reader = first.clone();
+        let second_for_reader = second.clone();
+        let reader = thread::spawn(move || {
+            while reader_running.load(Ordering::Acquire) {
+                let bytes = fs::read(reader_root.join("atomic.txt")).unwrap();
+                assert!(
+                    bytes == first_for_reader.as_bytes() || bytes == second_for_reader.as_bytes()
+                );
+            }
+        });
+
+        let service = FileService;
+        for index in 0..12 {
+            let read = service
+                .read(&root, "atomic.txt", DEFAULT_WRITE_LIMIT)
+                .unwrap();
+            let content = if index % 2 == 0 { &second } else { &first };
+            service
+                .write(
+                    &root,
+                    "atomic.txt",
+                    content,
+                    DEFAULT_WRITE_LIMIT,
+                    FileWriteCondition::IfMatch(read.revision),
+                )
+                .unwrap();
+        }
+        running.store(false, Ordering::Release);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn staged_failure_guard_removes_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join(".retcon-test.tmp");
+        fs::write(&staged, "staged").unwrap();
+        {
+            let _guard = TempFileGuard::new(staged.clone());
+            // Dropping the guard models every early return after staging and before commit.
+        }
+        assert!(!staged.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_atomic_replacement_preserves_destination_and_cleans_stage() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("destination.txt");
+        let staged = temp.path().join(".retcon-failure.tmp");
+        fs::write(&destination, "original").unwrap();
+        fs::write(&staged, "replacement").unwrap();
+        let guard = TempFileGuard::new(staged.clone());
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&destination)
+            .unwrap();
+
+        assert!(atomic_replace(&staged, &destination).is_err());
+        drop(locked);
+        drop(guard);
+        assert_eq!(fs::read_to_string(destination).unwrap(), "original");
+        assert!(!staged.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+        let error = FileService
+            .read(root.path(), "escape/secret.txt", DEFAULT_READ_LIMIT)
+            .unwrap_err();
+        assert!(matches!(error, FilesystemError::OutsideRoot(_)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_symlink_escape() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        if symlink_dir(outside.path(), root.path().join("escape")).is_err() {
+            return;
+        }
+        let error = FileService
+            .read(root.path(), "escape/secret.txt", DEFAULT_READ_LIMIT)
+            .unwrap_err();
+        assert!(matches!(error, FilesystemError::OutsideRoot(_)));
     }
 
     #[test]
@@ -568,9 +1028,13 @@ mod tests {
         fs::write(temp.path().join("big.txt"), &payload).unwrap();
         let service = FileService;
         let read = service.read(temp.path(), "big.txt", 8).unwrap();
+        let full = service
+            .read(temp.path(), "big.txt", DEFAULT_READ_LIMIT)
+            .unwrap();
         assert!(read.truncated);
         assert_eq!(read.content.as_deref(), Some("xxxxxxxx"));
         assert_eq!(read.size, 32);
+        assert_eq!(read.revision, full.revision);
     }
 
     #[test]

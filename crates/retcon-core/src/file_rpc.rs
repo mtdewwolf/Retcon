@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use crate::error::{CoreError, ErrorCode, ErrorSource};
 use crate::rpc::{Request, Response};
 use crate::state::CoreState;
-use retcon_filesystem::{DEFAULT_READ_LIMIT, DEFAULT_WRITE_LIMIT, FilesystemError, new_watch_id};
+use retcon_filesystem::{
+    DEFAULT_READ_LIMIT, DEFAULT_WRITE_LIMIT, FileWriteCondition, FilesystemError, new_watch_id,
+};
 
 fn failed(id: u64, error: CoreError) -> Response {
     Response::error(id, &error)
@@ -46,6 +48,14 @@ fn map_error(error: FilesystemError) -> CoreError {
             "The file request is invalid.",
             message,
         ),
+        FilesystemError::Conflict { current_revision } => CoreError::new(
+            ErrorCode::Conflict,
+            ErrorSource::Rpc,
+            "That file changed on disk. Reload it before saving again.",
+            "conditional file write revision mismatch",
+        )
+        .retryable(true)
+        .diagnostic(json!({"currentRevision": current_revision})),
         FilesystemError::Watch(message) => CoreError::new(
             ErrorCode::Internal,
             ErrorSource::Rpc,
@@ -80,6 +90,26 @@ fn path_param(params: &Value) -> Result<&str, CoreError> {
             "missing 'path' parameter",
         )
     })
+}
+
+fn write_condition(params: &Value) -> Result<FileWriteCondition, CoreError> {
+    let if_match = params.get("ifMatch").and_then(Value::as_str);
+    let if_none_match = params
+        .get("ifNoneMatch")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match (if_match, if_none_match) {
+        (Some(revision), false) if !revision.is_empty() => {
+            Ok(FileWriteCondition::IfMatch(revision.to_owned()))
+        }
+        (None, true) => Ok(FileWriteCondition::IfNoneMatch),
+        _ => Err(CoreError::new(
+            ErrorCode::InvalidRequest,
+            ErrorSource::Rpc,
+            "Choose whether to update the version you opened or create a new file.",
+            "file.write requires exactly one of non-empty 'ifMatch' or 'ifNoneMatch: true'",
+        )),
+    }
 }
 
 pub async fn handle(state: CoreState, request: Request) -> Response {
@@ -145,9 +175,13 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
                 .get("limit")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_WRITE_LIMIT);
+            let condition = match write_condition(&params) {
+                Ok(condition) => condition,
+                Err(error) => return failed(id, error),
+            };
             let snapshot =
                 crate::checkpoints_rpc::hook_file_write_begin(&state, &root, path, &params);
-            match service.write(&root, path, content, limit) {
+            match service.write(&root, path, content, limit, condition) {
                 Ok(result) => {
                     if let Some(snapshot) = snapshot {
                         crate::checkpoints_rpc::hook_file_write_finish(&state, &root, snapshot);
@@ -253,7 +287,9 @@ mod tests {
             },
         )
         .await;
-        assert!(read.result.unwrap().to_string().contains("hello"));
+        let read_result = read.result.unwrap();
+        assert!(read_result.to_string().contains("hello"));
+        let revision = read_result["revision"].as_str().unwrap();
 
         let write = handle(
             state.clone(),
@@ -264,10 +300,102 @@ mod tests {
                     "root": root.to_string_lossy(),
                     "path": "hello.txt",
                     "content": "updated",
+                    "ifMatch": revision,
                 }),
             },
         )
         .await;
         assert!(write.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn file_write_requires_a_concurrency_condition() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello").unwrap();
+        let state = CoreState::new(temp.path()).unwrap();
+        let response = handle(
+            state,
+            Request {
+                id: 1,
+                method: "file.write".into(),
+                params: json!({
+                    "root": temp.path().to_string_lossy(),
+                    "path": "hello.txt",
+                    "content": "blind overwrite",
+                }),
+            },
+        )
+        .await;
+        let error = response.error.unwrap();
+        assert_eq!(error["code"], "invalid_request");
+        assert_eq!(
+            fs::read_to_string(temp.path().join("hello.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_file_write_returns_only_the_current_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hello.txt");
+        fs::write(&path, "first").unwrap();
+        let state = CoreState::new(temp.path()).unwrap();
+        let stale = state
+            .filesystem()
+            .service()
+            .read(temp.path(), "hello.txt", DEFAULT_READ_LIMIT)
+            .unwrap()
+            .revision;
+        fs::write(&path, "private current content").unwrap();
+
+        let response = handle(
+            state,
+            Request {
+                id: 1,
+                method: "file.write".into(),
+                params: json!({
+                    "root": temp.path().to_string_lossy(),
+                    "path": "hello.txt",
+                    "content": "stale",
+                    "ifMatch": stale,
+                }),
+            },
+        )
+        .await;
+        let error = response.error.unwrap();
+        assert_eq!(error["code"], "conflict");
+        assert_eq!(
+            error["diagnostic"]["currentRevision"]
+                .as_str()
+                .map(str::len),
+            Some(64)
+        );
+        assert!(!error.to_string().contains("private current content"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "private current content");
+    }
+
+    #[tokio::test]
+    async fn file_write_creates_only_with_if_none_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = CoreState::new(temp.path()).unwrap();
+        let response = handle(
+            state,
+            Request {
+                id: 1,
+                method: "file.write".into(),
+                params: json!({
+                    "root": temp.path().to_string_lossy(),
+                    "path": "created.txt",
+                    "content": "new",
+                    "ifNoneMatch": true,
+                }),
+            },
+        )
+        .await;
+        assert!(response.result.is_some());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("created.txt")).unwrap(),
+            "new"
+        );
     }
 }

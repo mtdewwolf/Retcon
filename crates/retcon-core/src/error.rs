@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub enum ErrorCode {
     AlreadyRunning,
     AuthenticationFailed,
+    Conflict,
     InvalidRequest,
     Io,
     NotFound,
