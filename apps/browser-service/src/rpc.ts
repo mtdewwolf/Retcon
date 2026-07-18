@@ -122,10 +122,8 @@ class CoreRpcClient implements RpcClient {
           pending.resolve(response.result ?? {});
         }
       }
-    } catch (error) {
-      logger.warn("RPC read loop ended", {
-        error: error instanceof Error ? error.message : String(error),
-      });
+    } catch (_error) {
+      logger.warn("RPC read loop ended");
     } finally {
       await this.close();
     }
@@ -174,10 +172,8 @@ export function connect(pipeName: string | undefined): RpcClient {
     pid: 0,
     version: CLIENT_VERSION,
     protocolVersion: PROTOCOL_VERSION,
-  }).catch((error: unknown) => {
-    logger.warn("rpc transport connection failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  }).catch((_error: unknown) => {
+    logger.warn("rpc transport connection failed");
   });
   return new DisconnectedRpcClient();
 }

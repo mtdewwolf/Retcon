@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use thiserror::Error;
@@ -24,6 +24,10 @@ use crate::{
 
 const EVENT_CAPACITY: usize = 256;
 const PIPE_CHUNK_BYTES: usize = 8 * 1024;
+
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
 
 /// Receiver for bounded live development-server events.
 pub type EventStream = broadcast::Receiver<DevServerEvent>;
@@ -120,8 +124,29 @@ impl DevServer {
         command: DevServerCommand,
         options: StartOptions,
     ) -> Result<StartResult, DevServerError> {
+        let started = Instant::now();
+        let framework = framework_name(command.framework);
         let _control = self.control.lock().await;
-        self.start_inner(command, options).await
+        let result = self.start_inner(command, options).await;
+        retcon_runtime_observability::record_duration(
+            "devserver",
+            "devserver.operation.duration",
+            "start",
+            if result.is_ok() { "ok" } else { "error" },
+            started.elapsed(),
+        );
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "devserver.start.completed",
+                component = "devserver",
+                operation = "start",
+                framework,
+                outcome = if result.is_ok() { "ok" } else { "error" },
+                duration_ms = started.elapsed().as_millis() as u64
+            );
+        }
+        result
     }
 
     async fn start_inner(
@@ -190,8 +215,27 @@ impl DevServer {
 
     /// Stop the active direct child and await cleanup. A stopped runtime is a no-op.
     pub async fn stop(&self) -> Result<(), DevServerError> {
+        let started = Instant::now();
         let _control = self.control.lock().await;
-        self.stop_inner().await
+        let result = self.stop_inner().await;
+        retcon_runtime_observability::record_duration(
+            "devserver",
+            "devserver.operation.duration",
+            "stop",
+            if result.is_ok() { "ok" } else { "error" },
+            started.elapsed(),
+        );
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "devserver.stop.completed",
+                component = "devserver",
+                operation = "stop",
+                outcome = if result.is_ok() { "ok" } else { "error" },
+                duration_ms = started.elapsed().as_millis() as u64
+            );
+        }
+        result
     }
 
     async fn stop_inner(&self) -> Result<(), DevServerError> {
@@ -208,11 +252,30 @@ impl DevServer {
 
     /// Stop and start again with the most recent validated configuration.
     pub async fn restart(&self) -> Result<StartResult, DevServerError> {
+        let started = Instant::now();
         let _control = self.control.lock().await;
         let previous = self.state.lock().await.last.clone();
         let (command, options) = previous.ok_or(DevServerError::NothingToRestart)?;
         self.stop_inner().await?;
-        self.start_inner(command, options).await
+        let result = self.start_inner(command, options).await;
+        retcon_runtime_observability::record_duration(
+            "devserver",
+            "devserver.operation.duration",
+            "restart",
+            if result.is_ok() { "ok" } else { "error" },
+            started.elapsed(),
+        );
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "devserver.restart.completed",
+                component = "devserver",
+                operation = "restart",
+                outcome = if result.is_ok() { "ok" } else { "error" },
+                duration_ms = started.elapsed().as_millis() as u64
+            );
+        }
+        result
     }
 
     async fn join_failed_start(&self, run_id: u64) {
@@ -226,6 +289,19 @@ impl DevServer {
         if let Some(active) = active {
             let _ = active.join.await;
         }
+    }
+}
+
+fn framework_name(framework: crate::Framework) -> &'static str {
+    match framework {
+        crate::Framework::NextJs => "next_js",
+        crate::Framework::Vite => "vite",
+        crate::Framework::ReactScripts => "react_scripts",
+        crate::Framework::Flutter => "flutter",
+        crate::Framework::Rust => "rust",
+        crate::Framework::Django => "django",
+        crate::Framework::Node => "node",
+        crate::Framework::Custom => "custom",
     }
 }
 

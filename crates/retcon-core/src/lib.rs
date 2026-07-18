@@ -14,6 +14,8 @@ mod browser_verification_rpc;
 mod checkpoints_rpc;
 pub mod dev_servers;
 mod dev_servers_rpc;
+pub mod diagnostics;
+mod diagnostics_rpc;
 pub mod error;
 pub mod event;
 mod file_rpc;

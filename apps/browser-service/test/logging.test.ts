@@ -11,7 +11,12 @@ describe("structured logging", () => {
       return true;
     };
     try {
-      log("error", "test message", { answer: 42 });
+      log("error", "https://user:password@example.invalid/C:/secret", {
+        answer: 42,
+        error: "token=secret",
+        version: "0.1.0",
+        features: ["one", "two"],
+      });
     } finally {
       process.stderr.write = original;
     }
@@ -23,12 +28,17 @@ describe("structured logging", () => {
       level: string;
       target: string;
       timestamp: string;
-      fields: { message: string; answer: number };
+      fields: { message: string; version: string; featureCount: number };
     };
     expect(record.level).toBe("ERROR");
     expect(record.target).toBe("retcon_browser_service");
-    expect(record.fields.message).toBe("test message");
-    expect(record.fields.answer).toBe(42);
+    expect(record.fields.message).toBe("browser service event");
+    expect(record.fields.version).toBe("0.1.0");
+    expect(record.fields.featureCount).toBe(2);
+    expect(first).not.toContain("password");
+    expect(first).not.toContain("secret");
+    expect(first).not.toContain("example.invalid");
+    expect(first).not.toContain("C:/");
     expect(Date.parse(record.timestamp)).not.toBeNaN();
   });
 });

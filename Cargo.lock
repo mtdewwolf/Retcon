@@ -735,6 +735,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "retcon-agents"
 version = "0.1.0"
 dependencies = [
+ "retcon-runtime-observability",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -746,6 +747,7 @@ dependencies = [
 name = "retcon-browser"
 version = "0.1.0"
 dependencies = [
+ "retcon-runtime-observability",
  "serde",
  "serde_json",
  "tempfile",
@@ -787,11 +789,13 @@ dependencies = [
  "retcon-browser",
  "retcon-checkpoints",
  "retcon-devserver",
+ "retcon-diagnostics",
  "retcon-filesystem",
  "retcon-git",
  "retcon-permissions",
  "retcon-platform",
  "retcon-protocol",
+ "retcon-runtime-observability",
  "retcon-secrets",
  "retcon-storage",
  "retcon-terminal",
@@ -813,17 +817,25 @@ name = "retcon-devserver"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "retcon-runtime-observability",
  "serde",
  "serde_json",
  "shell-words",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "retcon-diagnostics"
 version = "0.1.0"
+dependencies = [
+ "retcon-secrets",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "retcon-filesystem"
@@ -831,6 +843,7 @@ version = "0.1.0"
 dependencies = [
  "notify",
  "retcon-git",
+ "retcon-runtime-observability",
  "serde",
  "serde_json",
  "tempfile",
@@ -844,6 +857,7 @@ dependencies = [
 name = "retcon-git"
 version = "0.1.0"
 dependencies = [
+ "retcon-runtime-observability",
  "serde",
  "serde_json",
  "tempfile",
@@ -872,12 +886,14 @@ dependencies = [
 name = "retcon-permissions"
 version = "0.1.0"
 dependencies = [
+ "retcon-runtime-observability",
  "retcon-secrets",
  "retcon-storage",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
@@ -900,6 +916,10 @@ dependencies = [
  "serde_json",
  "uuid",
 ]
+
+[[package]]
+name = "retcon-runtime-observability"
+version = "0.1.0"
 
 [[package]]
 name = "retcon-secrets"
@@ -932,6 +952,7 @@ name = "retcon-terminal"
 version = "0.1.0"
 dependencies = [
  "portable-pty",
+ "retcon-runtime-observability",
  "tracing",
 ]
 

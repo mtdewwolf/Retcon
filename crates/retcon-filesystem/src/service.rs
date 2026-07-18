@@ -3,10 +3,58 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::FilesystemError;
+
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
+
+struct FilesystemMetric {
+    operation: &'static str,
+    started: Instant,
+    outcome: &'static str,
+}
+
+impl FilesystemMetric {
+    fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            started: Instant::now(),
+            outcome: "error",
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.outcome = "ok";
+    }
+}
+
+impl Drop for FilesystemMetric {
+    fn drop(&mut self) {
+        retcon_runtime_observability::record_duration(
+            "filesystem",
+            "filesystem.operation.duration",
+            self.operation,
+            self.outcome,
+            self.started.elapsed(),
+        );
+        if !runtime_metrics_enabled() {
+            return;
+        }
+        tracing::info!(
+            target: "retcon_runtime",
+            event = "filesystem.operation.completed",
+            component = "filesystem",
+            operation = self.operation,
+            outcome = self.outcome,
+            duration_ms = self.started.elapsed().as_millis() as u64
+        );
+    }
+}
 
 /// Maximum directory entries returned by [`FileService::list`].
 pub const LIST_MAX_ENTRIES: usize = 2_048;
@@ -70,6 +118,7 @@ impl FileService {
         root: &Path,
         path: Option<&str>,
     ) -> Result<Vec<FileEntry>, FilesystemError> {
+        let mut metric = FilesystemMetric::new("list");
         let directory = resolve_within_root(root, path.unwrap_or(""))?;
         if !directory.is_dir() {
             return Err(FilesystemError::InvalidRequest(format!(
@@ -116,6 +165,7 @@ impl FileService {
                 _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
             },
         );
+        metric.succeed();
         Ok(entries)
     }
 
@@ -126,6 +176,7 @@ impl FileService {
         path: &str,
         limit: u64,
     ) -> Result<FileReadResult, FilesystemError> {
+        let mut metric = FilesystemMetric::new("read");
         let file_path = resolve_within_root(root, path)?;
         if file_path.is_dir() {
             return Err(FilesystemError::InvalidRequest(format!(
@@ -158,7 +209,7 @@ impl FileService {
             (Some(String::from_utf8_lossy(&bytes).into_owned()), None)
         };
 
-        Ok(FileReadResult {
+        let result = FileReadResult {
             path: file_path.to_string_lossy().into_owned(),
             content,
             content_base64,
@@ -166,7 +217,9 @@ impl FileService {
             truncated,
             binary,
             language,
-        })
+        };
+        metric.succeed();
+        Ok(result)
     }
 
     /// Writes UTF-8 text to a file under `root`.
@@ -177,6 +230,7 @@ impl FileService {
         content: &str,
         limit: u64,
     ) -> Result<FileWriteResult, FilesystemError> {
+        let mut metric = FilesystemMetric::new("write");
         let bytes = content.as_bytes();
         if bytes.len() as u64 > limit {
             return Err(FilesystemError::InvalidRequest(format!(
@@ -196,10 +250,12 @@ impl FileService {
         }
         fs::write(&file_path, bytes)?;
         let size = fs::metadata(&file_path)?.len();
-        Ok(FileWriteResult {
+        let result = FileWriteResult {
             path: file_path.to_string_lossy().into_owned(),
             size,
-        })
+        };
+        metric.succeed();
+        Ok(result)
     }
 }
 

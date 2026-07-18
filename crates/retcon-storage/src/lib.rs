@@ -5,6 +5,7 @@ mod browser;
 mod browser_verification;
 mod database;
 mod dev_servers;
+mod diagnostics;
 mod error;
 mod migrations;
 mod recovery;
@@ -32,6 +33,11 @@ pub use database::{Database, IntegrityReport, MaintenanceReport};
 pub use dev_servers::{
     DevServerConfig, DevServerEvent, DevServerInstance, DevServerLaunchConfig, DevServerPortLease,
     DevServerRepository, NewDevServerConfig,
+};
+pub use diagnostics::{
+    DiagnosticLog, DiagnosticLogQuery, DiagnosticsDeletion, DiagnosticsPort, DiagnosticsRepository,
+    DiagnosticsResources, MAX_LOCAL_METRICS, NewDiagnosticLog, NewPerformanceMetric,
+    PerformanceMetric, PerformanceMetricQuery,
 };
 pub use error::{Result, StorageError};
 pub use recovery::RecoveryReport;

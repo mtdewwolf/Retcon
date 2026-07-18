@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +9,7 @@ import 'package:window_manager/window_manager.dart';
 import 'browser/browser.dart';
 import 'core_client.dart';
 import 'dev_server/dev_server.dart';
+import 'diagnostics/diagnostics.dart';
 import 'projects/project_picker.dart';
 import 'projects/project_controller.dart';
 import 'provider_doctor_dialog.dart';
@@ -506,50 +506,18 @@ class _DesktopShellState extends State<DesktopShell> {
   }
 
   Future<void> _showDiagnosticsDialog() async {
-    Map<String, dynamic>? report;
-    Object? error;
     final core = widget.core;
-    if (core != null && core.status == CoreConnectionStatus.connected) {
-      try {
-        report = await core.storageStatus();
-      } catch (caught) {
-        error = caught;
-      }
-    }
-    if (!mounted) return;
+    final controller =
+        core != null && core.status == CoreConnectionStatus.connected
+        ? DiagnosticsController(
+            repository: CoreDiagnosticsRepository.fromCore(core),
+          )
+        : null;
     await showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Diagnostics'),
-        content: SizedBox(
-          width: 620,
-          child: error != null
-              ? Text('Could not load diagnostics: $error')
-              : report == null
-              ? const Text('Retcon Core is unavailable.')
-              : SingleChildScrollView(
-                  child: SelectableText(
-                    const JsonEncoder.withIndent('  ').convert(report),
-                  ),
-                ),
-        ),
-        actions: [
-          if (report != null)
-            TextButton(
-              onPressed: () => Clipboard.setData(
-                ClipboardData(
-                  text: const JsonEncoder.withIndent('  ').convert(report),
-                ),
-              ),
-              child: const Text('Copy'),
-            ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
+      builder: (context) => DiagnosticsDialog(controller: controller),
     );
+    controller?.dispose();
   }
 
   Future<void> _showCommandPalette() => showDialog<void>(

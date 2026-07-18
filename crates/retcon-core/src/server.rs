@@ -429,6 +429,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             Some("task") => crate::tasks_rpc::handle(state.clone(), request).await,
             Some("verification") => crate::verification_rpc::handle(state.clone(), request).await,
             Some("devServer") => crate::dev_servers_rpc::handle(state.clone(), request).await,
+            Some("diagnostics") => crate::diagnostics_rpc::handle(state.clone(), request).await,
             Some("approval") | Some("permission") => {
                 crate::permissions_rpc::handle(state.clone(), request).await
             }

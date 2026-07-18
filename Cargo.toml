@@ -28,6 +28,7 @@ retcon-updater = { path = "crates/retcon-updater" }
 retcon-platform = { path = "crates/retcon-platform" }
 retcon-verification = { path = "crates/retcon-verification" }
 retcon-devserver = { path = "crates/retcon-devserver" }
+retcon-runtime-observability = { path = "crates/retcon-runtime-observability" }
 
 # External
 fs2 = "0.4.3"

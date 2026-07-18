@@ -12,6 +12,20 @@ final _log = Logger('retcon.desktop.core');
 
 enum CoreConnectionStatus { disconnected, connecting, connected, reconnecting }
 
+class CoreRequestMetric {
+  const CoreRequestMetric({
+    required this.method,
+    required this.duration,
+    required this.outcome,
+    required this.timestamp,
+  });
+
+  final String method;
+  final Duration duration;
+  final String outcome;
+  final DateTime timestamp;
+}
+
 class CoreRpcException implements Exception {
   CoreRpcException(this.message, [this.details]);
   final String message;
@@ -27,6 +41,7 @@ class CoreClient extends ChangeNotifier {
 
   final Directory dataDirectory;
   final _events = StreamController<Map<String, dynamic>>.broadcast();
+  final _requestMetrics = StreamController<CoreRequestMetric>.broadcast();
   final _pending = <int, Completer<Map<String, dynamic>>>{};
   ProtocolConnection? _connection;
   StreamSubscription<String>? _lines;
@@ -41,6 +56,7 @@ class CoreClient extends ChangeNotifier {
   CoreConnectionStatus get status => _status;
   Object? get lastConnectionError => _lastConnectionError;
   Stream<Map<String, dynamic>> get events => _events.stream;
+  Stream<CoreRequestMetric> get requestMetrics => _requestMetrics.stream;
 
   Future<void> connect({bool launchIfNeeded = true}) async {
     if (_status == CoreConnectionStatus.connected ||
@@ -116,28 +132,45 @@ class CoreClient extends ChangeNotifier {
     Map<String, dynamic> params = const {},
     Duration timeout = const Duration(seconds: 30),
   }) async {
+    final stopwatch = Stopwatch()..start();
+    var outcome = 'error';
     if (_connection == null) {
+      _emitRequestMetric(method, stopwatch, 'disconnected');
       throw CoreRpcException('Retcon Core is disconnected.');
     }
     final id = ++_nextId;
     final completer = Completer<Map<String, dynamic>>();
     _pending[id] = completer;
-    await _connection!.writeLine(
-      jsonEncode(RpcRequest(id: id, method: method, params: params).toJson()),
-    );
     try {
-      return await completer.future.timeout(timeout);
+      await _connection!.writeLine(
+        jsonEncode(RpcRequest(id: id, method: method, params: params).toJson()),
+      );
+      final result = await completer.future.timeout(timeout);
+      outcome = 'success';
+      return result;
     } on TimeoutException {
+      outcome = 'timeout';
       throw CoreRpcException('$method timed out after ${timeout.inSeconds}s.');
     } finally {
       _pending.remove(id);
+      _emitRequestMetric(method, stopwatch, outcome);
     }
   }
 
-  Future<void> cancelRequest(int id) async {
-    await _connection?.writeLine(
-      jsonEncode(CancelFrame(id).toJson()),
+  void _emitRequestMetric(String method, Stopwatch stopwatch, String outcome) {
+    if (_requestMetrics.isClosed || method.startsWith('diagnostics.')) return;
+    _requestMetrics.add(
+      CoreRequestMetric(
+        method: method,
+        duration: stopwatch.elapsed,
+        outcome: outcome,
+        timestamp: DateTime.now().toUtc(),
+      ),
     );
+  }
+
+  Future<void> cancelRequest(int id) async {
+    await _connection?.writeLine(jsonEncode(CancelFrame(id).toJson()));
   }
 
   void _handleLine(String line) {
@@ -252,6 +285,7 @@ class CoreClient extends ChangeNotifier {
     _lines?.cancel();
     unawaited(_connection?.close());
     _events.close();
+    _requestMetrics.close();
     super.dispose();
   }
 

@@ -121,6 +121,9 @@ impl std::error::Error for BrowserServiceError {}
 
 pub trait BrowserService: Send + Sync {
     fn diagnostics(&self) -> Result<BrowserServiceDiagnostics, BrowserServiceError>;
+    fn configure_observability(&self, _enabled: bool) -> BrowserFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn launch<'a>(
         &'a self,
         request: &'a BrowserLaunchRequest,

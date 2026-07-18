@@ -18,6 +18,10 @@ use crate::decision::{ApprovalDecision, RememberScope, RuleEffect};
 use crate::methods::{category_for_method, method_summary, requires_approval};
 use crate::rules::evaluate_rules;
 
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
+
 /// Well-known project/session used for RPC approvals without an explicit session id.
 pub const SYSTEM_PROJECT_ID: Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
 pub const SYSTEM_SESSION_ID: Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000002");
@@ -158,6 +162,23 @@ impl ApprovalEngine {
             }
         };
 
+        retcon_runtime_observability::record_count(
+            "approvals",
+            "approval.lifecycle.count",
+            "request",
+            "pending",
+        );
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "approval.requested",
+                component = "permissions",
+                operation = "request",
+                category = category.as_str(),
+                outcome = "pending"
+            );
+        }
+
         PermissionCheck {
             permission: denied_pending(method, approval.id),
             audit: vec![AuditRecord::approval_requested(
@@ -246,6 +267,29 @@ impl ApprovalEngine {
                 RuleEffect::Allow,
                 &matcher,
             ));
+        }
+
+        retcon_runtime_observability::record_count(
+            "approvals",
+            "approval.lifecycle.count",
+            "decide",
+            match decision {
+                ApprovalDecision::Approve => "approved",
+                ApprovalDecision::Deny => "denied",
+            },
+        );
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "approval.decided",
+                component = "permissions",
+                operation = "decide",
+                category = category_for_method(method)
+                    .unwrap_or(ApprovalCategory::System)
+                    .as_str(),
+                outcome = decision.as_str(),
+                kind = remember.as_str()
+            );
         }
 
         Ok((updated, audit))

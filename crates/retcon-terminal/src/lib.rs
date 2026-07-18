@@ -13,6 +13,10 @@ use std::sync::Mutex;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
+
 /// A live PTY session hosting a shell.
 ///
 /// Output is delivered through the `on_output` callback passed to
@@ -41,6 +45,15 @@ impl PtySession {
         rows: u16,
         mut on_output: impl FnMut(&[u8]) + Send + 'static,
     ) -> Result<Self, String> {
+        let span = runtime_metrics_enabled().then(|| {
+            tracing::info_span!(
+                target: "retcon_runtime",
+                "terminal.lifecycle",
+                component = "terminal",
+                operation = "start"
+            )
+        });
+        let _entered = span.as_ref().map(tracing::Span::enter);
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -68,6 +81,12 @@ impl PtySession {
             .slave
             .spawn_command(cmd)
             .map_err(|e| format!("failed to spawn shell '{shell}': {e}"))?;
+        retcon_runtime_observability::record_count(
+            "terminal",
+            "terminal.lifecycle.count",
+            "start",
+            "ok",
+        );
         drop(pair.slave);
 
         // portable-pty reads are synchronous; stream from a blocking thread.
@@ -84,6 +103,15 @@ impl PtySession {
             })
             .map_err(|e| format!("failed to start pty reader thread: {e}"))?;
 
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "terminal.started",
+                component = "terminal",
+                operation = "start",
+                outcome = "ok"
+            );
+        }
         Ok(Self {
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
@@ -113,7 +141,8 @@ impl PtySession {
     ///
     /// Returns a message if the resize is rejected.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
-        self.master
+        let result = self
+            .master
             .lock()
             .map_err(|_| "pty master lock poisoned".to_owned())?
             .resize(PtySize {
@@ -122,14 +151,41 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("pty resize failed: {e}"))
+            .map_err(|e| format!("pty resize failed: {e}"));
+        if runtime_metrics_enabled() {
+            tracing::debug!(
+                target: "retcon_runtime",
+                event = "terminal.resized",
+                component = "terminal",
+                operation = "resize",
+                outcome = if result.is_ok() { "ok" } else { "error" }
+            );
+        }
+        result
     }
 
     /// Check whether the shell has exited, returning its exit code if so.
     pub fn try_exit_code(&self) -> Option<u32> {
         let mut child = self.child.lock().ok()?;
         match child.try_wait() {
-            Ok(Some(status)) => Some(status.exit_code()),
+            Ok(Some(status)) => {
+                retcon_runtime_observability::record_count(
+                    "terminal",
+                    "terminal.lifecycle.count",
+                    "exit",
+                    if status.success() { "ok" } else { "error" },
+                );
+                if runtime_metrics_enabled() {
+                    tracing::info!(
+                        target: "retcon_runtime",
+                        event = "terminal.exited",
+                        component = "terminal",
+                        operation = "exit",
+                        outcome = if status.success() { "ok" } else { "error" }
+                    );
+                }
+                Some(status.exit_code())
+            }
             _ => None,
         }
     }
@@ -144,6 +200,21 @@ impl PtySession {
                     .output();
             }
             let _ = child.kill();
+            retcon_runtime_observability::record_count(
+                "terminal",
+                "terminal.lifecycle.count",
+                "kill",
+                "ok",
+            );
+            if runtime_metrics_enabled() {
+                tracing::info!(
+                    target: "retcon_runtime",
+                    event = "terminal.killed",
+                    component = "terminal",
+                    operation = "kill",
+                    outcome = "ok"
+                );
+            }
         }
     }
 }

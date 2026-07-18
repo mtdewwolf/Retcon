@@ -6,7 +6,7 @@ pub(crate) struct Migration {
     pub sql: &'static str,
 }
 
-pub(crate) const LATEST_VERSION: u32 = 10;
+pub(crate) const LATEST_VERSION: u32 = 11;
 
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -58,5 +58,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 10,
         name: "durable browser verification and visual evidence",
         sql: include_str!("migrations/0010_browser_verification.sql"),
+    },
+    Migration {
+        version: 11,
+        name: "bounded diagnostics and performance metrics",
+        sql: include_str!("migrations/0011_diagnostics_observability.sql"),
     },
 ];

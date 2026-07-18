@@ -47,6 +47,19 @@ impl CoreRuntime {
         remove_stale_discovery(&config.data_dir)?;
 
         let state = CoreState::new(&config.data_dir)?;
+        state.install_runtime_observability();
+        state
+            .browser_service()
+            .configure_observability(state.diagnostics_service().privacy().telemetry_enabled)
+            .await
+            .map_err(|_error| {
+                CoreError::new(
+                    ErrorCode::Internal,
+                    ErrorSource::System,
+                    "Retcon could not configure browser diagnostics.",
+                    "browser observability configuration failed",
+                )
+            })?;
         let token = Uuid::new_v4().to_string();
         let server = Server::bind(state.clone(), token.clone(), &config.data_dir).await?;
         let endpoint = server.endpoint().clone();
@@ -99,6 +112,7 @@ impl CoreRuntime {
         self.state
             .emit("system.shutdown", serde_json::json!({"reason":"requested"}));
         self.state.request_shutdown();
+        self.state.disable_runtime_observability();
         self.state.jobs().shutdown();
         self.state.cleanup_children().await;
         if let Err(error) = self.state.storage().database().maintain() {
@@ -327,7 +341,7 @@ mod tests {
         let shutdown = read_rpc_response(&mut lines).await;
         assert_eq!(health["result"]["status"], "healthy");
         assert_eq!(health["result"]["storage"]["status"], "healthy");
-        assert_eq!(health["result"]["storage"]["schema_version"], 10);
+        assert_eq!(health["result"]["storage"]["schema_version"], 11);
         assert_eq!(shutdown["result"]["accepted"], true);
 
         runtime.wait_for_shutdown_signal().await.unwrap();
