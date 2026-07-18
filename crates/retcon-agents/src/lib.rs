@@ -12,6 +12,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 static CLAUDE_DETECTION: OnceLock<Mutex<Option<Result<ProviderInfo, String>>>> = OnceLock::new();
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
 
 /// Stable identifier for an agent provider.
 pub type ProviderId = String;
@@ -838,6 +841,17 @@ impl AgentTurn {
         resume_session: Option<&str>,
         mut on_line: impl FnMut(String) + Send + 'static,
     ) -> Result<Self, String> {
+        let span = runtime_metrics_enabled().then(|| {
+            tracing::info_span!(
+                target: "retcon_runtime",
+                "provider.turn",
+                component = "agents",
+                operation = "provider_start",
+                provider = "claude_code",
+                resumed = resume_session.is_some()
+            )
+        });
+        let _entered = span.as_ref().map(tracing::Span::enter);
         let mut args = vec![
             "/C",
             "claude",
@@ -860,6 +874,22 @@ impl AgentTurn {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        retcon_runtime_observability::record_count(
+            "agents",
+            "provider.lifecycle.count",
+            "start",
+            "ok",
+        );
+        if runtime_metrics_enabled() {
+            tracing::info!(
+                target: "retcon_runtime",
+                event = "provider_start.completed",
+                component = "agents",
+                operation = "provider_start",
+                provider = "claude_code",
+                outcome = "ok"
+            );
+        }
 
         let stdout = child
             .stdout
@@ -873,7 +903,11 @@ impl AgentTurn {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "retcon_agents::stderr", "{line}");
+                tracing::debug!(
+                    target: "retcon_agents::stderr",
+                    bytes = line.len(),
+                    "provider emitted stderr"
+                );
             }
         });
 
@@ -933,7 +967,8 @@ impl AgentTurn {
 pub fn normalize_claude_stream_event(provider_id: &str, line: &str) -> AgentEvent {
     let data: serde_json::Value =
         serde_json::from_str(line).unwrap_or_else(|_| serde_json::json!({ "raw": line }));
-    let kind = match data.get("type").and_then(serde_json::Value::as_str) {
+    let source_type = data.get("type").and_then(serde_json::Value::as_str);
+    let kind = match source_type {
         Some("system") => AgentEventKind::SessionStarted,
         Some("assistant") | Some("content_block_delta") | Some("content_block_start") => {
             AgentEventKind::TextDelta
@@ -946,6 +981,34 @@ pub fn normalize_claude_stream_event(provider_id: &str, line: &str) -> AgentEven
         Some("command") => AgentEventKind::CommandStarted,
         _ => AgentEventKind::ReasoningStatus,
     };
+    let telemetry_event = match (source_type, kind) {
+        (Some("assistant" | "content_block_start"), AgentEventKind::TextDelta) => {
+            Some("model_response")
+        }
+        (_, AgentEventKind::ToolRequested) => Some("tool_execution_started"),
+        (_, AgentEventKind::ToolCompleted) => Some("tool_execution_completed"),
+        (_, AgentEventKind::TurnCompleted) => Some("model_turn_completed"),
+        (_, AgentEventKind::ProviderFailed) => Some("model_turn_failed"),
+        _ => None,
+    };
+    if runtime_metrics_enabled()
+        && let Some(event) = telemetry_event
+    {
+        let (name, operation, outcome) = match event {
+            "model_response" => ("model.response.count", "response", "ok"),
+            "tool_execution_started" => ("tool.execution.count", "start", "pending"),
+            "tool_execution_completed" => ("tool.execution.count", "complete", "ok"),
+            "model_turn_completed" => ("model.response.count", "complete", "ok"),
+            _ => ("model.response.count", "complete", "error"),
+        };
+        retcon_runtime_observability::record_count("agents", name, operation, outcome);
+        tracing::info!(
+            target: "retcon_runtime",
+            event,
+            component = "agents",
+            provider = "claude_code"
+        );
+    }
     AgentEvent {
         provider_id: provider_id.to_owned(),
         native_session_id: data

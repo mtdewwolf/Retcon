@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,6 +26,71 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(125);
 
 type PendingSender = oneshot::Sender<Result<Value, BrowserServiceError>>;
+
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
+
+struct BrowserMetric {
+    operation: &'static str,
+    started: Instant,
+    outcome: &'static str,
+}
+
+impl BrowserMetric {
+    fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            started: Instant::now(),
+            outcome: "error",
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.outcome = "ok";
+    }
+}
+
+impl Drop for BrowserMetric {
+    fn drop(&mut self) {
+        retcon_runtime_observability::record_duration(
+            "browser",
+            "browser.operation.duration",
+            self.operation,
+            self.outcome,
+            self.started.elapsed(),
+        );
+        if !runtime_metrics_enabled() {
+            return;
+        }
+        tracing::info!(
+            target: "retcon_runtime",
+            event = "browser.operation.completed",
+            component = "browser",
+            operation = self.operation,
+            outcome = self.outcome,
+            duration_ms = self.started.elapsed().as_millis() as u64
+        );
+    }
+}
+
+fn browser_operation(method: &str) -> &'static str {
+    match method {
+        "browser.launch" => "launch",
+        "browser.close" => "close",
+        "browser.navigate" => "navigation",
+        "browser.verification.run" => "verification",
+        value if value.starts_with("browser.action") || value.starts_with("browser.mouse.") => {
+            "action"
+        }
+        value if value.starts_with("browser.trace.") => "trace",
+        value if value.starts_with("browser.takeover.") => "takeover",
+        value if value.starts_with("browser.session.") || value.starts_with("browser.tab.") => {
+            "session"
+        }
+        _ => "observation",
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct NodeBrowserServiceConfig {
@@ -80,6 +145,7 @@ struct TransportInner {
     next_id: AtomicU64,
     next_generation: AtomicU64,
     diagnostics: RwLock<BrowserServiceDiagnostics>,
+    observability_enabled: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -106,6 +172,7 @@ impl NodeStdioTransport {
                     features: Vec::new(),
                     healthy,
                 }),
+                observability_enabled: AtomicBool::new(false),
             }),
         }
     }
@@ -120,16 +187,23 @@ impl NodeStdioTransport {
     }
 
     async fn ensure_started(&self) -> Result<(), BrowserServiceError> {
+        let mut metric = BrowserMetric::new("service_start");
         let _start = self.inner.start_lock.lock().await;
         {
             let mut process = self.inner.process.lock().await;
             if let Some(running) = process.as_mut() {
                 match running.child.try_wait() {
-                    Ok(None) => return Ok(()),
+                    Ok(None) => {
+                        metric.succeed();
+                        return Ok(());
+                    }
                     Ok(Some(status)) => {
                         tracing::warn!(%status, "browser service exited before request");
                     }
-                    Err(error) => tracing::warn!(%error, "could not inspect browser service"),
+                    Err(error) => tracing::warn!(
+                        error_kind = ?error.kind(),
+                        "could not inspect browser service"
+                    ),
                 }
                 process.take();
             }
@@ -158,6 +232,7 @@ impl NodeStdioTransport {
             .env("RETCON_BROWSER_AUTH_TOKEN", &self.inner.token)
             .env("RETCON_BROWSER_ARTIFACT_ROOT", &config.artifact_root)
             .env("RETCON_BROWSER_PROFILE_ROOT", &config.profile_root)
+            .env_remove("RETCON_OBSERVABILITY")
             .env(
                 "RETCON_BROWSER_INPUT_ROOTS",
                 std::env::join_paths(&config.input_roots).map_err(|error| {
@@ -182,7 +257,11 @@ impl NodeStdioTransport {
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
                 while let Ok(Some(line)) = read_bounded_line(&mut reader, 64 * 1024).await {
-                    tracing::debug!(target: "retcon_browser_service", "{line}");
+                    tracing::debug!(
+                        target: "retcon_browser_service",
+                        bytes = line.len(),
+                        "browser service emitted diagnostic output"
+                    );
                 }
             });
         }
@@ -220,6 +299,14 @@ impl NodeStdioTransport {
                     .diagnostics
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = diagnostics;
+                self.request_running(
+                    "service.observability.configure",
+                    json!({
+                        "enabled": self.inner.observability_enabled.load(Ordering::Acquire)
+                    }),
+                )
+                .await?;
+                metric.succeed();
                 Ok(())
             }
             Err(error) => {
@@ -325,6 +412,19 @@ impl NodeStdioTransport {
         Ok(())
     }
 
+    pub async fn configure_observability(&self, enabled: bool) -> Result<(), BrowserServiceError> {
+        self.inner
+            .observability_enabled
+            .store(enabled, Ordering::Release);
+        self.ensure_started().await?;
+        self.request_running(
+            "service.observability.configure",
+            json!({"enabled": enabled}),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn kill_current(&self) {
         if let Some(mut process) = self.inner.process.lock().await.take() {
             let _ = process.child.start_kill();
@@ -376,10 +476,15 @@ impl NodeBrowserService {
         Self::new(NodeBrowserServiceConfig::discover(data_dir))
     }
 
+    pub async fn configure_observability(&self, enabled: bool) -> Result<(), BrowserServiceError> {
+        self.transport.configure_observability(enabled).await
+    }
+
     async fn launch_wire(
         &self,
         request: &BrowserLaunchRequest,
     ) -> Result<BrowserLaunchResult, BrowserServiceError> {
+        let mut metric = BrowserMetric::new("launch");
         if !request.input_roots.is_empty() {
             self.transport
                 .request("service.roots.add", json!({"roots":request.input_roots}))
@@ -415,10 +520,12 @@ impl NodeBrowserService {
                 "title":"",
             })
         });
-        Ok(BrowserLaunchResult {
+        let result = BrowserLaunchResult {
             service_session_id,
             initial_tab,
-        })
+        };
+        metric.succeed();
+        Ok(result)
     }
 
     async fn call_wire(
@@ -427,6 +534,7 @@ impl NodeBrowserService {
         method: &str,
         params: Value,
     ) -> Result<BrowserCallResult, BrowserServiceError> {
+        let mut metric = BrowserMetric::new(browser_operation(method));
         let (wire_method, wire_params) =
             map_call(session_id, method, params, &self.headed_takeovers)?;
         let mut value = self
@@ -471,7 +579,9 @@ impl NodeBrowserService {
         }
         normalize_result(method, &mut value);
         let artifacts = extract_artifacts(method, &value, &self.artifact_root).await?;
-        Ok(BrowserCallResult { value, artifacts })
+        let result = BrowserCallResult { value, artifacts };
+        metric.succeed();
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -760,8 +870,8 @@ async fn read_loop(
             Ok(Some(line)) => {
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(value) => value,
-                    Err(error) => {
-                        tracing::warn!(%error, "browser service emitted invalid JSON");
+                    Err(_error) => {
+                        tracing::warn!("browser service emitted invalid JSON");
                         continue;
                     }
                 };
@@ -789,8 +899,8 @@ async fn read_loop(
                 }
             }
             Ok(None) => break,
-            Err(error) => {
-                tracing::warn!(%error, "browser service frame reader stopped");
+            Err(_error) => {
+                tracing::warn!("browser service frame reader stopped");
                 break;
             }
         }

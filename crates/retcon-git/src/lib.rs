@@ -6,6 +6,7 @@
 mod safety;
 
 use std::path::Path;
+use std::time::Instant;
 
 pub use safety::{
     ProtectedOperation, check_default_branch, ensure_branch_delete_allowed, ensure_commit_allowed,
@@ -18,6 +19,53 @@ use tokio::process::Command;
 
 /// Maximum stdout captured from a single Git invocation.
 pub const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+fn runtime_metrics_enabled() -> bool {
+    retcon_runtime_observability::is_enabled()
+}
+
+struct GitMetric {
+    operation: &'static str,
+    started: Instant,
+    outcome: &'static str,
+}
+
+impl GitMetric {
+    fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            started: Instant::now(),
+            outcome: "error",
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.outcome = "ok";
+    }
+}
+
+impl Drop for GitMetric {
+    fn drop(&mut self) {
+        retcon_runtime_observability::record_duration(
+            "git",
+            "git.operation.duration",
+            self.operation,
+            self.outcome,
+            self.started.elapsed(),
+        );
+        if !runtime_metrics_enabled() {
+            return;
+        }
+        tracing::info!(
+            target: "retcon_runtime",
+            event = "git.operation.completed",
+            component = "git",
+            operation = self.operation,
+            outcome = self.outcome,
+            duration_ms = self.started.elapsed().as_millis() as u64
+        );
+    }
+}
 
 /// A failed Git invocation, preserving what Git actually said.
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +99,8 @@ pub async fn run_git(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 }
 
 async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result<String, GitError> {
+    let operation = git_operation(args);
+    let mut metric = GitMetric::new(operation);
     let command_label = args.join(" ");
     let mut child = Command::new("git")
         .args(args)
@@ -142,6 +192,7 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
         })?;
 
     if status.success() {
+        metric.succeed();
         Ok(String::from_utf8_lossy(&stdout_bytes).trim_end().to_owned())
     } else {
         Err(GitError {
@@ -149,6 +200,22 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
             exit_code: status.code(),
             stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
         })
+    }
+}
+
+fn git_operation(args: &[&str]) -> &'static str {
+    match args.first().copied().unwrap_or_default() {
+        "add" | "apply" | "restore" => "stage",
+        "branch" => "branch",
+        "checkout" | "switch" => "checkout",
+        "commit" => "commit",
+        "config" | "symbolic-ref" | "rev-parse" => "metadata",
+        "diff" => "diff",
+        "init" => "init",
+        "push" => "push",
+        "status" => "status",
+        "worktree" => "worktree",
+        _ => "other",
     }
 }
 
@@ -529,6 +596,15 @@ mod tests {
         assert_eq!(status.entries[1].path, "notes.txt");
         assert_eq!(status.entries[2].code, "R ");
         assert_eq!(status.entries[2].path, "new.txt");
+    }
+
+    #[test]
+    fn telemetry_git_operation_never_contains_arguments() {
+        assert_eq!(git_operation(&["commit", "-m", "secret"]), "commit");
+        assert_eq!(
+            git_operation(&["unknown", "https://user:pass@example.invalid"]),
+            "other"
+        );
     }
 
     #[tokio::test]

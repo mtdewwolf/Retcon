@@ -12,6 +12,13 @@ import {
   devices,
 } from "playwright";
 import {
+  NoopRuntimeRecorder,
+  type RuntimeRecorder,
+  browserOperation,
+  outcomeFor,
+  recordDuration,
+} from "./telemetry.ts";
+import {
   MAX_SCRIPT_BYTES,
   MAX_TEXT_BYTES,
   booleanParam,
@@ -59,6 +66,7 @@ export interface ManagedBrowserOptions {
   artifactRoot?: string;
   profileRoot?: string;
   inputRoots?: string[];
+  recorder?: RuntimeRecorder;
 }
 
 interface LaunchConfig {
@@ -116,10 +124,12 @@ export class ManagedBrowser {
   private readonly profileRoot: string;
   private readonly inputRoots: string[];
   private readonly verificationRunner: BrowserVerificationRunner;
+  private readonly recorder: RuntimeRecorder;
   private rootsReady: Promise<void>;
 
   constructor(emit: (event: BrowserEvent) => void, options: ManagedBrowserOptions = {}) {
     this.emit = emit;
+    this.recorder = options.recorder ?? new NoopRuntimeRecorder();
     const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
     this.artifactRoot = resolve(options.artifactRoot ?? join(repositoryRoot, "output/playwright"));
     this.profileRoot = resolve(
@@ -155,9 +165,26 @@ export class ManagedBrowser {
     const params = objectParam(rawParams);
     const timeout = timeoutParam(params.timeoutMs);
     const operation = this.dispatch(method, params, signal);
+    const telemetryOperation = browserOperation(method);
+    const telemetryName =
+      telemetryOperation === "verification"
+        ? "browser.verification.duration"
+        : "browser.operation.duration";
+    const telemetryStarted = performance.now();
     try {
-      return await withTimeout(operation, timeout, signal);
+      const result = await withTimeout(operation, timeout, signal);
+      recordDuration(this.recorder, telemetryName, telemetryOperation, telemetryStarted, "ok");
+      return result;
     } catch (error) {
+      const outcome = outcomeFor(error);
+      recordDuration(this.recorder, telemetryName, telemetryOperation, telemetryStarted, outcome);
+      this.recorder.recordMetric({
+        name: "browser.failure.count",
+        operation: telemetryOperation,
+        outcome,
+        unit: "count",
+        value: 1,
+      });
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("timed out") || message.includes("cancelled")) {
         const sessionId =

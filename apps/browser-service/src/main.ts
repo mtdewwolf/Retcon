@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ManagedBrowser } from "./browser.ts";
 import { logger } from "./logging.ts";
 import { connect } from "./rpc.ts";
+import { StructuredRuntimeRecorder } from "./telemetry.ts";
 
 const VERSION = "0.1.0";
 const MAX_STDOUT_BACKLOG = 64;
@@ -22,6 +23,7 @@ const FEATURES = [
   "takeover",
   "cancel",
   "verification",
+  "observability_configure",
 ];
 type RpcRequest = { id: number; method: string; params?: Record<string, unknown> };
 
@@ -88,7 +90,10 @@ function validateRequest(value: unknown): RpcRequest {
   };
 }
 
-export async function serveStdio(browser: ManagedBrowser): Promise<void> {
+export async function serveStdio(
+  browser: ManagedBrowser,
+  recorder?: StructuredRuntimeRecorder,
+): Promise<void> {
   const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
   const active = new Map<number, AbortController>();
   const activeVerifications = new Map<string, AbortController>();
@@ -165,6 +170,15 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
           error: { message: error instanceof Error ? error.message : String(error) },
         });
       }
+      continue;
+    }
+    if (request.method === "service.observability.configure") {
+      if (typeof request.params?.enabled !== "boolean" || !recorder) {
+        await writeLine({ id: request.id, error: { message: "enabled must be a boolean" } });
+        continue;
+      }
+      recorder.setEnabled(request.params.enabled);
+      await writeLine({ id: request.id, result: { configured: true } });
       continue;
     }
     if (request.method === "service.shutdown") {
@@ -271,6 +285,14 @@ async function main(): Promise<number> {
     return child.exited;
   }
   logger.info("browser service starting", { version: VERSION, pid: process.pid });
+  const recorder = new StructuredRuntimeRecorder();
+  recorder.recordMetric({
+    name: "browser.service.lifecycle.count",
+    operation: "service_start",
+    outcome: "ok",
+    unit: "count",
+    value: 1,
+  });
   if (args.health) return 0;
   const backlog = { count: 0 };
   const emit = (event: { type: string; payload: Record<string, unknown> }): void => {
@@ -280,6 +302,7 @@ async function main(): Promise<number> {
     (root) => root.length > 0,
   );
   const browser = new ManagedBrowser(emit, {
+    recorder,
     ...(process.env.RETCON_BROWSER_ARTIFACT_ROOT
       ? { artifactRoot: process.env.RETCON_BROWSER_ARTIFACT_ROOT }
       : {}),
@@ -294,12 +317,19 @@ async function main(): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("browser service stopping", { signal });
+    recorder.recordMetric({
+      name: "browser.service.lifecycle.count",
+      operation: "service_stop",
+      outcome: "ok",
+      unit: "count",
+      value: 1,
+    });
     await browser.close();
     await rpc?.close();
   };
   process.on("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
   process.on("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
-  if (args.stdio) await serveStdio(browser);
+  if (args.stdio) await serveStdio(browser, recorder);
   else await new Promise(() => undefined);
   await shutdown("stdin-closed");
   return 0;
@@ -309,10 +339,15 @@ main().then(
   (code) => {
     if (code !== 0) process.exit(code);
   },
-  (error: unknown) => {
-    logger.error("browser service crashed", {
-      error: error instanceof Error ? error.message : String(error),
+  (_error: unknown) => {
+    new StructuredRuntimeRecorder().recordMetric({
+      name: "browser.failure.count",
+      operation: "service_crash",
+      outcome: "error",
+      unit: "count",
+      value: 1,
     });
+    logger.error("browser service crashed");
     process.exit(1);
   },
 );

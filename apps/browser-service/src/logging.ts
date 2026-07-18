@@ -14,13 +14,45 @@ const ACTIVE_LEVEL: LogLevel = (() => {
   return raw in LEVEL_ORDER ? (raw as LogLevel) : "info";
 })();
 
+const ALLOWED_MESSAGES = new Set([
+  "browser service starting",
+  "browser service stopping",
+  "browser service crashed",
+  "connected to retcon-core",
+  "RPC read loop ended",
+  "rpc transport not configured; running standalone",
+  "rpc transport connection failed",
+]);
+
+function safeFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  if (Number.isSafeInteger(fields.pid) && (fields.pid as number) >= 0) safe.pid = fields.pid;
+  if (typeof fields.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(fields.version)) {
+    safe.version = fields.version;
+  }
+  if (
+    typeof fields.serverVersion === "string" &&
+    /^[0-9A-Za-z.+-]{1,64}$/.test(fields.serverVersion)
+  ) {
+    safe.serverVersion = fields.serverVersion;
+  }
+  if (Array.isArray(fields.features)) safe.featureCount = Math.min(fields.features.length, 256);
+  if (["SIGINT", "SIGTERM", "stdin-closed"].includes(String(fields.signal))) {
+    safe.signal = fields.signal;
+  }
+  return safe;
+}
+
 export function log(level: LogLevel, message: string, fields: Record<string, unknown> = {}): void {
   if (LEVEL_ORDER[level] < LEVEL_ORDER[ACTIVE_LEVEL]) return;
   const record = {
     timestamp: new Date().toISOString(),
     level: level.toUpperCase(),
     target: "retcon_browser_service",
-    fields: { message, ...fields },
+    fields: {
+      message: ALLOWED_MESSAGES.has(message) ? message : "browser service event",
+      ...safeFields(fields),
+    },
   };
   process.stderr.write(`${JSON.stringify(record)}\n`);
 }
