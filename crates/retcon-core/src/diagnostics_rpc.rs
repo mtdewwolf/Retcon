@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use retcon_diagnostics::{MetricUnit, NewLogRecord, NewMetricSample, Severity};
 use retcon_protocol::Request;
@@ -38,7 +39,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
         "diagnostics.logs.ingest" => ingest_logs(&state, &request.params),
         "diagnostics.metrics.ingest" => ingest_metrics(&state, &request.params),
         "diagnostics.privacy.get" => Ok(json!({"privacy": state.diagnostics_service().privacy()})),
-        "diagnostics.privacy.update" => update_privacy(&state, &request.params),
+        "diagnostics.privacy.update" => update_privacy(&state, &request.params).await,
         "diagnostics.fields" => Ok(json!({"fields": collected_fields()})),
         "diagnostics.supportBundle.create" | "diagnostics.data.export" => {
             create_bundle(&state, &request.params).await
@@ -161,10 +162,11 @@ fn logs(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
             since: None,
             limit,
         })?;
-    Ok(json!({"logs": entries.into_iter().map(|entry| json!({
+    let response = json!({"logs": entries.into_iter().map(|entry| json!({
         "id":entry.id,"timestamp":entry.timestamp,"component":entry.component,
         "code":entry.code,"severity":entry.severity,"message":entry.message
-    })).collect::<Vec<_>>() }))
+    })).collect::<Vec<_>>() });
+    Ok(state.diagnostics_service().sanitizer().value(response))
 }
 
 fn metrics(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
@@ -173,7 +175,9 @@ fn metrics(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
         .and_then(Value::as_str)
         .unwrap_or("session");
     let since = match window {
-        "session" => 0,
+        "session" => {
+            now_ms().saturating_sub(i64::try_from(state.uptime().as_millis()).unwrap_or(i64::MAX))
+        }
         "hour" => now_ms().saturating_sub(3_600_000),
         "day" => now_ms().saturating_sub(86_400_000),
         _ => return Err(invalid("window must be session, hour, or day")),
@@ -184,7 +188,7 @@ fn metrics(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
         .diagnostics()
         .metrics(&PerformanceMetricQuery {
             since: Some(since),
-            limit: 500,
+            limit: retcon_storage::MAX_LOCAL_METRICS,
             ..PerformanceMetricQuery::default()
         })?;
     let ipc = values
@@ -204,7 +208,34 @@ fn metrics(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
             json!(frames.iter().filter(|value| **value > 16.67).count()),
         );
     }
-    Ok(json!({"performance":{"ipc":aggregate(ipc),"uiFrames":ui}}))
+    let mut runtime = BTreeMap::<(String, String, String), Vec<f64>>::new();
+    for metric in &values {
+        if !matches!(
+            metric.name.as_str(),
+            "ipc.duration" | "ui.frame" | "ui.frame.duration"
+        ) {
+            runtime
+                .entry((
+                    metric.component.clone(),
+                    metric.name.clone(),
+                    metric.unit.clone(),
+                ))
+                .or_default()
+                .push(metric.value);
+        }
+    }
+    let runtime = runtime
+        .into_iter()
+        .map(|((component, name, unit), values)| {
+            json!({
+                "component": component,
+                "name": name,
+                "unit": unit,
+                "distribution": aggregate(values),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({"performance":{"ipc":aggregate(ipc),"uiFrames":ui,"runtime":runtime}}))
 }
 
 fn ingest_logs(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
@@ -279,7 +310,7 @@ fn ingest_metrics(state: &CoreState, params: &Value) -> Result<Value, CoreError>
     Ok(json!({"accepted":records.len()}))
 }
 
-fn update_privacy(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
+async fn update_privacy(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
     let enabled = params
         .get("telemetryEnabled")
         .and_then(Value::as_bool)
@@ -287,6 +318,13 @@ fn update_privacy(state: &CoreState, params: &Value) -> Result<Value, CoreError>
     let privacy = state.diagnostics_service().set_privacy(enabled);
     if !enabled || privacy.is_ok() {
         state.configure_runtime_observability();
+        if let Err(_error) = state
+            .browser_service()
+            .configure_observability(enabled)
+            .await
+        {
+            tracing::warn!("browser observability configuration failed");
+        }
     }
     let privacy = privacy?;
     Ok(json!({"privacy": privacy}))
@@ -347,11 +385,14 @@ async fn create_bundle(state: &CoreState, params: &Value) -> Result<Value, CoreE
         }],
         state.diagnostics_service().privacy().retention_days,
     )?;
+    let content = String::from_utf8(encoded)
+        .map_err(|_| internal("support bundle encoding was not valid UTF-8"))?;
     Ok(json!({"bundle":{
         "id":bundle_id,
         "fileName":format!("retcon-support-{bundle_id}.json"),
         "sizeBytes":artifact.size,
         "createdAt":now_ms(),
+        "content":content,
     }}))
 }
 
@@ -364,17 +405,47 @@ fn delete_data(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
         ));
     }
     let deleted = state.storage().database().diagnostics().delete_all()?;
-    let artifacts = deleted
-        .artifact_hashes
-        .iter()
-        .filter(|hash| {
-            state
-                .storage()
-                .artifacts()
-                .delete_if_unreferenced(state.storage().database(), hash)
-                .unwrap_or(false)
-        })
-        .count();
+    let mut artifacts = 0;
+    let mut pending = Vec::new();
+    for hash in &deleted.artifact_hashes {
+        match state
+            .storage()
+            .artifacts()
+            .delete_if_unreferenced(state.storage().database(), hash)
+        {
+            Ok(true) => artifacts += 1,
+            Ok(false) => {}
+            Err(_error) => pending.push(hash.clone()),
+        }
+    }
+    if !pending.is_empty() {
+        let retry_rows = pending
+            .iter()
+            .map(|hash| NewDiagnosticLog {
+                id: Uuid::new_v4(),
+                timestamp: now_ms(),
+                session_id: None,
+                component: "core".into(),
+                code: "artifact_delete.pending".into(),
+                severity: "warning".into(),
+                message: "Diagnostic artifact deletion is pending".into(),
+                fields: json!({}),
+                artifact_hash: Some(hash.clone()),
+            })
+            .collect::<Vec<_>>();
+        state.storage().database().diagnostics().record_logs(
+            &retry_rows,
+            state.diagnostics_service().privacy().retention_days,
+        )?;
+        state.emit(
+            "diagnostics.data.delete_partial",
+            json!({"scope":"diagnostics","remainingArtifacts":pending.len()}),
+        );
+        return Err(internal(format!(
+            "{} diagnostic artifacts could not be deleted; retry is available",
+            pending.len()
+        )));
+    }
     state.emit(
         "diagnostics.data.deleted",
         json!({"scope":"diagnostics","logs":deleted.logs,"metrics":deleted.metrics,"artifacts":artifacts}),
@@ -609,6 +680,32 @@ mod tests {
                 fields: json!({"prompt":"private user prompt","outcome":"error"}),
             })
             .unwrap();
+        state
+            .storage()
+            .database()
+            .diagnostics()
+            .record_logs(
+                &[NewDiagnosticLog {
+                    id: Uuid::new_v4(),
+                    timestamp: now_ms(),
+                    session_id: None,
+                    component: "legacy".into(),
+                    code: "legacy.failed".into(),
+                    severity: "error".into(),
+                    message: format!(
+                        "legacy {} token={canary}",
+                        directory.path().join("legacy-secret.txt").display()
+                    ),
+                    fields: json!({}),
+                    artifact_hash: None,
+                }],
+                30,
+            )
+            .unwrap();
+
+        let listed = serde_json::to_string(&logs(&state, &json!({"limit":50})).unwrap()).unwrap();
+        assert!(!listed.contains(canary));
+        assert!(!listed.contains(&directory.path().display().to_string()));
 
         let response = create_bundle(&state, &json!({"context":"diagnostics"}))
             .await
@@ -616,6 +713,10 @@ mod tests {
         assert!(response["bundle"]["id"].is_string());
         assert!(response["bundle"].get("hash").is_none());
         assert!(response["bundle"].get("path").is_none());
+        let returned = response["bundle"]["content"].as_str().unwrap();
+        assert!(!returned.contains(canary));
+        assert!(!returned.contains(&directory.path().display().to_string()));
+        assert!(returned.contains("formatVersion"));
         let records = state
             .storage()
             .database()
@@ -685,6 +786,23 @@ mod tests {
         let aggregate = metrics(&state, &json!({"window":"session"})).unwrap();
         assert_eq!(aggregate["performance"]["ipc"]["count"], 1);
         assert_eq!(aggregate["performance"]["uiFrames"]["jankCount"], 1);
+
+        state
+            .diagnostics_service()
+            .record_metric(NewMetricSample {
+                component: "git".into(),
+                name: "git.operation.duration".into(),
+                value: 4.0,
+                unit: MetricUnit::Milliseconds,
+                tags: json!({"operation":"status","outcome":"ok"}),
+            })
+            .unwrap();
+        let aggregate = metrics(&state, &json!({"window":"session"})).unwrap();
+        assert_eq!(aggregate["performance"]["runtime"][0]["component"], "git");
+        assert_eq!(
+            aggregate["performance"]["runtime"][0]["distribution"]["count"],
+            1
+        );
     }
 
     #[test]

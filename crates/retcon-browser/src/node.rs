@@ -416,7 +416,16 @@ impl NodeStdioTransport {
         self.inner
             .observability_enabled
             .store(enabled, Ordering::Release);
-        self.ensure_started().await?;
+        let running = self
+            .inner
+            .process
+            .lock()
+            .await
+            .as_mut()
+            .is_some_and(|process| matches!(process.child.try_wait(), Ok(None)));
+        if !running {
+            return Ok(());
+        }
         self.request_running(
             "service.observability.configure",
             json!({"enabled": enabled}),
@@ -593,6 +602,10 @@ impl NodeBrowserService {
 impl BrowserService for NodeBrowserService {
     fn diagnostics(&self) -> Result<BrowserServiceDiagnostics, BrowserServiceError> {
         Ok(self.transport.diagnostics())
+    }
+
+    fn configure_observability(&self, enabled: bool) -> BrowserFuture<'_, ()> {
+        Box::pin(async move { NodeBrowserService::configure_observability(self, enabled).await })
     }
 
     fn launch<'a>(
@@ -993,6 +1006,22 @@ mod tests {
 
         assert_eq!(params["sessionId"], session_id.to_string());
         assert!(params.get("approvalId").is_none());
+    }
+
+    #[tokio::test]
+    async fn observability_preference_does_not_start_the_browser_service() {
+        let directory = tempfile::tempdir().unwrap();
+        let transport = NodeStdioTransport::new(service_config(directory.path()));
+
+        transport.configure_observability(true).await.unwrap();
+
+        assert!(transport.inner.process.lock().await.is_none());
+        assert!(
+            transport
+                .inner
+                .observability_enabled
+                .load(Ordering::Acquire)
+        );
     }
 
     #[tokio::test]

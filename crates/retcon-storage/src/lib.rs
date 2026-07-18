@@ -36,8 +36,8 @@ pub use dev_servers::{
 };
 pub use diagnostics::{
     DiagnosticLog, DiagnosticLogQuery, DiagnosticsDeletion, DiagnosticsPort, DiagnosticsRepository,
-    DiagnosticsResources, NewDiagnosticLog, NewPerformanceMetric, PerformanceMetric,
-    PerformanceMetricQuery,
+    DiagnosticsResources, MAX_LOCAL_METRICS, NewDiagnosticLog, NewPerformanceMetric,
+    PerformanceMetric, PerformanceMetricQuery,
 };
 pub use error::{Result, StorageError};
 pub use recovery::RecoveryReport;

@@ -170,6 +170,7 @@ impl DiagnosticsRepository<'_> {
     pub fn logs(&self, query: &DiagnosticLogQuery) -> Result<Vec<DiagnosticLog>> {
         validate_query(
             query.limit,
+            MAX_QUERY_LIMIT,
             query.severity.as_deref(),
             query.component.as_deref(),
         )?;
@@ -182,6 +183,7 @@ impl DiagnosticsRepository<'_> {
     pub fn metrics(&self, query: &PerformanceMetricQuery) -> Result<Vec<PerformanceMetric>> {
         validate_query(
             query.limit,
+            MAX_LOCAL_METRICS,
             query.name.as_deref(),
             query.component.as_deref(),
         )?;
@@ -262,8 +264,13 @@ fn validate_metric(value: &NewPerformanceMetric) -> Result<()> {
     Ok(())
 }
 
-fn validate_query(limit: i64, first: Option<&str>, second: Option<&str>) -> Result<()> {
-    if !(1..=MAX_QUERY_LIMIT).contains(&limit)
+fn validate_query(
+    limit: i64,
+    max_limit: i64,
+    first: Option<&str>,
+    second: Option<&str>,
+) -> Result<()> {
+    if !(1..=max_limit).contains(&limit)
         || first.is_some_and(|value| !valid_name(value))
         || second.is_some_and(|value| !valid_name(value))
     {

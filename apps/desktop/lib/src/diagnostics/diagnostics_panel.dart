@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
 import 'diagnostics_controller.dart';
@@ -489,13 +490,17 @@ class _SupportBundle extends StatelessWidget {
                   if (!context.mounted) return;
                   final bundle = controller.lastBundle;
                   if (bundle != null) {
+                    await Clipboard.setData(
+                      ClipboardData(text: bundle.content),
+                    );
+                    if (!context.mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Created ${bundle.fileName}')),
+                      SnackBar(content: Text('Copied ${bundle.fileName}')),
                     );
                   }
                 },
           icon: const Icon(Icons.archive_outlined),
-          label: Text(controller.exporting ? 'Creating…' : 'Create bundle'),
+          label: Text(controller.exporting ? 'Creating…' : 'Copy bundle'),
         ),
       ),
       if (controller.lastBundle case final bundle?) ...[

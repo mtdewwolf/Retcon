@@ -98,6 +98,7 @@ void main() {
           {'scope': 'diagnostics', 'confirmation': 'delete'},
         );
         expect(bundle.fileName, 'retcon-support.zip');
+        expect(bundle.content, contains('formatVersion'));
         expect(deleted['logs'], 3);
         expect(
           rpc.calls
@@ -519,4 +520,5 @@ const bundleWire = <String, dynamic>{
   'fileName': 'retcon-support.zip',
   'sizeBytes': 4096,
   'createdAt': '2026-07-17T12:01:00Z',
+  'content': '{"formatVersion":1,"safe":true}',
 };

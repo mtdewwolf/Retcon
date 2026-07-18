@@ -236,13 +236,19 @@ class DiagnosticsDtoCodec {
             .toList(),
       );
 
-  static SupportBundleReceipt decodeBundle(Map<String, dynamic> wire) =>
-      SupportBundleReceipt(
-        id: _safeIdentifier(wire['id']),
-        fileName: _safeFileName(wire['fileName'] ?? wire['file_name']),
-        sizeBytes: _int(wire['sizeBytes'] ?? wire['size_bytes'], 0),
-        createdAt: _date(wire['createdAt'] ?? wire['created_at']),
-      );
+  static SupportBundleReceipt decodeBundle(Map<String, dynamic> wire) {
+    final content = _safeBundleContent(wire['content']);
+    if (content == null) {
+      throw const FormatException('Support bundle content was unavailable.');
+    }
+    return SupportBundleReceipt(
+      id: _safeIdentifier(wire['id']),
+      fileName: _safeFileName(wire['fileName'] ?? wire['file_name']),
+      sizeBytes: _int(wire['sizeBytes'] ?? wire['size_bytes'], 0),
+      createdAt: _date(wire['createdAt'] ?? wire['created_at']),
+      content: content,
+    );
+  }
 }
 
 Map<String, dynamic> _map(Object? value) =>
@@ -304,4 +310,15 @@ String _safeFileName(Object? value) {
   return RegExp(r'^[A-Za-z0-9_.-]{1,128}$').hasMatch(text)
       ? text
       : 'retcon-support-bundle.zip';
+}
+
+String? _safeBundleContent(Object? value) {
+  if (value is! String || value.isEmpty || value.length > 4 * 1024 * 1024) {
+    return null;
+  }
+  final unsafe = RegExp(
+    r'(?:[A-Za-z]:\\|/Users/|/home/|Bearer\s+|ghp_[A-Za-z0-9]|sk-[A-Za-z0-9]|AKIA[A-Z0-9]|BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY)',
+    caseSensitive: false,
+  );
+  return unsafe.hasMatch(value) ? null : value;
 }

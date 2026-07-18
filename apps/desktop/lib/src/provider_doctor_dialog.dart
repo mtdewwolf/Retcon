@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
 import 'core_client.dart';
@@ -68,10 +69,11 @@ class _ProviderDoctorDialogState extends State<ProviderDoctorDialog> {
       final bundle = await CoreDiagnosticsRepository.fromCore(
         core,
       ).exportSupportBundle(context: 'provider_doctor');
+      await Clipboard.setData(ClipboardData(text: bundle.content));
       if (!mounted) return;
       setState(() => _exportName = bundle.fileName);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Created sanitized bundle ${bundle.fileName}')),
+        SnackBar(content: Text('Copied sanitized bundle ${bundle.fileName}')),
       );
     } on Object {
       DesktopDiagnostics.instance.captureOperationFailure(

@@ -122,12 +122,14 @@ class SupportBundleReceipt {
     required this.fileName,
     required this.sizeBytes,
     required this.createdAt,
+    required this.content,
   });
 
   final String id;
   final String fileName;
   final int sizeBytes;
   final DateTime createdAt;
+  final String content;
 }
 
 class DiagnosticIngestRecord {

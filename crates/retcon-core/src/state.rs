@@ -3,6 +3,7 @@
 #![allow(missing_docs)] // Phase 2 API; public documentation lands with the generated protocol.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -48,6 +49,7 @@ struct Inner {
     verification_runner: Arc<dyn VerificationRunner>,
     dev_server_runtime: Arc<dyn DevServerRuntime>,
     diagnostics: Arc<DiagnosticsService>,
+    runtime_observability_installed: AtomicBool,
 }
 
 impl CoreState {
@@ -160,9 +162,9 @@ impl CoreState {
                 verification_runner,
                 dev_server_runtime,
                 diagnostics,
+                runtime_observability_installed: AtomicBool::new(false),
             }),
         };
-        state.configure_runtime_observability();
         Ok(state)
     }
 
@@ -225,10 +227,31 @@ impl CoreState {
         &self.inner.diagnostics
     }
 
+    pub fn install_runtime_observability(&self) {
+        self.inner
+            .runtime_observability_installed
+            .store(true, Ordering::Release);
+        self.configure_runtime_observability();
+    }
+
     pub fn configure_runtime_observability(&self) {
+        if !self
+            .inner
+            .runtime_observability_installed
+            .load(Ordering::Acquire)
+        {
+            return;
+        }
         let diagnostics = self.inner.diagnostics.clone();
         let enabled = diagnostics.privacy().telemetry_enabled;
         retcon_runtime_observability::configure(Some(diagnostics), enabled);
+    }
+
+    pub fn disable_runtime_observability(&self) {
+        self.inner
+            .runtime_observability_installed
+            .store(false, Ordering::Release);
+        retcon_runtime_observability::configure(None, false);
     }
 
     pub async fn cleanup_children(&self) {
