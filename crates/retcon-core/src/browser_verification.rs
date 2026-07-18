@@ -86,10 +86,18 @@ impl BrowserVerificationRunner for ServiceBrowserVerificationRunner {
         })
     }
 
-    fn cancel(&self, _run_id: Uuid) -> BrowserVerificationFuture<'_, ()> {
-        // NodeStdioTransport bounds requests and sends browser.cancel on timeout.
-        // Durable cancellation is immediate and rejects any later result.
-        Box::pin(async { Ok(()) })
+    fn cancel(&self, run_id: Uuid) -> BrowserVerificationFuture<'_, ()> {
+        Box::pin(async move {
+            self.service
+                .call(
+                    run_id,
+                    "browser.verification.cancel",
+                    json!({"runId":run_id}),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
     }
 }
 
@@ -378,11 +386,54 @@ fn artifact_hash(value: &Value, hashes: &HashMap<String, String>, keys: &[&str])
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
     use super::*;
-    use retcon_browser::BrowserServiceArtifact;
+    use retcon_browser::{
+        BROWSER_SERVICE_PROTOCOL, BrowserService, BrowserServiceArtifact, NodeBrowserService,
+        NodeBrowserServiceConfig,
+    };
     use retcon_storage::{
         NewBrowserVerificationDefinition, NewBrowserVerificationRun, NewProject, NewTask,
     };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    async fn fixture() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).await.is_err()
+                            || matches!(header.as_str(), "\r\n" | "\n" | "")
+                        {
+                            break;
+                        }
+                    }
+                    let body = "<!doctype html><html lang=\"en\"><title>Verification</title><main><h1>Ready</h1></main></html>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = writer.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{address}"), task)
+    }
 
     #[test]
     fn settled_runner_contract_decodes_and_drives_completion_counters() {
@@ -487,5 +538,112 @@ mod tests {
                     .any(|value| value.required && value.status == "failed")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn service_runner_reaches_node_stdio_chromium_and_decodes_first_visual_capture() {
+        if std::env::var("RETCON_BROWSER_E2E").as_deref() != Ok("1") {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(directory.path()).unwrap();
+        let service_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/browser-service");
+        let service = Arc::new(NodeBrowserService::new(NodeBrowserServiceConfig {
+            node_path: PathBuf::from("node"),
+            entrypoint: service_dir.join("src/main.ts"),
+            service_dir,
+            artifact_root: directory.path().join("browser-artifacts"),
+            profile_root: directory.path().join("browser-profiles"),
+            input_roots: vec![directory.path().to_path_buf()],
+            request_timeout: Duration::from_secs(60),
+            protocol_version: BROWSER_SERVICE_PROTOCOL,
+        }));
+        let runner = Arc::new(ServiceBrowserVerificationRunner::new(
+            storage.clone(),
+            service.clone(),
+        ));
+        let (url, fixture) = fixture().await;
+        let run_id = Uuid::new_v4();
+        let artifact_directory = directory
+            .path()
+            .join("browser-artifacts/verifications")
+            .join(run_id.to_string());
+        let outcome = runner
+            .run(BrowserVerificationInvocation {
+                wire: json!({
+                    "runId":run_id,
+                    "artifactDirectory":artifact_directory,
+                    "timeoutMs":30_000,
+                    "definition":{
+                        "id":"rust-service-e2e",
+                        "targetUrl":url,
+                        "serverRef":"fixture",
+                        "steps":[
+                            {"id":"status","type":"assert.status","expected":200},
+                            {"id":"visual","type":"screenshot","name":"visual","compare":true}
+                        ],
+                        "variants":[{"name":"desktop","width":800,"height":600}],
+                        "timeoutMs":15_000,
+                        "retries":0,
+                        "failOnAccessibility":true,
+                        "visual":{"updateBaseline":"never"}
+                    }
+                }),
+                required_assertions: HashMap::from([("status".into(), true)]),
+            })
+            .await
+            .unwrap();
+        assert!(
+            outcome
+                .assertions
+                .iter()
+                .all(|assertion| assertion.status == "passed")
+        );
+        assert!(
+            outcome
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "visual-current")
+        );
+        assert_eq!(outcome.visual_comparisons.len(), 1);
+        assert_eq!(outcome.visual_comparisons[0].status, "missing_baseline");
+        storage
+            .artifacts()
+            .verify(&outcome.visual_comparisons[0].current_hash)
+            .unwrap();
+
+        let cancelled_run_id = Uuid::new_v4();
+        let cancellation = BrowserVerificationInvocation {
+            wire: json!({
+                "runId":cancelled_run_id,
+                "artifactDirectory":directory.path().join("browser-artifacts/verifications").join(cancelled_run_id.to_string()),
+                "timeoutMs":30_000,
+                "definition":{
+                    "id":"rust-cancel-e2e",
+                    "targetUrl":url,
+                    "serverRef":"fixture",
+                    "steps":[{"id":"wait","type":"wait","selector":"#never","timeoutMs":30_000}],
+                    "variants":[{"name":"desktop","width":800,"height":600}],
+                    "timeoutMs":30_000,
+                    "retries":0,
+                    "failOnAccessibility":true,
+                    "visual":{"updateBaseline":"never"}
+                }
+            }),
+            required_assertions: HashMap::new(),
+        };
+        let task_runner = runner.clone();
+        let task = tokio::spawn(async move { task_runner.run(cancellation).await });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        runner.cancel(cancelled_run_id).await.unwrap();
+        let cancelled = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(cancelled.contains("cancelled"));
+        service.shutdown().await.unwrap();
+        fixture.abort();
     }
 }

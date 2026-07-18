@@ -503,11 +503,11 @@ impl BrowserVerificationRepository<'_> {
         validate_outcome(outcome, actor)?;
         let summary = encode_json(&outcome.summary, "browser verification summary")?;
         let result=map_validation(self.0.transaction(|tx|{
-            let Some((task,status))=tx.query_row("SELECT task_id,status FROM browser_verification_runs WHERE id=?1",[id.as_bytes()],|row|Ok((uuid(row,0)?,row.get::<_,String>(1)?))).optional()? else{return Ok(None)};
+            let Some((task,status,fail_on_accessibility))=tx.query_row("SELECT r.task_id,r.status,d.fail_on_accessibility FROM browser_verification_runs r JOIN browser_verification_definitions d ON d.id=r.definition_id WHERE r.id=?1",[id.as_bytes()],|row|Ok((uuid(row,0)?,row.get::<_,String>(1)?,row.get::<_,bool>(2)?))).optional()? else{return Ok(None)};
             if status!="running"{return Err(validation_error("browser verification result requires a running run"));}
             let blocking=outcome.assertions.iter().filter(|value|value.required&&!matches!(value.status.as_str(),"passed"|"approved")).count() as i64;
-            let critical=outcome.accessibility.iter().filter(|value|value.severity=="critical").count() as i64;
-            let accessibility_warnings=outcome.accessibility.iter().filter(|value|value.severity=="warning").count() as i64;
+            let critical=if fail_on_accessibility { outcome.accessibility.iter().filter(|value|value.severity=="critical").count() as i64 } else { 0 };
+            let accessibility_warnings=outcome.accessibility.iter().filter(|value|value.severity=="warning"||(!fail_on_accessibility&&value.severity=="critical")).count() as i64;
             let console_errors=outcome.console.iter().filter(|value|matches!(value.level.as_str(),"error"|"critical")).count() as i64;
             let console_warnings=outcome.console.iter().filter(|value|value.level=="warning").count() as i64;
             let visual=outcome.visual_comparisons.iter().filter(|value|matches!(value.status.as_str(),"different"|"missing_baseline")).count() as i64;
@@ -1448,6 +1448,75 @@ mod tests {
             )
             .unwrap();
         assert!(db.tasks().set_status(task.id, "completed").unwrap());
+    }
+
+    #[test]
+    fn non_blocking_accessibility_policy_keeps_critical_findings_reviewable() {
+        let db = Database::open_in_memory().unwrap();
+        let project = db
+            .projects()
+            .create(&NewProject::new("A11y policy"))
+            .unwrap();
+        let mut task = NewTask::new("Advisory audit");
+        task.project_id = Some(project.id);
+        let task = db.tasks().create(&task).unwrap();
+        let mut definition = NewBrowserVerificationDefinition::new(
+            project.id,
+            "Advisory UI",
+            "http://127.0.0.1:3000",
+        );
+        definition.task_id = Some(task.id);
+        definition.fail_on_accessibility = false;
+        let definition = db
+            .browser_verification()
+            .save_definition(&definition, "test")
+            .unwrap();
+        let queued = db
+            .browser_verification()
+            .queue_run(
+                &NewBrowserVerificationRun {
+                    id: Uuid::new_v4(),
+                    definition_id: definition.id,
+                    task_id: task.id,
+                    dev_server_instance_id: None,
+                    browser_session_id: None,
+                    idempotency_key: None,
+                },
+                "test",
+            )
+            .unwrap();
+        db.browser_verification()
+            .start(queued.value.run.id, "test")
+            .unwrap();
+        let outcome = BrowserVerificationOutcome {
+            runner_version: "test".into(),
+            summary: json!({}),
+            timeline: vec![],
+            assertions: vec![],
+            artifacts: vec![],
+            visual_comparisons: vec![],
+            console: vec![],
+            network: vec![],
+            accessibility: vec![NewAccessibilityFinding {
+                id: Uuid::new_v4(),
+                rule_id: "label".into(),
+                severity: "critical".into(),
+                message: "missing label".into(),
+                selector: Some("#name".into()),
+                help_url: None,
+                artifact_hash: None,
+                metadata: json!({}),
+            }],
+        };
+        let completed = db
+            .browser_verification()
+            .complete(queued.value.run.id, &outcome, "runner")
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.value.run.critical_accessibility, 0);
+        assert_eq!(completed.value.run.status, "needs_review");
+        assert_eq!(completed.value.run.warning_count, 1);
+        assert_eq!(completed.value.accessibility[0].severity, "critical");
     }
 
     #[test]

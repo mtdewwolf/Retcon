@@ -91,6 +91,7 @@ function validateRequest(value: unknown): RpcRequest {
 export async function serveStdio(browser: ManagedBrowser): Promise<void> {
   const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
   const active = new Map<number, AbortController>();
+  const activeVerifications = new Map<string, AbortController>();
   const pending = new Set<Promise<void>>();
   const requiredToken = process.env.RETCON_BROWSER_AUTH_TOKEN;
   let authenticated = !requiredToken;
@@ -185,6 +186,20 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
       });
       continue;
     }
+    if (request.method === "browser.verification.cancel") {
+      const runId = request.params?.runId;
+      if (typeof runId !== "string" || runId.length === 0 || runId.length > 128) {
+        await writeLine({ id: request.id, error: { message: "runId must be a bounded string" } });
+        continue;
+      }
+      const controller = activeVerifications.get(runId);
+      controller?.abort();
+      await writeLine({
+        id: request.id,
+        result: { cancelled: controller !== undefined, runId },
+      });
+      continue;
+    }
     if (active.size >= MAX_ACTIVE_REQUESTS || active.has(request.id)) {
       await writeLine({
         id: request.id,
@@ -198,6 +213,21 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
     }
     const controller = new AbortController();
     active.set(request.id, controller);
+    const verificationRunId =
+      request.method === "browser.verification.run" && typeof request.params?.runId === "string"
+        ? request.params.runId
+        : undefined;
+    if (verificationRunId) {
+      if (activeVerifications.has(verificationRunId)) {
+        active.delete(request.id);
+        await writeLine({
+          id: request.id,
+          error: { code: "already_running", message: "browser verification run is already active" },
+        });
+        continue;
+      }
+      activeVerifications.set(verificationRunId, controller);
+    }
     const execute = async (): Promise<void> => {
       try {
         const result = await browser.call(request.method, request.params ?? {}, controller.signal);
@@ -209,6 +239,9 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
         });
       } finally {
         active.delete(request.id);
+        if (verificationRunId && activeVerifications.get(verificationRunId) === controller) {
+          activeVerifications.delete(verificationRunId);
+        }
       }
     };
     let task: Promise<void>;
@@ -222,6 +255,7 @@ export async function serveStdio(browser: ManagedBrowser): Promise<void> {
   }
   lines.close();
   for (const controller of active.values()) controller.abort();
+  activeVerifications.clear();
   await Promise.allSettled([...pending]);
 }
 

@@ -208,6 +208,10 @@ async fn run(state: &CoreState, id: u64, params: &Value) -> Response {
     if queued.value.run.status != "queued" {
         return Response::ok(id, json!({"verification":queued.value,"idempotent":true}));
     }
+    state.emit(
+        "browser.verification.queued",
+        json!({"runId":queued.value.run.id,"definitionId":definition_id,"projectId":queued.value.run.project_id,"taskId":task_id,"reopened":queued.reopened}),
+    );
     let running = match repository.start(queued.value.run.id, ACTOR) {
         Ok(Some(value)) => value,
         Ok(None) => return missing(id, "browser verification run"),
@@ -216,6 +220,10 @@ async fn run(state: &CoreState, id: u64, params: &Value) -> Response {
     if let Err(error) = prepare_visual_baselines(state, &running) {
         let failure = scrub(&error);
         let _ = repository.fail(running.run.id, &failure, ACTOR);
+        state.emit(
+            "browser.verification.failed",
+            json!({"runId":running.run.id,"projectId":running.run.project_id,"taskId":running.run.task_id,"failure":failure}),
+        );
         return service_error(id, failure);
     }
     let artifact_directory = state
@@ -227,36 +235,105 @@ async fn run(state: &CoreState, id: u64, params: &Value) -> Response {
     if let Err(error) = std::fs::create_dir_all(&artifact_directory) {
         let failure = scrub(&error.to_string());
         let _ = repository.fail(running.run.id, &failure, ACTOR);
+        state.emit(
+            "browser.verification.failed",
+            json!({"runId":running.run.id,"projectId":running.run.project_id,"taskId":running.run.task_id,"failure":failure}),
+        );
         return service_error(id, failure);
     }
     let invocation = match invocation(&running, &artifact_directory) {
         Ok(value) => value,
         Err(error) => {
             let _ = repository.fail(running.run.id, &error, ACTOR);
+            state.emit(
+                "browser.verification.failed",
+                json!({"runId":running.run.id,"projectId":running.run.project_id,"taskId":running.run.task_id,"failure":scrub(&error)}),
+            );
             return invalid(id, error);
         }
     };
+    state.emit(
+        "browser.verification.started",
+        json!({"runId":running.run.id,"definitionId":running.run.definition_id,"projectId":running.run.project_id,"taskId":running.run.task_id}),
+    );
+    let task_state = state.clone();
+    let response = running.clone();
+    tokio::spawn(async move { execute_run(task_state, running, invocation).await });
+    Response::ok(
+        id,
+        json!({"verification":response,"reopened":queued.reopened,"accepted":true}),
+    )
+}
+
+async fn execute_run(
+    state: CoreState,
+    running: retcon_storage::BrowserVerificationDetails,
+    invocation: BrowserVerificationInvocation,
+) {
+    let run_id = running.run.id;
     match state.browser_verification_runner().run(invocation).await {
         Ok(outcome) => {
-            if let Err(error) = verify_outcome_artifacts(state, &outcome) {
+            if let Err(error) = verify_outcome_artifacts(&state, &outcome) {
                 let failure = scrub(&error);
-                let _ = repository.fail(running.run.id, &failure, ACTOR);
-                return service_error(id, failure);
+                finish_background_failure(&state, &running, &failure);
+                return;
             }
-            match repository.complete(running.run.id, &outcome, "browser_verification_runner") {
-                Ok(Some(value)) => Response::ok(
-                    id,
-                    json!({"verification":value.value,"reopened":value.reopened}),
+            let repository = state.storage().database().browser_verification();
+            match repository.run(run_id) {
+                Ok(Some(run)) if run.status == "running" => {}
+                Ok(Some(run)) => {
+                    state.emit(
+                        "browser.verification.late_result_ignored",
+                        json!({"runId":run_id,"projectId":run.project_id,"taskId":run.task_id,"status":run.status}),
+                    );
+                    return;
+                }
+                _ => return,
+            }
+            match repository.complete(run_id, &outcome, "browser_verification_runner") {
+                Ok(Some(value)) => state.emit(
+                    "browser.verification.completed",
+                    json!({"runId":run_id,"definitionId":value.value.run.definition_id,"projectId":value.value.run.project_id,"taskId":value.task_id,"status":value.value.run.status,"reopened":value.reopened}),
                 ),
-                Ok(None) => missing(id, "browser verification run"),
-                Err(error) => storage_error(id, error),
+                Ok(None) => {}
+                Err(StorageError::Validation(_)) => state.emit(
+                    "browser.verification.late_result_ignored",
+                    json!({"runId":run_id,"projectId":running.run.project_id,"taskId":running.run.task_id}),
+                ),
+                Err(error) => finish_background_failure(&state, &running, &error.to_string()),
             }
         }
         Err(error) => {
             let failure = scrub(&error);
-            let _ = repository.fail(running.run.id, &failure, ACTOR);
-            service_error(id, failure)
+            finish_background_failure(&state, &running, &failure);
         }
+    }
+}
+
+fn finish_background_failure(
+    state: &CoreState,
+    running: &retcon_storage::BrowserVerificationDetails,
+    failure: &str,
+) {
+    let repository = state.storage().database().browser_verification();
+    let is_running = repository
+        .run(running.run.id)
+        .ok()
+        .flatten()
+        .is_some_and(|run| run.status == "running");
+    if !is_running {
+        state.emit(
+            "browser.verification.late_result_ignored",
+            json!({"runId":running.run.id,"projectId":running.run.project_id,"taskId":running.run.task_id}),
+        );
+        return;
+    }
+    let failure = scrub(failure);
+    if let Ok(Some(value)) = repository.fail(running.run.id, &failure, ACTOR) {
+        state.emit(
+            "browser.verification.failed",
+            json!({"runId":running.run.id,"projectId":running.run.project_id,"taskId":value.task_id,"failure":failure,"reopened":value.reopened}),
+        );
     }
 }
 
@@ -348,24 +425,31 @@ async fn cancel(state: &CoreState, id: u64, params: &Value) -> Response {
         Ok(value) => value,
         Err(error) => return invalid(id, error),
     };
-    let runner_error = state
-        .browser_verification_runner()
-        .cancel(run_id)
-        .await
-        .err();
-    match state
+    let cancelled = match state
         .storage()
         .database()
         .browser_verification()
         .cancel(run_id, ACTOR)
     {
-        Ok(Some(value)) => Response::ok(
-            id,
-            json!({"verification":value.value,"reopened":value.reopened,"runnerWarning":runner_error.map(|value|scrub(&value))}),
-        ),
-        Ok(None) => missing(id, "browser verification run"),
-        Err(error) => storage_error(id, error),
-    }
+        Ok(Some(value)) => value,
+        Ok(None) => return missing(id, "browser verification run"),
+        Err(error) => return storage_error(id, error),
+    };
+    // Commit durable cancellation before signalling the external runner so a
+    // racing result can never overwrite the user's terminal decision.
+    let runner_error = state
+        .browser_verification_runner()
+        .cancel(run_id)
+        .await
+        .err();
+    state.emit(
+        "browser.verification.cancelled",
+        json!({"runId":run_id,"projectId":cancelled.value.run.project_id,"taskId":cancelled.task_id,"reopened":cancelled.reopened}),
+    );
+    Response::ok(
+        id,
+        json!({"verification":cancelled.value,"reopened":cancelled.reopened,"runnerWarning":runner_error.map(|value|scrub(&value))}),
+    )
 }
 
 fn get_run(state: &CoreState, id: u64, params: &Value) -> Response {
@@ -422,10 +506,16 @@ fn review(state: &CoreState, id: u64, params: &Value) -> Response {
         .browser_verification()
         .review(run_id, decision, &reason, ACTOR)
     {
-        Ok(Some(value)) => Response::ok(
-            id,
-            json!({"verification":value.value,"reopened":value.reopened}),
-        ),
+        Ok(Some(value)) => {
+            state.emit(
+                "browser.verification.reviewed",
+                json!({"runId":run_id,"projectId":value.value.run.project_id,"taskId":value.task_id,"status":value.value.run.status,"decision":decision,"reopened":value.reopened}),
+            );
+            Response::ok(
+                id,
+                json!({"verification":value.value,"reopened":value.reopened}),
+            )
+        }
         Ok(None) => missing(id, "browser verification run"),
         Err(error) => storage_error(id, error),
     }
@@ -459,6 +549,10 @@ fn approve_baseline(state: &CoreState, id: u64, params: &Value) -> Response {
                     Err(error) => return storage_error(id, error),
                 }
             }
+            state.emit(
+                "browser.verification.baseline_approved",
+                json!({"baselineId":baseline.id,"definitionId":baseline.definition_id,"sourceRunId":baseline.source_run_id,"variantKey":baseline.variant_key}),
+            );
             Response::ok(id, json!({"baseline":baseline}))
         }
         Ok(None) => missing(id, "browser visual comparison"),
@@ -884,12 +978,46 @@ fn scrub(message: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use super::*;
+    use crate::browser_verification::{BrowserVerificationFuture, BrowserVerificationRunner};
     use retcon_storage::{
         BrowserVerificationOutcome, NewBrowserVerificationArtifact,
-        NewBrowserVerificationDefinition, NewBrowserVerificationRun, NewProject, NewTask,
-        NewVisualComparison,
+        NewBrowserVerificationDefinition, NewBrowserVerificationRun, NewDevServerConfig,
+        NewProject, NewTask, NewVisualComparison,
     };
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct CancellableRunner {
+        started: Notify,
+        released: Notify,
+        cancelled: AtomicBool,
+    }
+
+    impl BrowserVerificationRunner for CancellableRunner {
+        fn run<'a>(
+            &'a self,
+            _invocation: BrowserVerificationInvocation,
+        ) -> BrowserVerificationFuture<'a, BrowserVerificationOutcome> {
+            Box::pin(async move {
+                self.started.notify_one();
+                self.released.notified().await;
+                Err("runner cancelled".into())
+            })
+        }
+
+        fn cancel(&self, _run_id: Uuid) -> BrowserVerificationFuture<'_, ()> {
+            Box::pin(async move {
+                self.cancelled.store(true, Ordering::SeqCst);
+                self.released.notify_one();
+                Ok(())
+            })
+        }
+    }
 
     #[test]
     fn runner_boundary_translates_desktop_steps_and_flattens_assertions() {
@@ -934,6 +1062,106 @@ mod tests {
         .await;
         let encoded = response.error.unwrap().to_string();
         assert!(encoded.contains("devServerInstanceId is required"));
+    }
+
+    #[tokio::test]
+    async fn run_returns_running_and_cancel_wins_over_late_background_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let runner = Arc::new(CancellableRunner::default());
+        let state =
+            CoreState::new_with_browser_verification_runner(directory.path(), runner.clone())
+                .unwrap();
+        let db = state.storage().database();
+        let project = db.projects().create(&NewProject::new("Async run")).unwrap();
+        let mut task = NewTask::new("Cancel verification");
+        task.project_id = Some(project.id);
+        let task = db.tasks().create(&task).unwrap();
+        let config = db
+            .dev_servers()
+            .save_config(&NewDevServerConfig::new(project.id, "web", "serve", "."))
+            .unwrap();
+        let instance = db
+            .dev_servers()
+            .prepare_start(config.id, Some(task.id), "test")
+            .unwrap();
+        db.dev_servers()
+            .mark_running(
+                instance.id,
+                Some(1),
+                "http://127.0.0.1:3000",
+                &json!({}),
+                "test",
+            )
+            .unwrap();
+        let mut definition =
+            NewBrowserVerificationDefinition::new(project.id, "Async UI", "http://127.0.0.1:3000");
+        definition.task_id = Some(task.id);
+        definition.dev_server_config_id = Some(config.id);
+        definition.steps = json!([{"id":"status","kind":"assert.status","expected":200}]);
+        let definition = db
+            .browser_verification()
+            .save_definition(&definition, "test")
+            .unwrap();
+        let run_id = Uuid::new_v4();
+        let response = handle(
+            &state,
+            1,
+            "browser.verification.run",
+            &json!({
+                "runId":run_id,"definitionId":definition.id,"taskId":task.id,
+                "devServerInstanceId":instance.id
+            }),
+        )
+        .await;
+        let result = response.result.unwrap();
+        assert_eq!(result["accepted"], true);
+        assert_eq!(result["verification"]["run"]["status"], "running");
+        tokio::time::timeout(Duration::from_secs(1), runner.started.notified())
+            .await
+            .unwrap();
+
+        let cancelled = handle(
+            &state,
+            2,
+            "browser.verification.cancel",
+            &json!({"runId":run_id}),
+        )
+        .await;
+        assert_eq!(
+            cancelled.result.unwrap()["verification"]["run"]["status"],
+            "cancelled"
+        );
+        assert!(runner.cancelled.load(Ordering::SeqCst));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            db.browser_verification()
+                .run(run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        let kinds: Vec<_> = state
+            .events()
+            .replay(0, 100)
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| kind == "browser.verification.started")
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| kind == "browser.verification.cancelled")
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| kind == "browser.verification.late_result_ignored")
+        );
     }
 
     #[test]

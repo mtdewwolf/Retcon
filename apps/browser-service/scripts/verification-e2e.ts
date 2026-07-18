@@ -197,6 +197,18 @@ function request(
 }
 
 try {
+  const firstUnapproved = (await browser.call(
+    "browser.verification.run",
+    request("first-unapproved", "never"),
+  )) as unknown as BrowserVerificationResult;
+  assert.equal(firstUnapproved.status, "passed");
+  assert.ok(
+    firstUnapproved.visualComparisons.every((comparison) => comparison.status === "created"),
+  );
+  assert.ok(
+    firstUnapproved.visualComparisons.every((comparison) => comparison.baselinePath.length > 0),
+  );
+
   const created = (await browser.call(
     "browser.verification.run",
     request("baseline", "missing"),

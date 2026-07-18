@@ -572,6 +572,7 @@ fn map_call(
             "browser.action"
         }
         "browser.verification.run" => "browser.verification.run",
+        "browser.verification.cancel" => "browser.verification.cancel",
         "browser.takeover.start" => {
             let headed = object
                 .get("headed")

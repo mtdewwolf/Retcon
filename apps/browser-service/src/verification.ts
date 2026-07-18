@@ -1051,6 +1051,7 @@ export class BrowserVerificationRunner {
     for (let attempt = 1; attempt <= request.definition.retries + 1; attempt += 1) {
       let context: BrowserContext | undefined;
       let profilePath: string | undefined;
+      let abortContext: (() => void) | undefined;
       const attemptCaptures: CaptureState = { console: [], network: [], pageErrors: [] };
       this.event(
         state,
@@ -1069,6 +1070,11 @@ export class BrowserVerificationRunner {
           isMobile: variant.isMobile,
           ...(executablePath ? { executablePath } : {}),
         });
+        abortContext = () => {
+          void context?.close().catch(() => undefined);
+        };
+        signal?.addEventListener("abort", abortContext, { once: true });
+        if (signal?.aborted) throw new Error("operation cancelled");
         const page = context.pages()[0] ?? (await context.newPage());
         capturePage(page, attemptCaptures);
         let response = await page.goto(request.definition.targetUrl, {
@@ -1160,6 +1166,7 @@ export class BrowserVerificationRunner {
         }
         if (signal?.aborted) throw error;
       } finally {
+        if (abortContext) signal?.removeEventListener("abort", abortContext);
         await context?.close().catch(() => undefined);
         if (profilePath) await rm(profilePath, { recursive: true, force: true });
         for (const entry of attemptCaptures.console)
@@ -1478,8 +1485,33 @@ export class BrowserVerificationRunner {
     const baselinePath = join(baselineDirectory, `${step.name}.png`);
     const historyDirectory = await ensureRoot(join(baselineDirectory, "history", step.name));
     const baselineExists = await fileExists(baselinePath);
+    // Core owns baseline approval. On a first capture it deliberately invokes
+    // the service with updateBaseline="never", then persists the current image
+    // as reviewable evidence. Returning a `created` comparison (without
+    // writing an unapproved baseline) is what makes approve -> materialize ->
+    // compare possible across the Rust/Node boundary.
     if (!baselineExists && request.definition.visual.updateBaseline === "never") {
-      throw new AssertionFailure(`visual baseline is missing for ${step.name}`);
+      const result: VisualComparison = {
+        variant: variant.name,
+        stepId: step.id,
+        name: step.name,
+        status: "created",
+        width: variant.width,
+        height: variant.height,
+        diffPixels: 0,
+        diffPixelRatio: 0,
+        perceptualDifference: 0,
+        thresholds: {
+          pixelThreshold: request.definition.visual.pixelThreshold,
+          maxDiffPixelRatio: request.definition.visual.maxDiffPixelRatio,
+          perceptualThreshold: request.definition.visual.perceptualThreshold,
+        },
+        baselinePath,
+        currentPath,
+        baselineHistory: [],
+      };
+      capPush(state.visuals, result, MAX_VISUAL_COMPARISONS);
+      return result;
     }
     if (!baselineExists || request.definition.visual.updateBaseline === "always") {
       if (baselineExists) {
