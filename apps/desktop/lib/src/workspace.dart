@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:retcon_diff_viewer/retcon_diff_viewer.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
-import 'package:retcon_file_viewer/retcon_file_viewer.dart';
 import 'package:retcon_terminal_view/retcon_terminal_view.dart';
 
 import 'approvals/approval_center.dart';
@@ -13,6 +12,7 @@ import 'browser/browser.dart';
 import 'checkpoints/checkpoints.dart';
 import 'conversation/conversation_panel.dart';
 import 'core_client.dart';
+import 'ide/ide.dart';
 
 /// Persistent, versioned workspace layout.  This stays deliberately independent
 /// of widgets so a project layout can be restored before the desktop is drawn.
@@ -968,11 +968,8 @@ class _PanelBody extends StatelessWidget {
       return BrowserPanel(repository: browserRepository!);
     }
     if (panel.id == 'explorer' && core != null && workingDirectory != null) {
-      return FileWorkspacePanel(
-        service: RpcFileService(
-          (method, {params = const {}}) =>
-              core!.request(method, params: params),
-        ),
+      return IdeWorkspacePanel(
+        core: core!,
         root: workingDirectory!,
         events: core!.events,
       );

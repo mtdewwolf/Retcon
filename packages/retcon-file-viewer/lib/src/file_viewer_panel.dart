@@ -156,10 +156,8 @@ class _FileViewerPanelState extends State<FileViewerPanel> {
                 ),
               const SizedBox(width: RetconSpacing.sm),
               FilledButton.icon(
-                onPressed: _saving ||
-                        loaded.binary ||
-                        loaded.truncated ||
-                        !_dirty
+                onPressed:
+                    _saving || loaded.binary || loaded.truncated || !_dirty
                     ? null
                     : _save,
                 icon: _saving
@@ -283,12 +281,14 @@ class FileWorkspacePanel extends StatefulWidget {
     required this.service,
     required this.root,
     this.events,
+    this.onOpenExternal,
     super.key,
   });
 
   final FileService service;
   final String root;
   final Stream<Map<String, dynamic>>? events;
+  final Future<void> Function(String path)? onOpenExternal;
 
   @override
   State<FileWorkspacePanel> createState() => _FileWorkspacePanelState();
@@ -307,6 +307,7 @@ class _FileWorkspacePanelState extends State<FileWorkspacePanel> {
             service: widget.service,
             root: widget.root,
             events: widget.events,
+            onOpenExternal: widget.onOpenExternal,
             onFileSelected: (path) => setState(() => _selectedPath = path),
           ),
         ),

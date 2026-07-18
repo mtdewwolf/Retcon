@@ -10,6 +10,7 @@ import 'browser/browser.dart';
 import 'core_client.dart';
 import 'dev_server/dev_server.dart';
 import 'diagnostics/diagnostics.dart';
+import 'ide/ide.dart';
 import 'projects/project_picker.dart';
 import 'projects/project_controller.dart';
 import 'provider_doctor_dialog.dart';
@@ -28,6 +29,7 @@ enum ShellCommand {
   browser('Open browser', Icons.language),
   serverCenter('Dev server center', Icons.dns),
   taskBoard('Task board', Icons.view_kanban),
+  externalEditor('External editor', Icons.integration_instructions_outlined),
   settings('Settings', Icons.settings),
   diagnostics('Diagnostics', Icons.monitor_heart),
   fullScreen('Toggle full screen', Icons.fullscreen),
@@ -304,6 +306,8 @@ class _DesktopShellState extends State<DesktopShell> {
         await _showCommandPalette();
       case ShellCommand.settings:
         await _showProviderDoctor();
+      case ShellCommand.externalEditor:
+        await _showIdeSettings();
       case ShellCommand.diagnostics:
         await _showDiagnosticsDialog();
       case ShellCommand.taskBoard:
@@ -529,6 +533,35 @@ class _DesktopShellState extends State<DesktopShell> {
     context: context,
     builder: (context) => ProviderDoctorDialog(core: widget.core),
   );
+
+  Future<void> _showIdeSettings() async {
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('External editor unavailable'),
+          content: const Text(
+            'Connect to Retcon Core before opening an external editor.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => IdeSettingsDialog(
+        repository: CoreIdeRepository(core),
+        projectPath: widget.projectController?.current?.metadata.repositoryPath,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -760,6 +793,7 @@ class _ApplicationMenu extends StatelessWidget {
       _menu('Browser', [ShellCommand.browser, ShellCommand.serverCenter]),
       _menu('Tools', [
         ShellCommand.terminal,
+        ShellCommand.externalEditor,
         ShellCommand.settings,
         ShellCommand.diagnostics,
       ]),
