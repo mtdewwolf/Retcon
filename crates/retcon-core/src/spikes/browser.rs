@@ -189,7 +189,7 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
     };
     let inner_params = params.get("params").cloned().unwrap_or_else(|| json!({}));
 
-    let (writer, call_id, rx) = {
+    let (writer, pending, call_id, rx) = {
         let mut guard = state.browser().proc.lock().await;
         let Some(proc) = guard.as_mut() else {
             return fail(
@@ -201,15 +201,18 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
         };
         let call_id = proc.next.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
-        proc.pending.lock().await.insert(call_id, tx);
-        (Arc::clone(&proc.writer), call_id, rx)
+        // Clone handles under the proc lock only — never await pending while
+        // holding proc (cleanup drains pending then takes proc).
+        let writer = Arc::clone(&proc.writer);
+        let pending = Arc::clone(&proc.pending);
+        drop(guard);
+        pending.lock().await.insert(call_id, tx);
+        (writer, pending, call_id, rx)
     };
 
     let request = json!({ "id": call_id, "method": method, "params": inner_params });
     if write_rpc(&writer, request).await.is_err() {
-        if let Some(proc) = state.browser().proc.lock().await.as_mut() {
-            proc.pending.lock().await.remove(&call_id);
-        }
+        pending.lock().await.remove(&call_id);
         return fail(
             id,
             ErrorCode::Io,
@@ -235,9 +238,7 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
             }
         }
         Ok(Err(_)) => {
-            if let Some(proc) = state.browser().proc.lock().await.as_mut() {
-                proc.pending.lock().await.remove(&call_id);
-            }
+            pending.lock().await.remove(&call_id);
             fail(
                 id,
                 ErrorCode::Internal,
@@ -246,9 +247,7 @@ async fn call(state: CoreState, id: u64, params: &Value) -> Response {
             )
         }
         Err(_) => {
-            if let Some(proc) = state.browser().proc.lock().await.as_mut() {
-                proc.pending.lock().await.remove(&call_id);
-            }
+            pending.lock().await.remove(&call_id);
             fail(
                 id,
                 ErrorCode::Io,
@@ -276,3 +275,4 @@ async fn drain_pending(pending: &Pending, response: Value) {
         let _ = sender.send(response.clone());
     }
 }
+

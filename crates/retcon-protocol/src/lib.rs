@@ -440,9 +440,11 @@ pub struct ParseError {
 }
 
 pub fn negotiate_features(client: &[String], server: &[String]) -> Vec<String> {
+    let server_features: std::collections::HashSet<&str> =
+        server.iter().map(String::as_str).collect();
     client
         .iter()
-        .filter(|feature| server.contains(feature))
+        .filter(|feature| server_features.contains(feature.as_str()))
         .cloned()
         .collect()
 }
