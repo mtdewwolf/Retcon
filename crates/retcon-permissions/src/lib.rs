@@ -28,6 +28,8 @@ pub enum RpcPermission {
         user_message: String,
         /// Technical detail for logs and support bundles.
         technical_message: String,
+        /// Durable approval identifier to include when retrying, when available.
+        approval_id: Option<uuid::Uuid>,
     },
 }
 
@@ -69,6 +71,7 @@ pub fn check_rpc_method_with_bypass(method: &str, bypass: bool) -> RpcPermission
             technical_message: format!(
                 "permission denied for {method}: approval engine unavailable (set RETCON_PERMISSIONS_BYPASS=1 for dev)"
             ),
+            approval_id: None,
         };
     }
 

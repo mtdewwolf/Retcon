@@ -92,6 +92,7 @@ class _FileViewerPanelState extends State<FileViewerPanel> {
         root: widget.root,
         path: widget.path,
         content: _controller.text,
+        ifMatch: _loaded!.revision,
       );
       _dirty = false;
       await _load();

@@ -75,6 +75,47 @@ void main() {
     },
   );
 
+  test('protected actions reuse the one-time approval on retry', () async {
+    final core = _ApprovalCore();
+    final repository = CoreIdeRepository(core);
+
+    await expectLater(
+      repository.openProject(r'C:\work', ideId: 'vscode'),
+      throwsA(isA<CoreRpcException>()),
+    );
+    await repository.openProject(r'C:\work', ideId: 'vscode');
+
+    expect(core.calls, hasLength(2));
+    expect(core.calls.first, isNot(contains('approvalId')));
+    expect(core.calls.last['approvalId'], 'approval-1');
+    core.dispose();
+  });
+
+  testWidgets('IDE workspace registers and releases its Core file watch', (
+    tester,
+  ) async {
+    final core = _IdeCore();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildLunaDarkTheme(),
+        home: Scaffold(
+          body: IdeWorkspacePanel(
+            core: core,
+            root: r'C:\work',
+            events: const Stream.empty(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(core.calls.map((call) => call.$1), contains('file.watch'));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(core.calls.map((call) => call.$1), contains('file.unwatch'));
+    core.dispose();
+  });
+
   test(
     'revision conflict preserves the draft and supports both recovery choices',
     () async {
@@ -104,6 +145,31 @@ void main() {
   );
 
   test(
+    'deleted external file can be recreated without losing the draft',
+    () async {
+      final repository = _ConflictFiles()..missingAfterConflict = true;
+      final controller = SyncedFileController(
+        repository: repository,
+        root: r'C:\work',
+        path: 'note.txt',
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      controller.edit('my preserved draft');
+      await controller.save();
+
+      expect(controller.deletedExternally, isTrue);
+      expect(controller.draft, 'my preserved draft');
+      await controller.recreateDeleted();
+
+      expect(controller.deletedExternally, isFalse);
+      expect(controller.conflict, isFalse);
+      expect(controller.file?.revision, 'rev-3');
+      expect(repository.writes.last.$4, 'create');
+    },
+  );
+
+  test(
     'bounded file events refresh clean editors without replacing drafts',
     () async {
       final repository = _ConflictFiles();
@@ -121,7 +187,7 @@ void main() {
       await controller.load();
       events.add({
         'kind': 'file.changed',
-        'payload': {'path': 'note.txt'},
+        'payload': {'path': r'C:\work\note.txt'},
       });
       await Future<void>.delayed(const Duration(milliseconds: 220));
       expect(controller.file?.revision, 'rev-2');
@@ -129,13 +195,47 @@ void main() {
       controller.edit('unsaved draft');
       events.add({
         'kind': 'file.changed',
-        'payload': {'path': 'note.txt'},
+        'payload': {
+          'path': r'C:\work\renamed.txt',
+          'previousPath': r'C:\work\note.txt',
+        },
       });
       await Future<void>.delayed(const Duration(milliseconds: 220));
       expect(controller.draft, 'unsaved draft');
+      expect(controller.path, r'C:\work\renamed.txt');
       expect(controller.externalChangePending, isTrue);
     },
   );
+
+  test('clean external rename follows the new path', () async {
+    final repository = _ConflictFiles();
+    final events = StreamController<Map<String, dynamic>>.broadcast();
+    String? renamedTo;
+    final controller = SyncedFileController(
+      repository: repository,
+      root: r'C:\work',
+      path: 'note.txt',
+      events: events.stream,
+      onPathRenamed: (path) => renamedTo = path,
+    );
+    addTearDown(() async {
+      controller.dispose();
+      await events.close();
+    });
+    await controller.load();
+    events.add({
+      'kind': 'file.changed',
+      'payload': {
+        'path': r'C:\work\renamed.txt',
+        'previousPath': r'C:\work\note.txt',
+      },
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 220));
+
+    expect(controller.path, r'C:\work\renamed.txt');
+    expect(renamedTo, r'C:\work\renamed.txt');
+    expect(repository.reads, 2);
+  });
 
   testWidgets('editor explains a conflict without replacing typed content', (
     tester,
@@ -202,6 +302,11 @@ class _IdeCore extends CoreClient {
         method == 'ide.configuration.update') {
       return {'preferredIdeId': params['preferredIdeId'] ?? 'cursor'};
     }
+    if (method == 'file.list') return const {'entries': []};
+    if (method == 'file.watch') {
+      return {'watchId': 'watch-1', 'root': params['root']};
+    }
+    if (method == 'file.unwatch') return const {'stopped': true};
     return {
       'launched': true,
       'ideId': params['ideId'] ?? 'cursor',
@@ -210,19 +315,43 @@ class _IdeCore extends CoreClient {
   }
 }
 
+class _ApprovalCore extends CoreClient {
+  final calls = <Map<String, dynamic>>[];
+
+  @override
+  CoreConnectionStatus get status => CoreConnectionStatus.connected;
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String method, {
+    Map<String, dynamic> params = const {},
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    calls.add(Map<String, dynamic>.of(params));
+    if (params['approvalId'] == null) {
+      throw CoreRpcException('Approval required.', {
+        'code': 'permission_denied',
+        'diagnostic': {'approvalId': 'approval-1'},
+      });
+    }
+    return const {'launched': true, 'ideId': 'vscode', 'action': 'openProject'};
+  }
+}
+
 class _ConflictFiles implements SyncedFileRepository {
   int reads = 0;
   bool conflictOnce = true;
+  bool missingAfterConflict = false;
   final writes = <(String, String, String, String)>[];
 
   @override
   Future<SyncedFile> read({
     required String root,
     required String path,
-    String? ifNoneMatch,
     int? limit,
   }) async {
     reads++;
+    if (missingAfterConflict && reads > 1) throw const SyncedFileMissing();
     return SyncedFile(
       path: path,
       revision: reads == 1 ? 'rev-1' : 'rev-2',
@@ -239,9 +368,10 @@ class _ConflictFiles implements SyncedFileRepository {
     required String root,
     required String path,
     required String content,
-    required String ifMatch,
+    String? ifMatch,
+    bool ifNoneMatch = false,
   }) async {
-    writes.add((root, path, content, ifMatch));
+    writes.add((root, path, content, ifMatch ?? 'create'));
     if (conflictOnce) {
       conflictOnce = false;
       throw const FileRevisionConflict();

@@ -24,6 +24,8 @@ class IdeController extends ChangeNotifier {
   }
 
   bool get supported => ides.any((ide) => ide.available);
+  bool supports(String capability) =>
+      preferred?.capabilities.contains(capability) ?? false;
 
   Future<void> load() async {
     loading = true;
@@ -135,13 +137,15 @@ class SyncedFileController extends ChangeNotifier {
     required this.root,
     required this.path,
     Stream<Map<String, dynamic>>? events,
+    this.onPathRenamed,
   }) {
     _events = events?.listen(_onEvent);
   }
 
   final SyncedFileRepository repository;
   final String root;
-  final String path;
+  String path;
+  final ValueChanged<String>? onPathRenamed;
   StreamSubscription<Map<String, dynamic>>? _events;
   Timer? _refreshTimer;
 
@@ -151,6 +155,7 @@ class SyncedFileController extends ChangeNotifier {
   bool loading = false;
   bool saving = false;
   bool conflict = false;
+  bool deletedExternally = false;
   bool externalChangePending = false;
   Object? error;
 
@@ -165,16 +170,12 @@ class SyncedFileController extends ChangeNotifier {
       final loaded = await repository.read(
         root: root,
         path: path,
-        ifNoneMatch: preserveDraft ? null : file?.revision,
         limit: 512 * 1024,
       );
-      if (loaded.notModified) {
-        externalChangePending = false;
-        return;
-      }
       file = loaded;
       if (!preserveDraft) draft = loaded.content ?? '';
       conflict = false;
+      deletedExternally = false;
       externalVersion = null;
       externalChangePending = false;
     } catch (value) {
@@ -213,16 +214,59 @@ class SyncedFileController extends ChangeNotifier {
         language: current.language,
       );
       conflict = false;
+      deletedExternally = false;
       externalVersion = null;
       externalChangePending = false;
     } on FileRevisionConflict catch (value) {
       conflict = true;
       error = value;
-      externalVersion = await repository.read(
+      try {
+        externalVersion = await repository.read(
+          root: root,
+          path: path,
+          limit: 512 * 1024,
+        );
+        deletedExternally = false;
+      } on SyncedFileMissing {
+        externalVersion = null;
+        deletedExternally = true;
+        error = const FileRevisionConflict(
+          'This file was removed outside Retcon. Your draft is safe.',
+        );
+      }
+    } catch (value) {
+      error = value;
+    } finally {
+      saving = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> recreateDeleted() async {
+    if (!deletedExternally || saving) return;
+    saving = true;
+    error = null;
+    notifyListeners();
+    try {
+      final result = await repository.write(
         root: root,
         path: path,
-        limit: 512 * 1024,
+        content: draft,
+        ifNoneMatch: true,
       );
+      file = SyncedFile(
+        path: result.path,
+        revision: result.revision,
+        content: draft,
+        size: result.size,
+        truncated: false,
+        binary: false,
+        language: file?.language ?? 'plaintext',
+      );
+      conflict = false;
+      deletedExternally = false;
+      externalVersion = null;
+      externalChangePending = false;
     } catch (value) {
       error = value;
     } finally {
@@ -237,6 +281,7 @@ class SyncedFileController extends ChangeNotifier {
     file = external;
     draft = external.content ?? '';
     conflict = false;
+    deletedExternally = false;
     externalVersion = null;
     externalChangePending = false;
     error = null;
@@ -248,6 +293,7 @@ class SyncedFileController extends ChangeNotifier {
     if (external == null) return;
     file = external;
     conflict = false;
+    deletedExternally = false;
     externalVersion = null;
     externalChangePending = false;
     error = null;
@@ -260,7 +306,17 @@ class SyncedFileController extends ChangeNotifier {
     if (kind != 'file.changed' && kind != 'file.updated') return;
     final payload =
         (envelope['payload'] as Map?)?.cast<String, dynamic>() ?? envelope;
-    if (payload['path']?.toString() != path) return;
+    final currentPath = payload['path']?.toString();
+    final previousPath = payload['previousPath']?.toString();
+    final matchesCurrent = _matchesPath(currentPath);
+    final matchesPrevious = _matchesPath(previousPath);
+    if (!matchesCurrent && !matchesPrevious) {
+      return;
+    }
+    if (matchesPrevious && currentPath != null && currentPath.isNotEmpty) {
+      path = currentPath;
+      onPathRenamed?.call(currentPath);
+    }
     if (dirty || saving) {
       externalChangePending = true;
       notifyListeners();
@@ -271,6 +327,25 @@ class SyncedFileController extends ChangeNotifier {
       const Duration(milliseconds: 150),
       () => unawaited(load()),
     );
+  }
+
+  bool _matchesPath(String? candidate) {
+    if (candidate == null || candidate.isEmpty) return false;
+    String normalize(String value) {
+      final normalized = value
+          .replaceAll('\\', '/')
+          .replaceAll(RegExp('/+'), '/');
+      return RegExp(r'^[A-Za-z]:/').hasMatch(normalized)
+          ? normalized.toLowerCase()
+          : normalized;
+    }
+
+    final eventPath = normalize(candidate);
+    final selected = normalize(path);
+    if (eventPath == selected) return true;
+    final workspace = normalize(root).replaceFirst(RegExp(r'/$'), '');
+    final relative = selected.replaceFirst(RegExp(r'^/+'), '');
+    return eventPath == '$workspace/$relative';
   }
 
   @override

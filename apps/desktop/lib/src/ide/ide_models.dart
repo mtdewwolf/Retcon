@@ -4,6 +4,7 @@ class IdeDescriptor {
     required this.name,
     required this.available,
     this.version,
+    this.capabilities = const [],
   });
 
   factory IdeDescriptor.fromJson(Map<String, dynamic> json) => IdeDescriptor(
@@ -11,12 +12,16 @@ class IdeDescriptor {
     name: json['name']?.toString() ?? json['id']?.toString() ?? 'Editor',
     available: json['available'] == true || json['detected'] == true,
     version: json['version']?.toString(),
+    capabilities: (json['capabilities'] as List? ?? const [])
+        .map((value) => value.toString())
+        .toList(growable: false),
   );
 
   final String id;
   final String name;
   final bool available;
   final String? version;
+  final List<String> capabilities;
 }
 
 class IdeConfiguration {
@@ -56,7 +61,6 @@ class SyncedFile {
     required this.binary,
     required this.language,
     this.content,
-    this.notModified = false,
   });
 
   factory SyncedFile.fromJson(Map<String, dynamic> json) => SyncedFile(
@@ -67,7 +71,6 @@ class SyncedFile {
     truncated: json['truncated'] == true,
     binary: json['binary'] == true,
     language: json['language']?.toString() ?? 'plaintext',
-    notModified: json['notModified'] == true,
   );
 
   final String path;
@@ -77,7 +80,6 @@ class SyncedFile {
   final bool truncated;
   final bool binary;
   final String language;
-  final bool notModified;
 }
 
 class SyncedWriteResult {
@@ -106,4 +108,11 @@ class FileRevisionConflict implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class SyncedFileMissing implements Exception {
+  const SyncedFileMissing();
+
+  @override
+  String toString() => 'This file was removed outside Retcon.';
 }

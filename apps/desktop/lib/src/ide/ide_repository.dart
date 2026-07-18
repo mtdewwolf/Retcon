@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../core_client.dart';
 import 'ide_models.dart';
 
@@ -31,20 +33,21 @@ abstract class SyncedFileRepository {
   Future<SyncedFile> read({
     required String root,
     required String path,
-    String? ifNoneMatch,
     int? limit,
   });
   Future<SyncedWriteResult> write({
     required String root,
     required String path,
     required String content,
-    required String ifMatch,
+    String? ifMatch,
+    bool ifNoneMatch = false,
   });
 }
 
 class CoreIdeRepository implements IdeRepository, SyncedFileRepository {
   CoreIdeRepository(this._core);
   final CoreClient _core;
+  final Map<String, String> _approvalIds = {};
 
   @override
   Future<List<IdeDescriptor>> detect() async {
@@ -66,17 +69,41 @@ class CoreIdeRepository implements IdeRepository, SyncedFileRepository {
   @override
   Future<IdeConfiguration> updatePreferred(String? ideId) async =>
       IdeConfiguration.fromJson(
-        await _core.request(
-          'ide.configuration.update',
-          params: {'preferredIdeId': ideId},
-        ),
+        await _protectedRequest('ide.configuration.update', {
+          'preferredIdeId': ideId,
+        }),
       );
 
   Future<IdeLaunchResult> _launch(
     String method,
     Map<String, dynamic> params,
-  ) async =>
-      IdeLaunchResult.fromJson(await _core.request(method, params: params));
+  ) async => IdeLaunchResult.fromJson(await _protectedRequest(method, params));
+
+  Future<Map<String, dynamic>> _protectedRequest(
+    String method,
+    Map<String, dynamic> params,
+  ) async {
+    final encoded = jsonEncode(params);
+    final key = '$method:${encoded.length}:${encoded.hashCode}';
+    final requestParams = Map<String, dynamic>.of(params);
+    final approvalId = _approvalIds[key];
+    if (approvalId != null) requestParams['approvalId'] = approvalId;
+    try {
+      final result = await _core.request(method, params: requestParams);
+      _approvalIds.remove(key);
+      return result;
+    } on CoreRpcException catch (error) {
+      final details = error.details;
+      final diagnostic = details is Map ? details['diagnostic'] : null;
+      final pendingId = diagnostic is Map
+          ? diagnostic['approvalId']?.toString()
+          : null;
+      if (pendingId != null && pendingId.isNotEmpty) {
+        _approvalIds[key] = pendingId;
+      }
+      rethrow;
+    }
+  }
 
   @override
   Future<IdeLaunchResult> openProject(String path, {String? ideId}) =>
@@ -129,38 +156,41 @@ class CoreIdeRepository implements IdeRepository, SyncedFileRepository {
   Future<SyncedFile> read({
     required String root,
     required String path,
-    String? ifNoneMatch,
     int? limit,
-  }) async => SyncedFile.fromJson(
-    await _core.request(
-      'file.read',
-      params: {
-        'root': root,
-        'path': path,
-        'ifNoneMatch': ?ifNoneMatch,
-        'limit': ?limit,
-      },
-    ),
-  );
+  }) async {
+    try {
+      return SyncedFile.fromJson(
+        await _core.request(
+          'file.read',
+          params: {'root': root, 'path': path, 'limit': ?limit},
+        ),
+      );
+    } on CoreRpcException catch (error) {
+      final details = error.details;
+      if (details is Map && details['code']?.toString() == 'not_found') {
+        throw const SyncedFileMissing();
+      }
+      rethrow;
+    }
+  }
 
   @override
   Future<SyncedWriteResult> write({
     required String root,
     required String path,
     required String content,
-    required String ifMatch,
+    String? ifMatch,
+    bool ifNoneMatch = false,
   }) async {
     try {
       return SyncedWriteResult.fromJson(
-        await _core.request(
-          'file.write',
-          params: {
-            'root': root,
-            'path': path,
-            'content': content,
-            'ifMatch': ifMatch,
-          },
-        ),
+        await _protectedRequest('file.write', {
+          'root': root,
+          'path': path,
+          'content': content,
+          'ifMatch': ?ifMatch,
+          if (ifNoneMatch) 'ifNoneMatch': true,
+        }),
       );
     } on CoreRpcException catch (error) {
       final details = error.details;

@@ -30,6 +30,7 @@ class FileReadResult {
     required this.truncated,
     required this.binary,
     required this.language,
+    this.revision = '',
     this.content,
     this.contentBase64,
   });
@@ -41,6 +42,7 @@ class FileReadResult {
   final bool truncated;
   final bool binary;
   final String language;
+  final String revision;
 
   factory FileReadResult.fromJson(Map<String, dynamic> json) => FileReadResult(
     path: json['path']?.toString() ?? '',
@@ -50,18 +52,26 @@ class FileReadResult {
     truncated: json['truncated'] as bool? ?? false,
     binary: json['binary'] as bool? ?? false,
     language: json['language']?.toString() ?? 'plaintext',
+    revision: json['revision']?.toString() ?? '',
   );
 }
 
 class FileWriteResult {
-  const FileWriteResult({required this.path, required this.size});
+  const FileWriteResult({
+    required this.path,
+    required this.size,
+    this.revision = '',
+  });
   final String path;
   final int size;
+  final String revision;
 
-  factory FileWriteResult.fromJson(Map<String, dynamic> json) => FileWriteResult(
-    path: json['path']?.toString() ?? '',
-    size: (json['size'] as num?)?.toInt() ?? 0,
-  );
+  factory FileWriteResult.fromJson(Map<String, dynamic> json) =>
+      FileWriteResult(
+        path: json['path']?.toString() ?? '',
+        size: (json['size'] as num?)?.toInt() ?? 0,
+        revision: json['revision']?.toString() ?? '',
+      );
 }
 
 class FileWatchHandle {
@@ -69,10 +79,11 @@ class FileWatchHandle {
   final String watchId;
   final String root;
 
-  factory FileWatchHandle.fromJson(Map<String, dynamic> json) => FileWatchHandle(
-    watchId: json['watchId']?.toString() ?? '',
-    root: json['root']?.toString() ?? '',
-  );
+  factory FileWatchHandle.fromJson(Map<String, dynamic> json) =>
+      FileWatchHandle(
+        watchId: json['watchId']?.toString() ?? '',
+        root: json['root']?.toString() ?? '',
+      );
 }
 
 class FileChangeEvent {

@@ -36,6 +36,7 @@ class _IdeWorkspacePanelState extends State<IdeWorkspacePanel> {
   String? _selected;
   StreamSubscription<Map<String, dynamic>>? _fileEvents;
   Timer? _fileRefresh;
+  String? _watchId;
 
   @override
   void initState() {
@@ -48,21 +49,35 @@ class _IdeWorkspacePanelState extends State<IdeWorkspacePanel> {
     );
     unawaited(_ide.load());
     unawaited(_loadFiles());
+    unawaited(_startWatch());
     _fileEvents = widget.events?.listen((event) {
       final envelope =
           (event['event'] as Map?)?.cast<String, dynamic>() ?? event;
       final kind = envelope['kind']?.toString() ?? envelope['type']?.toString();
       if (kind != 'file.changed' && kind != 'file.updated') return;
       _fileRefresh?.cancel();
-      _fileRefresh = Timer(
-        const Duration(milliseconds: 200),
-        () => unawaited(_loadFiles()),
-      );
+      _fileRefresh = Timer(const Duration(milliseconds: 200), () {
+        _children.clear();
+        unawaited(_refreshFiles());
+      });
     });
   }
 
   void _changed() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _startWatch() async {
+    try {
+      final handle = await _files.watch(root: widget.root);
+      if (!mounted) {
+        await _files.unwatch(watchId: handle.watchId);
+        return;
+      }
+      _watchId = handle.watchId;
+    } catch (error) {
+      if (mounted) setState(() => _fileError = error);
+    }
   }
 
   Future<void> _loadFiles() async {
@@ -78,6 +93,20 @@ class _IdeWorkspacePanelState extends State<IdeWorkspacePanel> {
     } finally {
       if (mounted) setState(() => _loadingFiles = false);
     }
+  }
+
+  Future<void> _refreshFiles() async {
+    final expanded = _expanded.toList(growable: false);
+    await _loadFiles();
+    if (!mounted) return;
+    for (final path in expanded) {
+      try {
+        _children[path] = await _files.list(root: widget.root, path: path);
+      } catch (error) {
+        _fileError = error;
+      }
+    }
+    if (mounted) setState(() {});
   }
 
   Future<void> _toggleDirectory(String path) async {
@@ -104,6 +133,10 @@ class _IdeWorkspacePanelState extends State<IdeWorkspacePanel> {
   void dispose() {
     _fileRefresh?.cancel();
     unawaited(_fileEvents?.cancel());
+    final watchId = _watchId;
+    if (watchId != null) {
+      unawaited(_files.unwatch(watchId: watchId));
+    }
     _ide.removeListener(_changed);
     _ide.dispose();
     super.dispose();
@@ -132,6 +165,9 @@ class _IdeWorkspacePanelState extends State<IdeWorkspacePanel> {
                         root: widget.root,
                         path: _selected!,
                         events: widget.events,
+                        onPathRenamed: (path) {
+                          if (mounted) setState(() => _selected = path);
+                        },
                       ),
               ),
             ],
@@ -269,13 +305,14 @@ class _IdeToolbar extends StatelessWidget {
             ),
             if (root.isNotEmpty) ...[
               const Spacer(),
-              TextButton.icon(
-                onPressed: controller.launching
-                    ? null
-                    : () => controller.openTerminal(root),
-                icon: const Icon(Icons.terminal, size: 17),
-                label: const Text('Terminal here'),
-              ),
+              if (controller.supports('openTerminalLocation'))
+                TextButton.icon(
+                  onPressed: controller.launching
+                      ? null
+                      : () => controller.openTerminal(root),
+                  icon: const Icon(Icons.terminal, size: 17),
+                  label: const Text('Terminal here'),
+                ),
               TextButton.icon(
                 onPressed: controller.launching
                     ? null
@@ -316,6 +353,7 @@ class SyncedFileEditor extends StatefulWidget {
     required this.root,
     required this.path,
     this.events,
+    this.onPathRenamed,
     super.key,
   });
   final SyncedFileRepository repository;
@@ -323,6 +361,7 @@ class SyncedFileEditor extends StatefulWidget {
   final String root;
   final String path;
   final Stream<Map<String, dynamic>>? events;
+  final ValueChanged<String>? onPathRenamed;
 
   @override
   State<SyncedFileEditor> createState() => _SyncedFileEditorState();
@@ -341,6 +380,7 @@ class _SyncedFileEditorState extends State<SyncedFileEditor> {
       root: widget.root,
       path: widget.path,
       events: widget.events,
+      onPathRenamed: widget.onPathRenamed,
     )..addListener(_changed);
     unawaited(_sync.load());
   }
@@ -418,21 +458,31 @@ class _SyncedFileEditorState extends State<SyncedFileEditor> {
         ),
         if (_sync.conflict)
           MaterialBanner(
-            content: const Text(
-              'This file changed outside Retcon. Your draft is safe. Choose which version to continue with.',
+            content: Text(
+              _sync.deletedExternally
+                  ? 'This file was removed outside Retcon. Your draft is safe.'
+                  : 'This file changed outside Retcon. Your draft is safe. Choose which version to continue with.',
             ),
             leading: const Icon(Icons.sync_problem),
             actions: [
-              TextButton(
-                key: const Key('use-external-version'),
-                onPressed: _sync.useExternalVersion,
-                child: const Text('Use external version'),
-              ),
-              TextButton(
-                key: const Key('keep-draft-version'),
-                onPressed: _sync.keepDraftOnLatestRevision,
-                child: const Text('Keep my draft'),
-              ),
+              if (_sync.deletedExternally)
+                TextButton(
+                  key: const Key('recreate-deleted-file'),
+                  onPressed: _sync.saving ? null : _sync.recreateDeleted,
+                  child: const Text('Recreate file'),
+                )
+              else ...[
+                TextButton(
+                  key: const Key('use-external-version'),
+                  onPressed: _sync.useExternalVersion,
+                  child: const Text('Use external version'),
+                ),
+                TextButton(
+                  key: const Key('keep-draft-version'),
+                  onPressed: _sync.keepDraftOnLatestRevision,
+                  child: const Text('Keep my draft'),
+                ),
+              ],
             ],
           )
         else if (_sync.externalChangePending)

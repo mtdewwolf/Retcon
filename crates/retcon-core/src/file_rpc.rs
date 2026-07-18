@@ -66,8 +66,8 @@ fn map_error(error: FilesystemError) -> CoreError {
     }
 }
 
-fn root_param(params: &Value) -> Result<PathBuf, CoreError> {
-    params
+fn root_param(state: &CoreState, params: &Value) -> Result<PathBuf, CoreError> {
+    let requested = params
         .get("root")
         .and_then(Value::as_str)
         .map(PathBuf::from)
@@ -78,7 +78,39 @@ fn root_param(params: &Value) -> Result<PathBuf, CoreError> {
                 "The file request is missing a project root.",
                 "missing 'root' parameter",
             )
-        })
+        })?;
+    let root = std::fs::canonicalize(&requested).map_err(|error| {
+        CoreError::new(
+            ErrorCode::NotFound,
+            ErrorSource::Rpc,
+            "The open project folder is unavailable.",
+            format!("canonicalize file RPC root: {error}"),
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(CoreError::new(
+            ErrorCode::InvalidRequest,
+            ErrorSource::Rpc,
+            "The file request root must be an open project or worktree folder.",
+            "file RPC root is not a directory",
+        ));
+    }
+    let root_text = root.to_string_lossy();
+    if state
+        .storage()
+        .database()
+        .projects()
+        .find_by_workspace_path(&root_text)?
+        .is_none()
+    {
+        return Err(CoreError::new(
+            ErrorCode::PermissionDenied,
+            ErrorSource::Rpc,
+            "Open this project in Retcon before accessing its files.",
+            "file RPC root is not owned by an active project or tracked worktree",
+        ));
+    }
+    Ok(root)
 }
 
 fn path_param(params: &Value) -> Result<&str, CoreError> {
@@ -117,7 +149,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
     let service = state.filesystem().service();
     match method.as_str() {
         "file.list" => {
-            let root = match root_param(&params) {
+            let root = match root_param(&state, &params) {
                 Ok(root) => root,
                 Err(error) => return failed(id, error),
             };
@@ -128,7 +160,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             }
         }
         "file.read" => {
-            let root = match root_param(&params) {
+            let root = match root_param(&state, &params) {
                 Ok(root) => root,
                 Err(error) => return failed(id, error),
             };
@@ -149,7 +181,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             }
         }
         "file.write" => {
-            let root = match root_param(&params) {
+            let root = match root_param(&state, &params) {
                 Ok(root) => root,
                 Err(error) => return failed(id, error),
             };
@@ -195,7 +227,7 @@ pub async fn handle(state: CoreState, request: Request) -> Response {
             }
         }
         "file.watch" => {
-            let root = match root_param(&params) {
+            let root = match root_param(&state, &params) {
                 Ok(root) => root,
                 Err(error) => return failed(id, error),
             };
@@ -263,6 +295,9 @@ mod tests {
         let root = temp.path();
         fs::write(root.join("hello.txt"), "hello").unwrap();
         let state = CoreState::new(root).unwrap();
+        crate::projects::open(&state, &root.to_string_lossy())
+            .await
+            .unwrap();
 
         let list = handle(
             state.clone(),
@@ -313,6 +348,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("hello.txt"), "hello").unwrap();
         let state = CoreState::new(temp.path()).unwrap();
+        crate::projects::open(&state, &temp.path().to_string_lossy())
+            .await
+            .unwrap();
         let response = handle(
             state,
             Request {
@@ -340,6 +378,9 @@ mod tests {
         let path = temp.path().join("hello.txt");
         fs::write(&path, "first").unwrap();
         let state = CoreState::new(temp.path()).unwrap();
+        crate::projects::open(&state, &temp.path().to_string_lossy())
+            .await
+            .unwrap();
         let stale = state
             .filesystem()
             .service()
@@ -378,6 +419,9 @@ mod tests {
     async fn file_write_creates_only_with_if_none_match() {
         let temp = tempfile::tempdir().unwrap();
         let state = CoreState::new(temp.path()).unwrap();
+        crate::projects::open(&state, &temp.path().to_string_lossy())
+            .await
+            .unwrap();
         let response = handle(
             state,
             Request {
@@ -397,5 +441,73 @@ mod tests {
             fs::read_to_string(temp.path().join("created.txt")).unwrap(),
             "new"
         );
+    }
+
+    #[tokio::test]
+    async fn file_read_rejects_a_caller_selected_unopened_root() {
+        let data = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("private.txt"), "private").unwrap();
+        let state = CoreState::new(data.path()).unwrap();
+
+        let response = handle(
+            state,
+            Request {
+                id: 1,
+                method: "file.read".into(),
+                params: json!({
+                    "root": outside.path().to_string_lossy(),
+                    "path": "private.txt",
+                }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.error.unwrap()["code"], "permission_denied");
+    }
+
+    #[tokio::test]
+    async fn file_read_accepts_a_legacy_relative_tracked_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        let worktree = temp.path().join("feature");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&worktree).unwrap();
+        fs::write(worktree.join("tracked.txt"), "tracked").unwrap();
+        let state = CoreState::new(&temp.path().join("data")).unwrap();
+        crate::projects::open(&state, &repository.to_string_lossy())
+            .await
+            .unwrap();
+        let location_id = state
+            .storage()
+            .database()
+            .projects()
+            .location_id_by_path(&repository.canonicalize().unwrap().to_string_lossy())
+            .unwrap()
+            .unwrap();
+        state
+            .storage()
+            .database()
+            .git_worktrees()
+            .create(&retcon_storage::NewGitWorktree::new(
+                location_id,
+                "../feature",
+            ))
+            .unwrap();
+
+        let response = handle(
+            state,
+            Request {
+                id: 1,
+                method: "file.read".into(),
+                params: json!({
+                    "root": worktree.to_string_lossy(),
+                    "path": "tracked.txt",
+                }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.result.unwrap()["content"], "tracked");
     }
 }

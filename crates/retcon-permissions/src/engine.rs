@@ -82,6 +82,7 @@ impl ApprovalEngine {
                     technical_message: format!(
                         "permission denied for {method}: matching deny rule"
                     ),
+                    approval_id: None,
                 },
                 audit: Vec::new(),
             };
@@ -99,12 +100,20 @@ impl ApprovalEngine {
             match self.database.approvals().get(id) {
                 Ok(Some(approval))
                     if approval.status == "approved"
-                        && approval_matches(&approval, method, params) =>
+                        && approval_matches(&approval, method, params)
+                        && approval_project_matches(&approval, project_id) =>
                 {
-                    return PermissionCheck {
-                        permission: RpcPermission::Allowed,
-                        audit: Vec::new(),
-                    };
+                    if self
+                        .database
+                        .approvals()
+                        .consume_approved(approval.id)
+                        .unwrap_or(false)
+                    {
+                        return PermissionCheck {
+                            permission: RpcPermission::Allowed,
+                            audit: Vec::new(),
+                        };
+                    }
                 }
                 Ok(Some(_)) | Ok(None) => {}
                 Err(error) => {
@@ -112,6 +121,7 @@ impl ApprovalEngine {
                         permission: RpcPermission::Denied {
                             user_message: format!("Retcon could not verify approval for {method}."),
                             technical_message: error.to_string(),
+                            approval_id: None,
                         },
                         audit: Vec::new(),
                     };
@@ -120,6 +130,22 @@ impl ApprovalEngine {
         }
 
         let fingerprint = request_fingerprint(method, params);
+        if let Ok(Some(approved)) = self
+            .database
+            .approvals()
+            .find_approved_by_fingerprint(&fingerprint)
+            && approval_project_matches(&approved, project_id)
+            && self
+                .database
+                .approvals()
+                .consume_approved(approved.id)
+                .unwrap_or(false)
+        {
+            return PermissionCheck {
+                permission: RpcPermission::Allowed,
+                audit: Vec::new(),
+            };
+        }
         if let Ok(Some(existing)) = self
             .database
             .approvals()
@@ -156,6 +182,7 @@ impl ApprovalEngine {
                             "Retcon blocked {method} because approval could not be recorded."
                         ),
                         technical_message: error.to_string(),
+                        approval_id: None,
                     },
                     audit: Vec::new(),
                 };
@@ -219,13 +246,14 @@ impl ApprovalEngine {
             .get("method")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        let remembered_project_id = project_id.or_else(|| {
-            approval
-                .request
-                .get("projectId")
-                .and_then(Value::as_str)
-                .and_then(|raw| Uuid::parse_str(raw).ok())
-        });
+        let approval_project_id = approval
+            .request
+            .get("projectId")
+            .and_then(Value::as_str)
+            .and_then(|raw| Uuid::parse_str(raw).ok());
+        // A caller may narrow an otherwise-global approval, but it must never redirect a
+        // project-owned request to a different project.
+        let remembered_project_id = approval_project_id.or(project_id);
         let status = match decision {
             ApprovalDecision::Approve => "approved",
             ApprovalDecision::Deny => "denied",
@@ -358,6 +386,7 @@ fn denied_pending(method: &str, approval_id: Uuid) -> RpcPermission {
         technical_message: format!(
             "permission denied for {method}: pending approval {approval_id}"
         ),
+        approval_id: Some(approval_id),
     }
 }
 
@@ -382,6 +411,13 @@ fn approval_request(
 
 fn scrub_rpc_params(method: &str, params: Value) -> Value {
     let mut scrubbed = retcon_secrets::scrub_json(params);
+    if method == "file.write"
+        && let Some(params) = scrubbed.as_object_mut()
+        && let Some(content) = params.get_mut("content")
+    {
+        let bytes = content.as_str().map_or(0, str::len);
+        *content = Value::String(format!("[REDACTED: {bytes} bytes]"));
+    }
     if matches!(
         method,
         "browser.call" | "browser.automation.script" | "browser.automation.action"
@@ -410,6 +446,15 @@ fn approval_matches(approval: &Approval, method: &str, params: &Value) -> bool {
     approval.request.get("method").and_then(Value::as_str) == Some(method)
         && approval.request.get("fingerprint").and_then(Value::as_str)
             == Some(request_fingerprint(method, params).as_str())
+}
+
+fn approval_project_matches(approval: &Approval, project_id: Option<Uuid>) -> bool {
+    approval
+        .request
+        .get("projectId")
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+        == project_id
 }
 
 fn params_without_approval_id(params: &Value) -> Value {
@@ -475,10 +520,24 @@ mod tests {
         assert!(!check.permission.is_allowed());
         assert_eq!(check.audit.len(), 1);
         assert_eq!(check.audit[0].kind, "approval.requested");
+        let approval_id = check.audit[0].payload["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        let repeated = engine.check_rpc("agent.start", &json!({"cwd": "/tmp"}), None);
+        assert!(matches!(
+            repeated.permission,
+            RpcPermission::Denied {
+                approval_id: Some(id),
+                ..
+            } if id == approval_id
+        ));
+        assert!(repeated.audit.is_empty());
     }
 
     #[test]
-    fn approved_grant_allows_retry_with_approval_id() {
+    fn approved_grant_allows_one_exact_retry_after_caller_rebuild() {
         let engine = engine();
         let params = json!({"cwd": "/tmp"});
         let first = engine.check_rpc("agent.start", &params, None);
@@ -496,12 +555,49 @@ mod tests {
                 None,
             )
             .unwrap();
-        let retry = engine.check_rpc(
-            "agent.start",
-            &json!({"cwd": "/tmp", "approvalId": approval_id.to_string()}),
-            None,
-        );
+        // Exact approved fingerprints survive a UI/repository rebuild without requiring the
+        // caller to retain the approval id.
+        let retry = engine.check_rpc("agent.start", &params, None);
         assert!(retry.permission.is_allowed());
+        let consumed = engine.check_rpc("agent.start", &params, None);
+        assert!(!consumed.permission.is_allowed());
+    }
+
+    #[test]
+    fn remembered_approval_keeps_its_original_project_owner() {
+        let engine = engine();
+        let project_a = engine
+            .database
+            .projects()
+            .create(&NewProject::new("A"))
+            .unwrap();
+        let project_b = engine
+            .database
+            .projects()
+            .create(&NewProject::new("B"))
+            .unwrap();
+        let first = engine.check_rpc(
+            "file.write",
+            &json!({"root": "/tmp/a", "path": "a.txt", "content": "a", "ifMatch": "r"}),
+            Some(project_a.id),
+        );
+        let approval_id = first.audit[0].payload["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+
+        engine
+            .decide(
+                approval_id,
+                ApprovalDecision::Approve,
+                RememberScope::Always,
+                Some(project_b.id),
+            )
+            .unwrap();
+
+        assert_eq!(engine.list_rules(project_a.id).unwrap().len(), 1);
+        assert!(engine.list_rules(project_b.id).unwrap().is_empty());
     }
 
     #[test]
@@ -523,6 +619,24 @@ mod tests {
         assert!(!encoded.contains("not-pattern-shaped-but-private"));
         assert!(encoded.contains("PUBLIC_URL"));
         assert!(encoded.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn file_write_approval_never_persists_source_content() {
+        let engine = engine();
+        let check = engine.check_rpc(
+            "file.write",
+            &json!({
+                "root": "/tmp/project",
+                "path": "private.txt",
+                "content": "private source content that is not a credential",
+                "ifMatch": "revision"
+            }),
+            None,
+        );
+        let encoded = check.audit[0].payload.to_string();
+        assert!(!encoded.contains("private source content"));
+        assert!(encoded.contains("[REDACTED: 47 bytes]"));
     }
 
     #[test]

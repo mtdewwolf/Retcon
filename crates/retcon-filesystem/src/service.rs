@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::FilesystemError;
+
+static WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 fn runtime_metrics_enabled() -> bool {
     retcon_runtime_observability::is_enabled()
@@ -251,6 +254,10 @@ impl FileService {
         }
         let root = canonical_root(root)?;
         let file_path = resolve_within_canonical_root(&root, path)?;
+        let path_lock = write_lock(&file_path)?;
+        let _write_guard = path_lock.lock().map_err(|_| {
+            FilesystemError::InvalidRequest("file write lock is unavailable".to_owned())
+        })?;
         if file_path.is_dir() {
             return Err(FilesystemError::InvalidRequest(format!(
                 "path is a directory: {}",
@@ -262,6 +269,7 @@ impl FileService {
             FilesystemError::InvalidRequest("file path has no parent directory".to_owned())
         })?;
         ensure_directories_within_root(&root, parent)?;
+        let parent_identity = fs::canonicalize(parent)?;
         // Re-resolve after directory creation to catch a symlink/junction introduced by a race.
         let file_path = resolve_within_canonical_root(&root, path)?;
 
@@ -282,6 +290,9 @@ impl FileService {
         // This is intentionally the last operation before commit. A stale writer never mutates
         // the destination, and create races are resolved by an atomic hard-link insertion.
         let file_path = resolve_within_canonical_root(&root, path)?;
+        if fs::canonicalize(parent)? != parent_identity {
+            return Err(FilesystemError::OutsideRoot(parent.to_path_buf()));
+        }
         verify_write_condition(&file_path, &condition)?;
         match condition {
             FileWriteCondition::IfMatch(_) => atomic_replace(&temp_path, &file_path)?,
@@ -311,6 +322,20 @@ impl FileService {
         metric.succeed();
         Ok(result)
     }
+}
+
+fn write_lock(path: &Path) -> Result<Arc<Mutex<()>>, FilesystemError> {
+    let locks = WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().map_err(|_| {
+        FilesystemError::InvalidRequest("file write lock registry is unavailable".to_owned())
+    })?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 /// Result of writing a file.
