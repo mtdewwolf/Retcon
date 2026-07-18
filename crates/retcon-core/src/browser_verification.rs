@@ -103,9 +103,11 @@ impl BrowserVerificationRunner for ServiceBrowserVerificationRunner {
 
 fn decode_outcome(
     storage: &Storage,
-    result: retcon_browser::BrowserCallResult,
+    mut result: retcon_browser::BrowserCallResult,
     required_assertions: &HashMap<String, bool>,
 ) -> Result<BrowserVerificationOutcome, String> {
+    let wire = std::mem::take(&mut result.value);
+    result.value = retcon_secrets::scrub_json(wire);
     let mut hashes = HashMap::new();
     let service_entries = result
         .value
@@ -134,7 +136,7 @@ fn decode_outcome(
             mime_type: extracted.mime_type,
             size_bytes: i64::try_from(stored.size)
                 .map_err(|_| "browser verification artifact is too large")?,
-            metadata: extracted.metadata,
+            metadata: retcon_secrets::scrub_json(extracted.metadata),
         });
     }
     let timeline = array(&result.value, "timeline")
@@ -447,7 +449,7 @@ mod tests {
             "timeline":[{"type":"navigate","status":"passed","details":{"url":"http://127.0.0.1:3000"}}],
             "assertions":[{"stepId":"text-1","kind":"assert.text","status":"passed","message":"found","expected":"Ready","actual":"Ready"}],
             "visualComparisons":[{"variant":"desktop","status":"failed","currentPath":current,"diffPath":difference,"diffPixelRatio":0.2,"perceptualDifference":0.1,"thresholds":{"maxDiffPixelRatio":0.01}}],
-            "console":{"entries":[{"type":"error","text":"boom","source":"app.js"}]},
+            "console":{"entries":[{"type":"error","text":"boom token=hunter2","source":"app.js"}]},
             "network":{"entries":[{"method":"GET","url":"http://127.0.0.1:3000/api","status":500,"durationMs":3}]},
             "pageErrors":[],
             "accessibility":[{"variant":"desktop","findings":[{"rule":"color-contrast","severity":"error","selector":"#cta","message":"contrast failed"}]}],
@@ -472,7 +474,7 @@ mod tests {
         };
         let outcome = decode_outcome(&storage, call, &HashMap::new()).unwrap();
         assert_eq!(outcome.timeline[0].kind, "navigate");
-        assert_eq!(outcome.console[0].message, "boom");
+        assert_eq!(outcome.console[0].message, "boom [REDACTED]");
         assert_eq!(outcome.network[0].status_code, Some(500));
         assert_eq!(outcome.accessibility[0].severity, "critical");
         assert_eq!(outcome.visual_comparisons[0].status, "different");
