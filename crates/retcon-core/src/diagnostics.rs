@@ -6,9 +6,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use retcon_diagnostics::{
-    DiagnosticsError, DiagnosticsRecorder, NewLogRecord, NewMetricSample, Sanitizer,
-    SharedDiagnosticsRecorder, validate_log, validate_metric,
+    DiagnosticsError, DiagnosticsRecorder, MetricUnit, NewLogRecord, NewMetricSample, Sanitizer,
+    Severity, SharedDiagnosticsRecorder, validate_log, validate_metric,
 };
+use retcon_runtime_observability::{RuntimeMetric, RuntimeRecorder};
 use retcon_storage::{NewDiagnosticLog, NewPerformanceMetric, Storage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -158,6 +159,35 @@ impl DiagnosticsRecorder for DiagnosticsService {
 
     fn record_metric(&self, metric: NewMetricSample) -> Result<(), DiagnosticsError> {
         self.ingest_metric(metric)
+    }
+}
+
+impl RuntimeRecorder for DiagnosticsService {
+    fn record(&self, metric: RuntimeMetric) {
+        let unit = match metric.unit {
+            retcon_runtime_observability::MetricUnit::Count => MetricUnit::Count,
+            retcon_runtime_observability::MetricUnit::Milliseconds => MetricUnit::Milliseconds,
+        };
+        let tags = json!({
+            "operation": metric.operation,
+            "outcome": metric.outcome,
+        });
+        let _ = self.ingest_metric(NewMetricSample {
+            component: metric.component.into(),
+            name: metric.name.into(),
+            value: metric.value,
+            unit,
+            tags: tags.clone(),
+        });
+        if metric.outcome == "error" {
+            let _ = self.ingest_log(NewLogRecord {
+                severity: Severity::Error,
+                component: metric.component.into(),
+                event: "operation.failed".into(),
+                message: "Retcon runtime operation failed".into(),
+                fields: tags,
+            });
+        }
     }
 }
 

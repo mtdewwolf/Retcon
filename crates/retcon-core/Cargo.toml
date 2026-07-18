@@ -36,6 +36,7 @@ retcon-verification.workspace = true
 retcon-devserver.workspace = true
 retcon-browser.workspace = true
 retcon-diagnostics.workspace = true
+retcon-runtime-observability.workspace = true
 shell-words.workspace = true
 rusqlite = "0.37"
 

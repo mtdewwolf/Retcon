@@ -140,7 +140,7 @@ impl CoreState {
                 serde_json::to_value(&recovery).unwrap_or_default(),
             )?;
         }
-        Ok(Self {
+        let state = Self {
             inner: Arc::new(Inner {
                 started_at: Instant::now(),
                 shutdown,
@@ -161,7 +161,9 @@ impl CoreState {
                 dev_server_runtime,
                 diagnostics,
             }),
-        })
+        };
+        state.configure_runtime_observability();
+        Ok(state)
     }
 
     pub fn uptime(&self) -> Duration {
@@ -221,6 +223,12 @@ impl CoreState {
     }
     pub fn diagnostics_service(&self) -> &Arc<DiagnosticsService> {
         &self.inner.diagnostics
+    }
+
+    pub fn configure_runtime_observability(&self) {
+        let diagnostics = self.inner.diagnostics.clone();
+        let enabled = diagnostics.privacy().telemetry_enabled;
+        retcon_runtime_observability::configure(Some(diagnostics), enabled);
     }
 
     pub async fn cleanup_children(&self) {

@@ -795,6 +795,7 @@ dependencies = [
  "retcon-permissions",
  "retcon-platform",
  "retcon-protocol",
+ "retcon-runtime-observability",
  "retcon-secrets",
  "retcon-storage",
  "retcon-terminal",

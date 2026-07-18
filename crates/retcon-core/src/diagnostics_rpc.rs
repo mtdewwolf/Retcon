@@ -284,7 +284,12 @@ fn update_privacy(state: &CoreState, params: &Value) -> Result<Value, CoreError>
         .get("telemetryEnabled")
         .and_then(Value::as_bool)
         .ok_or_else(|| invalid("telemetryEnabled must be a boolean"))?;
-    Ok(json!({"privacy": state.diagnostics_service().set_privacy(enabled)?}))
+    let privacy = state.diagnostics_service().set_privacy(enabled);
+    if !enabled || privacy.is_ok() {
+        state.configure_runtime_observability();
+    }
+    let privacy = privacy?;
+    Ok(json!({"privacy": privacy}))
 }
 
 async fn create_bundle(state: &CoreState, params: &Value) -> Result<Value, CoreError> {
