@@ -297,6 +297,19 @@
       "permission.rules.delete"
     ],
     "secrets": ["secrets.scan"],
+    "diagnostics": [
+      "diagnostics.snapshot",
+      "diagnostics.logs.list",
+      "diagnostics.logs.ingest",
+      "diagnostics.metrics.query",
+      "diagnostics.metrics.ingest",
+      "diagnostics.privacy.get",
+      "diagnostics.privacy.update",
+      "diagnostics.fields",
+      "diagnostics.supportBundle.create",
+      "diagnostics.data.export",
+      "diagnostics.data.delete"
+    ],
     "storage": [
       "storage.status",
       "storage.recover",

@@ -787,6 +787,7 @@ dependencies = [
  "retcon-browser",
  "retcon-checkpoints",
  "retcon-devserver",
+ "retcon-diagnostics",
  "retcon-filesystem",
  "retcon-git",
  "retcon-permissions",

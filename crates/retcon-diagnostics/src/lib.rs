@@ -300,7 +300,14 @@ fn validate_tags(value: &Value) -> Result<(), DiagnosticsError> {
         || tags.iter().any(|(key, value)| {
             !matches!(
                 key.as_str(),
-                "operation" | "outcome" | "kind" | "framework" | "provider" | "method" | "status"
+                "operation"
+                    | "outcome"
+                    | "kind"
+                    | "framework"
+                    | "provider"
+                    | "method"
+                    | "status"
+                    | "jank"
             ) || matches!(value, Value::Array(_) | Value::Object(_) | Value::Null)
                 || value.as_str().is_some_and(|value| {
                     value.is_empty()

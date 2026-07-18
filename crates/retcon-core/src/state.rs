@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use crate::CoreError;
 use crate::browser_verification::{BrowserVerificationRunner, ServiceBrowserVerificationRunner};
 use crate::dev_servers::{DevServerRuntime, DurableDevServerRuntime};
+use crate::diagnostics::DiagnosticsService;
 use crate::event::EventBus;
 use crate::jobs::JobSupervisor;
 use crate::session_rpc::SessionRegistry;
@@ -46,6 +47,7 @@ struct Inner {
     permissions: ApprovalEngine,
     verification_runner: Arc<dyn VerificationRunner>,
     dev_server_runtime: Arc<dyn DevServerRuntime>,
+    diagnostics: Arc<DiagnosticsService>,
 }
 
 impl CoreState {
@@ -117,6 +119,7 @@ impl CoreState {
             retcon_permissions::dev_bypass_enabled(),
         );
         let events = EventBus::open(storage.database().clone())?;
+        let diagnostics = DiagnosticsService::open(storage.clone())?;
         let dev_server_runtime = dev_server_runtime.unwrap_or_else(|| {
             Arc::new(DurableDevServerRuntime::new(
                 storage.clone(),
@@ -156,6 +159,7 @@ impl CoreState {
                 permissions,
                 verification_runner,
                 dev_server_runtime,
+                diagnostics,
             }),
         })
     }
@@ -215,6 +219,9 @@ impl CoreState {
     pub fn dev_server_runtime(&self) -> &dyn DevServerRuntime {
         self.inner.dev_server_runtime.as_ref()
     }
+    pub fn diagnostics_service(&self) -> &Arc<DiagnosticsService> {
+        &self.inner.diagnostics
+    }
 
     pub async fn cleanup_children(&self) {
         self.inner.terminals.shutdown();
@@ -272,30 +279,11 @@ impl CoreState {
             "durable_dev_servers": true,
             "durable_browser": true,
             "durable_browser_verification": true,
+            "local_diagnostics": true,
         })
     }
 
     pub async fn diagnostics(&self) -> Value {
-        let artifact_bytes = self.inner.storage.artifacts().disk_usage_async().await.ok();
-        let browser_service = self.inner.browser_service.diagnostics().ok();
-        json!({
-            "process_id": std::process::id(),
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "uptime_ms": self.uptime().as_millis(),
-            "version": env!("CARGO_PKG_VERSION"),
-            "storage": {
-                "database": self.inner.storage.database().path(),
-                "artifact_bytes": artifact_bytes,
-                "recovery": self.inner.recovery,
-            },
-            "browser_service": browser_service.as_ref().map(|diagnostics| json!({
-                "service_version": diagnostics.service_version,
-                "protocol_version": diagnostics.protocol_version,
-                "compatible": diagnostics.compatible(),
-                "healthy": diagnostics.healthy,
-                "features": diagnostics.features,
-            })),
-        })
+        crate::diagnostics_rpc::snapshot(self, 20).await
     }
 }
