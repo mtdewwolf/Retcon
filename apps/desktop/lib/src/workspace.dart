@@ -474,15 +474,18 @@ class WorkspaceController extends ChangeNotifier {
     final floating = _layout.floatingPanels
         .where((item) => item.panel.id == panel.id)
         .toList();
+    final closed = [
+      ..._layout.closedPanels.where((item) => item.id != panel.id),
+      panel,
+    ];
     _layout = WorkspaceLayout(
       root: _remove(_layout.root, panel.id),
       floatingPanels: _layout.floatingPanels
           .where((item) => item.panel.id != panel.id)
           .toList(),
-      closedPanels: [
-        ..._layout.closedPanels.where((item) => item.id != panel.id),
-        panel,
-      ],
+      closedPanels: closed.length > 32
+          ? closed.sublist(closed.length - 32)
+          : closed,
     );
     await _save();
     if (floating.any((item) => item.detached)) {

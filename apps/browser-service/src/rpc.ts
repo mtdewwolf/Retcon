@@ -3,7 +3,6 @@
  */
 
 import { type Socket, connect as netConnect } from "node:net";
-import { createInterface } from "node:readline";
 
 import type {
   ClientHello,
@@ -15,6 +14,7 @@ import type {
   ServerHello,
 } from "./generated/protocol-v1.ts";
 import { PROTOCOL_VERSION } from "./generated/protocol-v1.ts";
+import { MAX_FRAME_BYTES, cappedLines } from "./framed.ts";
 import { logger } from "./logging.ts";
 
 const CLIENT_VERSION = "0.1.0";
@@ -52,10 +52,7 @@ class CoreRpcClient implements RpcClient {
 
   static async connect(discovery: Discovery): Promise<CoreRpcClient> {
     const socket = await openTransport(discovery);
-    const lines = createInterface({
-      input: socket,
-      crlfDelay: Number.POSITIVE_INFINITY,
-    });
+    const lines = cappedLines(socket as AsyncIterable<Buffer>, MAX_FRAME_BYTES);
     await writeLine(socket, { auth: discovery.token });
     const hello: ClientHello = {
       kind: "client.hello",
@@ -85,7 +82,12 @@ class CoreRpcClient implements RpcClient {
     const result = new Promise<Record<string, unknown>>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
-    await writeLine(this.socket, frame);
+    try {
+      await writeLine(this.socket, frame);
+    } catch (error) {
+      this.pending.delete(id);
+      throw error;
+    }
     return result;
   }
 
@@ -109,6 +111,9 @@ class CoreRpcClient implements RpcClient {
   private async readLoop(): Promise<void> {
     try {
       for await (const line of this.lines) {
+        if (Buffer.byteLength(line) > MAX_FRAME_BYTES) {
+          throw new Error(`frame exceeds ${MAX_FRAME_BYTES} bytes`);
+        }
         const frame = JSON.parse(line) as RpcResponse | PongFrame | { event: unknown };
         if ("kind" in frame && frame.kind === "pong") continue;
         if ("event" in frame) continue;

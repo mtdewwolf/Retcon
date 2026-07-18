@@ -41,6 +41,7 @@ import { BrowserVerificationRunner } from "./verification.ts";
 
 export const MAX_LOG_ENTRIES = 1_000;
 const MAX_COOKIES = 500;
+const MAX_SESSIONS = 8;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 
 export interface BrowserEvent {
@@ -430,6 +431,9 @@ export class ManagedBrowser {
     const config = this.parseLaunch(params);
     const existing = this.sessions.get(config.sessionId);
     if (existing) return { alreadyRunning: true, ...this.sessionStatus(existing) };
+    if (this.sessions.size >= MAX_SESSIONS) {
+      throw new Error(`at most ${MAX_SESSIONS} browser sessions may be open`);
+    }
     const profilePath =
       config.profileMode === "persistent"
         ? join(this.profileRoot, config.profileName)
@@ -1029,6 +1033,7 @@ export class ManagedBrowser {
       if (path) videoPaths.push(path);
     }
     this.sessions.delete(sessionId);
+    this.recoverable.delete(sessionId);
     this.emit({ type: "browser.closed", payload: { sessionId } });
     return { closed: true, sessionId, videoPaths, audit: session.audit };
   }
