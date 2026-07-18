@@ -1,78 +1,118 @@
 # Optimization TODO list
 
-Full codebase review after the SQLite event-bus migration (`7915613`).
-Priorities: **P0** = correctness / unbounded growth; **P1** = hot-path performance;
-**P2** = medium impact; **P3** = polish / future.
+Full codebase review against Master head `329da09` (schema **v12** candidate /
+Phases 21–27: verification, dev-servers, managed browser, browser verification,
+diagnostics, IDE sync). Priorities: **P0** = correctness / unbounded growth;
+**P1** = hot-path performance / memory bounds; **P2** = medium impact;
+**P3** = polish / future.
 
-Stub crates (`retcon-worktrees`, `retcon-browser`, `retcon-checkpoints`,
-`retcon-filesystem`, `retcon-index`, `retcon-platform`, `retcon-permissions`,
-`retcon-diagnostics`, `retcon-updater`) and empty TypeScript packages have no
-meaningful optimization surface yet.
+Stub crates (`retcon-index`, `retcon-diagnostics`, `retcon-updater`) and empty
+TypeScript packages have little optimization surface.
 
 ---
 
-## Done in this PR
+## Done in prior reviews (still on Master)
 
 - [x] **P0** Cap browser-service console/network buffers with a ring buffer
-  (`apps/browser-service/src/browser.ts`)
 - [x] **P0** Remove timed-out / closed browser RPC entries from `pending`
-  (`crates/retcon-core/src/spikes/browser.rs`)
-- [x] **P0** Cap RPC frame size on read (`crates/retcon-core/src/frame.rs`,
-  `server.rs`, `spikes/browser.rs`)
-- [x] **P0** Periodic SQLite event retention (`crates/retcon-core/src/event.rs`)
-- [x] **P0** Evict finished jobs from memory + DB (`crates/retcon-core/src/jobs.rs`)
-- [x] **P0** Graceful browser-service shutdown before kill (`spikes/browser.rs`)
-- [x] **P0** Bound Git command output (`crates/retcon-git/src/lib.rs`)
-- [x] **P1** Don't hold event-bus mutex across SQLite insert (`event.rs` writer thread)
-- [x] **P1** Batch / coalesce terminal output events (`spikes/terminal.rs`)
-- [x] **P1** Move SQLite work off Tokio worker threads (`database.rs` `read_async`,
-  `artifacts.rs` async helpers)
-- [x] **P1** Add status indexes for recovery queries (migration `0003`)
-- [x] **P1** Enforce log pagination / tail in `browser.logs` (`browser.ts`)
-- [x] **P1** Default screenshot to viewport (`browser.ts`)
-- [x] **P1** Combine Git status into one process (`retcon-git/src/lib.rs`)
-- [x] **P2** Browser proc lock held across stdin writes — writer actor split (`browser.rs`)
-- [x] **P2** Clear stale `BrowserHandle.proc` + drain pending on reader exit (`browser.rs`)
-- [x] **P2** Artifact retention hash indexes (migration `0003`)
-- [x] **P2** Run artifact disk walks in `spawn_blocking` (`artifacts.rs`)
-- [x] **P2** Skip full rehash on duplicate artifact store (`artifacts.rs`)
-- [x] **P2** Binary-search event replay (`event.rs`)
-- [x] **P2** `Arc<EventEnvelope>` to cut clone cost on emit (`event.rs`)
-- [x] **P2** `prepare_cached` for hot statements (`event.rs`, `jobs.rs`)
-- [x] **P2** `PRAGMA quick_check` on normal open; full check for diagnostics (`database.rs`)
-- [x] **P2** `SQLITE_OPEN_NO_MUTEX` when Rust serializes the connection (`database.rs`)
-- [x] **P2** Tune `cache_size` / `mmap_size` / `wal_autocheckpoint` (`database.rs`)
-- [x] **P2** Debounce job persistence; avoid Debug-format enum names (`jobs.rs`)
-- [x] **P2** Don't hold terminal registry lock while killing (`spikes/terminal.rs`)
-- [x] **P2** Cache / async shell detection (`spikes/terminal.rs`)
-- [x] **P2** Cache agent/provider detection (`retcon-agents`)
-- [x] **P2** Await `child.wait()` instead of 250ms poll (`spikes/agent.rs`)
-- [x] **P2** Cache schema version after open (`state.rs`)
-- [x] **P2** Lazy-load event replay pages from DB at startup (`event.rs`)
-- [x] **P2** Pass browser temp profile dir via `launchPersistentContext` (`browser.ts`)
-- [x] **P2** Stdout backpressure on browser-service event emits (`main.ts`)
-- [x] **P2** Spawn `bun` directly (no `cmd /C` shell) on Windows (`spikes/browser.rs`)
-- [x] **P3** Deduplicate console/network stream vs buffer shipping (`browser.ts` — network
-  responses now land in the ring buffer)
-- [x] **P3** Method-aware concurrency for browser-service stdio RPC (`main.ts`)
-- [x] **P3** Cache log level at module load (`logging.ts`)
-- [x] **P3** Website asset generation: single Sharp pipeline + `Promise.all` for icons
-- [x] **P3** Website CLS: explicit image dimensions; defer Tally iframe (`index.astro`)
-- [x] **P3** CI-generate PWA icons referenced by `site.webmanifest` (`package.json` build)
+- [x] **P0** Cap RPC frame size on read (`frame.rs`, `server.rs`, browser spike)
+- [x] **P0** Periodic SQLite event retention
+- [x] **P0** Evict finished jobs from memory + DB
+- [x] **P0** Graceful browser-service shutdown before kill
+- [x] **P0** Bound Git command stdout (`retcon-git`)
+- [x] **P1** Don't hold event-bus mutex across SQLite insert (writer thread)
+- [x] **P1** Batch / coalesce terminal output events
+- [x] **P1** Move SQLite work off Tokio worker threads (`read_async`, artifacts)
+- [x] **P1** Recovery / artifact indexes (migrations `0003`+)
+- [x] **P1** Browser log pagination / viewport screenshots
+- [x] **P1** Combine Git status into one process
+- [x] **P2–P3** Storage pragma tuning, statement cache, UUID-as-BLOB, website CLS
 
 ---
 
-## Completed schema work
+## Done in this review PR
 
-- [x] **P3** UUID-as-BLOB schema migration (`retcon-storage` migration `0004`)
-  - Rebuilds v1-v3 databases transactionally, converts every UUID column to compact
-    16-byte BLOBs, recreates indexes, and updates active repository/core bindings.
+- [x] **P1** Store live terminals as `Arc<LiveTerminal>` + cap in-memory scrollback
+- [x] **P1** Fix browser spike `proc` / `pending` async mutex lock order
+- [x] **P1** Kill Git child on stdout/stderr overflow; cap `git apply` I/O
+- [x] **P1** Cap agent provider stdout/stderr line length
+- [x] **P2** Release Windows PTY mutex before `taskkill`
+- [x] **P3** Unix transport `OwnedReadHalf` / `OwnedWriteHalf` typing
+- [x] **P1** Bound durable event persist queue (`sync_channel`) + `EventBus::flush`
+- [x] **P1** Approval fingerprint + permission-rule indexes (migration `0012`)
+- [x] **P1** Cap desktop transport frame size (`transport.dart`)
+- [x] **P2** Cap closed-panel history (32) in workspace layout
+- [x] **P1** Browser-service bounded NDJSON frame reader (`framed.ts`)
+- [x] **P1** Cap managed browser sessions; drop recoverable on close
+- [x] **P2** Clear browser-service RPC `pending` on write failure
 
 ---
 
-## Suggested order of attack (completed)
+## Open — P1 (do next)
 
-1. Frame-size caps + event retention + job eviction (bounds) ✅
-2. Event writer off async path + terminal coalesce (throughput) ✅
-3. Recovery indexes + Git/browser evidence polish (latency) ✅
-4. Storage pragma / statement-cache tuning (incremental) ✅
+- [ ] **P1** Job-persistence writer actor / `spawn_blocking` for `persist_snapshot`
+  (`crates/retcon-core/src/jobs.rs`) — supervisor updates still write SQLite
+  inline on the async path.
+- [ ] **P1** Run `project.clone` as a supervised job with capped streamed progress
+  (`crates/retcon-core/src/projects.rs`) — foreground `Command::output()` buffers
+  all clone I/O and blocks the RPC.
+- [ ] **P1** Checkpoint / file-write: `spawn_blocking` + max artifact size
+  (`crates/retcon-checkpoints/src/service.rs`, `crates/retcon-core/src/file_rpc.rs`)
+  — full-file `fs::read` / `read_to_end` on async RPC paths.
+- [ ] **P1** Split per-connection RPC reader vs request execution
+  (`crates/retcon-core/src/server.rs`) — long RPCs block cancels and event
+  forwarding (head-of-line blocking).
+- [ ] **P1** Stream / cap staged secret-scan diffs
+  (`crates/retcon-secrets/src/staged.rs`) — `git diff --cached` via `.output()`.
+- [ ] **P1** Conversation UI retention / streaming StringBuffer caps
+  (`apps/desktop/.../conversation_controller.dart`) — unbounded message/tool text.
+- [ ] **P1** Terminal-view UI scrollback ring + virtualization
+  (`packages/retcon-terminal-view`) — unbounded `output += data` + full reparse.
+
+---
+
+## Open — P2
+
+- [ ] **P2** Paginate session / turn / message / checkpoint / task / browser /
+  verification / browser-verification / dev-server list RPCs — many unbounded
+  `.collect()` surfaces added in Phases 21–25.
+- [ ] **P2** SQL-level `project.list` filter + pagination (`projects.rs`)
+- [ ] **P2** Permission-rule in-memory cache invalidated on mutate
+- [ ] **P2** Cap file watches + prune debounce pending map
+  (`retcon-filesystem/src/watch.rs`)
+- [ ] **P2** `spawn_blocking` for filesystem list/read/write; cache git-status
+  badges for `file.list`
+- [ ] **P2** Route repository-heavy RPCs through `Database::read_async`
+- [ ] **P2** Cap `retcon-browser` Node transport in-flight `pending` map
+- [ ] **P2** Debounce desktop browser/dev-server/verification refreshes; pass
+  server-side list limits (`core_*_repository.dart`)
+- [ ] **P2** Diff viewer byte/line caps + virtualized hunk rendering
+- [ ] **P2** IDE / file-explorer directory listing caps + flattened virtualization
+- [ ] **P2** Bound terminal coalesce channel (`mpsc::unbounded_channel` in spike)
+- [ ] **P2** Cap verification manifest discovery + parser location dedupe
+- [ ] **P2** Timeout + bound Claude doctor/version `.output()` checks
+
+---
+
+## Open — P3
+
+- [ ] **P3** BLOB-native fresh schema (skip TEXT→BLOB migration on new DBs)
+- [ ] **P3** Split mega-modules (`repositories.rs`, `task_planning.rs`)
+- [ ] **P3** Floating panel instance IDs + debounce persist-on-drag
+- [ ] **P3** Syntax highlighter avoid `substring` scan allocations
+- [ ] **P3** Cap worktree list APIs; agent capability `HashSet`
+- [ ] **P3** Secrets scan size caps / entropy offset scan
+- [ ] **P3** Platform transport: async `remove_file` / `create_dir_all`
+- [ ] **P3** Task list query shape matching `(project_id, status, priority, updated_at)`
+
+---
+
+## Suggested order of attack
+
+1. Checkpoint/file `spawn_blocking` + size caps (OOM / runtime stalls)
+2. Job writer actor + `project.clone` supervised job (durability / responsiveness)
+3. RPC HOL split (cancel + event delivery under load)
+4. SQL pagination across Phase 21–25 list surfaces
+5. Desktop/UI retention (conversation, terminal-view, diff, file explorer)
+6. Permission cache, file-watch caps, filesystem git-status cache
+7. P3 polish (schema, module splits, virtualization)

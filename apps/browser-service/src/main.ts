@@ -1,15 +1,15 @@
 import { timingSafeEqual } from "node:crypto";
 import { delimiter } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { ManagedBrowser } from "./browser.ts";
+import { MAX_FRAME_BYTES, cappedLines } from "./framed.ts";
 import { logger } from "./logging.ts";
 import { connect } from "./rpc.ts";
 import { StructuredRuntimeRecorder } from "./telemetry.ts";
 
 const VERSION = "0.1.0";
 const MAX_STDOUT_BACKLOG = 64;
-const MAX_REQUEST_BYTES = 1_048_576;
+const MAX_REQUEST_BYTES = MAX_FRAME_BYTES;
 const MAX_ACTIVE_REQUESTS = 64;
 const PROTOCOL_VERSION = 1;
 const FEATURES = [
@@ -94,7 +94,7 @@ export async function serveStdio(
   browser: ManagedBrowser,
   recorder?: StructuredRuntimeRecorder,
 ): Promise<void> {
-  const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
+  const lines = cappedLines(process.stdin as AsyncIterable<Buffer>, MAX_REQUEST_BYTES);
   const active = new Map<number, AbortController>();
   const activeVerifications = new Map<string, AbortController>();
   const pending = new Set<Promise<void>>();

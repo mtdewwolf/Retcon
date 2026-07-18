@@ -16,6 +16,9 @@ fn runtime_metrics_enabled() -> bool {
     retcon_runtime_observability::is_enabled()
 }
 
+/// Reject provider stream-json lines larger than this many bytes.
+const MAX_PROVIDER_LINE_BYTES: usize = 1024 * 1024;
+
 /// Stable identifier for an agent provider.
 pub type ProviderId = String;
 
@@ -901,8 +904,8 @@ impl AgentTurn {
             .ok_or_else(|| "no stderr handle".to_owned())?;
 
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_capped_line(&mut reader).await {
                 tracing::debug!(
                     target: "retcon_agents::stderr",
                     bytes = line.len(),
@@ -912,8 +915,8 @@ impl AgentTurn {
         });
 
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            while let Ok(Some(line)) = read_capped_line(&mut reader).await {
                 on_line(line);
             }
         });
@@ -960,6 +963,55 @@ impl AgentTurn {
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
     }
+}
+
+async fn read_capped_line<R>(reader: &mut BufReader<R>) -> Result<Option<String>, std::io::Error>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = Vec::new();
+    loop {
+        let available = {
+            let filled = reader.fill_buf().await?;
+            if filled.is_empty() {
+                if buffer.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            filled.to_vec()
+        };
+        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+            buffer.extend_from_slice(&available[..=newline]);
+            reader.consume(newline + 1);
+            break;
+        }
+        if buffer.len().saturating_add(available.len()) > MAX_PROVIDER_LINE_BYTES {
+            reader.consume(available.len());
+            loop {
+                let filled = reader.fill_buf().await?;
+                if filled.is_empty() {
+                    break;
+                }
+                if let Some(newline) = filled.iter().position(|byte| *byte == b'\n') {
+                    reader.consume(newline + 1);
+                    break;
+                }
+                let len = filled.len();
+                reader.consume(len);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("provider line exceeded {MAX_PROVIDER_LINE_BYTES} bytes"),
+            ));
+        }
+        buffer.extend_from_slice(&available);
+        reader.consume(available.len());
+    }
+    while buffer.last().is_some_and(|byte| matches!(*byte, b'\n' | b'\r')) {
+        buffer.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
 }
 
 /// Map a Claude Code `stream-json` line to a provider-neutral [`AgentEvent`].

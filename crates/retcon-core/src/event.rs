@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -21,6 +21,9 @@ use retcon_storage::Database;
 const DEFAULT_MAX_EVENTS: usize = 10_000;
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 const PRUNE_EVERY_N_INSERTS: u64 = 100;
+/// Bound durable persistence backlog so emit bursts apply backpressure
+/// instead of unbounded memory growth while the SQLite writer lags.
+const PERSIST_QUEUE_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,16 +72,20 @@ struct EventLog {
     next_sequence: u64,
 }
 
-struct PersistJob {
-    event: Arc<EventEnvelope>,
-    encoded_payload: String,
+enum PersistJob {
+    Event {
+        event: Arc<EventEnvelope>,
+        encoded_payload: String,
+    },
+    /// Barrier that acknowledges after every earlier durable job is written.
+    Flush(SyncSender<()>),
 }
 
 struct EventBusInner {
     log: Mutex<EventLog>,
     sender: broadcast::Sender<Arc<EventEnvelope>>,
     database: Database,
-    persist_tx: Sender<PersistJob>,
+    persist_tx: SyncSender<PersistJob>,
     inserts_since_prune: AtomicU64,
     _writer: JoinHandle<()>,
 }
@@ -123,7 +130,7 @@ impl EventBus {
             )
         })?;
         let (sender, _) = broadcast::channel(1024);
-        let (persist_tx, persist_rx) = mpsc::channel();
+        let (persist_tx, persist_rx) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
         let writer_db = database.clone();
         let writer = thread::Builder::new()
             .name("event-writer".into())
@@ -199,7 +206,7 @@ impl EventBus {
         if durable {
             self.inner
                 .persist_tx
-                .send(PersistJob {
+                .send(PersistJob::Event {
                     event: Arc::clone(&event),
                     encoded_payload: encoded,
                 })
@@ -217,6 +224,17 @@ impl EventBus {
 
         let _ = self.inner.sender.send(event.clone());
         Ok((*event).clone())
+    }
+
+    /// Block until every previously enqueued durable event has been written.
+    pub fn flush(&self) -> Result<(), CoreError> {
+        let (tx, rx) = mpsc::sync_channel(0);
+        self.inner
+            .persist_tx
+            .send(PersistJob::Flush(tx))
+            .map_err(|error| internal_io(error.to_string()))?;
+        rx.recv()
+            .map_err(|error| internal_io(error.to_string()))
     }
 
     pub fn replay(&self, after_sequence: u64, limit: usize) -> Vec<EventEnvelope> {
@@ -269,20 +287,30 @@ fn partition_after(events: &VecDeque<Arc<EventEnvelope>>, after_sequence: u64) -
 
 fn event_writer_loop(rx: mpsc::Receiver<PersistJob>, database: Database) {
     while let Ok(job) = rx.recv() {
-        if let Err(error) = database.read(|db| {
-            let mut statement = db.prepare_cached(
-                "INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-            )?;
-            statement.execute(rusqlite::params![
-                job.event.sequence as i64,
-                job.event.id.as_bytes(),
-                job.event.category.as_str(),
-                job.event.kind,
-                job.encoded_payload,
-                job.event.timestamp.timestamp_millis(),
-            ])
-        }) {
-            tracing::error!(%error, sequence = job.event.sequence, "failed to persist event");
+        match job {
+            PersistJob::Event {
+                event,
+                encoded_payload,
+            } => {
+                if let Err(error) = database.read(|db| {
+                    let mut statement = db.prepare_cached(
+                        "INSERT INTO agent_events (id,event_id,category,kind,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                    )?;
+                    statement.execute(rusqlite::params![
+                        event.sequence as i64,
+                        event.id.as_bytes(),
+                        event.category.as_str(),
+                        event.kind,
+                        encoded_payload,
+                        event.timestamp.timestamp_millis(),
+                    ])
+                }) {
+                    tracing::error!(%error, sequence = event.sequence, "failed to persist event");
+                }
+            }
+            PersistJob::Flush(ack) => {
+                let _ = ack.send(());
+            }
         }
     }
 }
@@ -408,10 +436,11 @@ mod tests {
         let first = bus
             .emit("terminal.output", json!({"text":"hello"}))
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        bus.flush().unwrap();
         drop(bus);
         let reopened = EventBus::open(database).unwrap();
         let second = reopened.emit("system.ready", json!({})).unwrap();
+        reopened.flush().unwrap();
         assert_eq!(first.sequence + 1, second.sequence);
         assert_eq!(reopened.replay(0, 10).len(), 2);
     }
@@ -423,7 +452,7 @@ mod tests {
         for index in 0..200 {
             bus.emit("system.test", json!({ "index": index })).unwrap();
         }
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        bus.flush().unwrap();
         let slice = bus.replay(150, 10);
         assert_eq!(slice.len(), 10);
         assert_eq!(slice[0].sequence, 151);
