@@ -215,7 +215,8 @@ class _ProjectPickerDialogState extends State<ProjectPickerDialog> {
                             for (final project in pinned)
                               _ProjectTile(
                                 project: project,
-                                onOpen: () => _openExisting(project.repositoryPath),
+                                onOpen: () =>
+                                    _openExisting(project.repositoryPath),
                                 onTogglePin: () => _togglePin(project),
                                 onRemove: () => _remove(project),
                               ),
@@ -225,7 +226,8 @@ class _ProjectPickerDialogState extends State<ProjectPickerDialog> {
                             for (final project in recent)
                               _ProjectTile(
                                 project: project,
-                                onOpen: () => _openExisting(project.repositoryPath),
+                                onOpen: () =>
+                                    _openExisting(project.repositoryPath),
                                 onTogglePin: () => _togglePin(project),
                                 onRemove: () => _remove(project),
                               ),
@@ -293,7 +295,9 @@ class _ProjectTile extends StatelessWidget {
           IconButton(
             tooltip: project.pinned ? 'Unpin' : 'Pin',
             onPressed: onTogglePin,
-            icon: Icon(project.pinned ? Icons.push_pin : Icons.push_pin_outlined),
+            icon: Icon(
+              project.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+            ),
           ),
           IconButton(
             tooltip: 'Remove from recent',

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:retcon_diff_viewer/retcon_diff_viewer.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 import 'package:retcon_terminal_view/retcon_terminal_view.dart';
@@ -84,12 +85,18 @@ class TabGroup extends WorkspaceNode {
     'activeIndex': activeIndex,
     'panels': panels.map((panel) => panel.toJson()).toList(),
   };
-  factory TabGroup.fromJson(Map<String, dynamic> json) => TabGroup(
-    activeIndex: (json['activeIndex'] as num?)?.toInt() ?? 0,
-    panels: (json['panels'] as List<dynamic>)
+  factory TabGroup.fromJson(Map<String, dynamic> json) {
+    final panels = (json['panels'] as List<dynamic>)
         .map((item) => PanelDefinition.fromJson(item as Map<String, dynamic>))
-        .toList(),
-  );
+        .toList();
+    if (panels.isEmpty) {
+      throw const FormatException('Workspace tab groups cannot be empty');
+    }
+    return TabGroup(
+      activeIndex: (json['activeIndex'] as num?)?.toInt() ?? 0,
+      panels: panels,
+    );
+  }
 }
 
 enum SplitAxis { horizontal, vertical }
@@ -231,6 +238,19 @@ class FloatingPanel {
   );
 }
 
+/// Placement relative to the tab group containing a target panel.
+enum DockPosition { tab, left, right, top, bottom }
+
+/// Optional native host for detached workspace panels.
+///
+/// The controller remains testable and uses an in-window fallback when no host is
+/// supplied. A platform host can create actual native windows and reconnect them
+/// after layout restore without changing the persisted layout format.
+abstract interface class DetachedWindowHost {
+  Future<void> open(FloatingPanel panel);
+  Future<void> close(String panelId);
+}
+
 abstract interface class WorkspaceStore {
   Future<WorkspaceLayout?> read();
   Future<void> write(WorkspaceLayout layout);
@@ -369,9 +389,11 @@ enum LayoutPreset {
 }
 
 class WorkspaceController extends ChangeNotifier {
-  WorkspaceController({WorkspaceStore? store})
-    : _store = store ?? FileWorkspaceStore();
+  WorkspaceController({WorkspaceStore? store, DetachedWindowHost? detachedHost})
+    : _store = store ?? FileWorkspaceStore(),
+      _detachedHost = detachedHost;
   WorkspaceStore _store;
+  final DetachedWindowHost? _detachedHost;
   String? _boundLayoutId;
   WorkspaceLayout _layout = WorkspaceLayout.initial();
   WorkspaceLayout get layout => _layout;
@@ -395,6 +417,7 @@ class WorkspaceController extends ChangeNotifier {
       _layout = WorkspaceLayout.initial();
     }
     notifyListeners();
+    await _restoreDetachedWindows();
   }
 
   Future<void> reset() async {
@@ -448,12 +471,23 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   Future<void> close(PanelDefinition panel) async {
+    final floating = _layout.floatingPanels
+        .where((item) => item.panel.id == panel.id)
+        .toList();
     _layout = WorkspaceLayout(
       root: _remove(_layout.root, panel.id),
-      floatingPanels: _layout.floatingPanels,
-      closedPanels: [..._layout.closedPanels, panel],
+      floatingPanels: _layout.floatingPanels
+          .where((item) => item.panel.id != panel.id)
+          .toList(),
+      closedPanels: [
+        ..._layout.closedPanels.where((item) => item.id != panel.id),
+        panel,
+      ],
     );
     await _save();
+    if (floating.any((item) => item.detached)) {
+      await _detachedHost?.close(panel.id);
+    }
   }
 
   Future<void> float(
@@ -461,18 +495,37 @@ class WorkspaceController extends ChangeNotifier {
     Size workspace, {
     bool detached = false,
   }) async {
-    final safe = Rect.fromLTWH(48, 48, 360, 260).shift(
-      Offset(workspace.width > 500 ? 80 : 0, workspace.height > 400 ? 40 : 0),
+    final width = (workspace.width - 16).clamp(
+      RetconDimensions.minimumPanelWidth,
+      360.0,
+    );
+    final height = (workspace.height - 16).clamp(
+      RetconDimensions.minimumPanelHeight,
+      260.0,
+    );
+    final safe = Rect.fromLTWH(
+      ((workspace.width - width) / 2).clamp(8, double.infinity),
+      ((workspace.height - height) / 2).clamp(8, double.infinity),
+      width,
+      height,
+    );
+    final floating = FloatingPanel(
+      panel: panel,
+      rect: safe,
+      detached: detached,
     );
     _layout = WorkspaceLayout(
       root: _remove(_layout.root, panel.id),
-      closedPanels: _layout.closedPanels,
+      closedPanels: _layout.closedPanels
+          .where((item) => item.id != panel.id)
+          .toList(),
       floatingPanels: [
-        ..._layout.floatingPanels,
-        FloatingPanel(panel: panel, rect: safe, detached: detached),
+        ..._layout.floatingPanels.where((item) => item.panel.id != panel.id),
+        floating,
       ],
     );
     await _save();
+    if (detached) await _detachedHost?.open(floating);
   }
 
   Future<void> dock(FloatingPanel floating) async {
@@ -484,6 +537,67 @@ class WorkspaceController extends ChangeNotifier {
           .toList(),
     );
     await _save();
+    if (floating.detached) await _detachedHost?.close(floating.panel.id);
+  }
+
+  /// Docks [panel] relative to the group containing [targetPanelId].
+  Future<void> dockPanel(
+    PanelDefinition panel, {
+    required String targetPanelId,
+    DockPosition position = DockPosition.tab,
+  }) async {
+    if (panel.id == targetPanelId ||
+        !_containsPanel(_layout.root, targetPanelId)) {
+      return;
+    }
+    final wasDetached = _layout.floatingPanels.any(
+      (item) => item.panel.id == panel.id && item.detached,
+    );
+    final withoutPanel = _remove(_layout.root, panel.id);
+    _layout = WorkspaceLayout(
+      root: _dockAt(withoutPanel, panel, targetPanelId, position),
+      floatingPanels: _layout.floatingPanels
+          .where((item) => item.panel.id != panel.id)
+          .toList(),
+      closedPanels: _layout.closedPanels
+          .where((item) => item.id != panel.id)
+          .toList(),
+    );
+    await _save();
+    if (wasDetached) await _detachedHost?.close(panel.id);
+  }
+
+  /// Updates the first split whose first branch contains [firstPanelId].
+  Future<void> setSplitFraction(String firstPanelId, double fraction) async {
+    final next = _resizeSplit(
+      _layout.root,
+      firstPanelId,
+      fraction.clamp(.15, .85),
+    );
+    if (identical(next, _layout.root)) return;
+    _layout = WorkspaceLayout(
+      root: next,
+      floatingPanels: _layout.floatingPanels,
+      closedPanels: _layout.closedPanels,
+    );
+    await _save();
+  }
+
+  Future<void> setDetached(FloatingPanel floating, bool detached) async {
+    final changed = floating.copyWith(detached: detached);
+    _layout = WorkspaceLayout(
+      root: _layout.root,
+      closedPanels: _layout.closedPanels,
+      floatingPanels: _layout.floatingPanels
+          .map((item) => item == floating ? changed : item)
+          .toList(),
+    );
+    await _save();
+    if (detached) {
+      await _detachedHost?.open(changed);
+    } else {
+      await _detachedHost?.close(changed.panel.id);
+    }
   }
 
   Future<void> moveFloating(FloatingPanel floating, Offset delta) async {
@@ -502,7 +616,26 @@ class WorkspaceController extends ChangeNotifier {
     if (_layout.floatingPanels.isEmpty) return;
     const margin = 8.0;
     final recovered = _layout.floatingPanels.map((floating) {
-      var rect = floating.rect;
+      final availableWidth = (viewport.width - margin * 2).clamp(
+        RetconDimensions.minimumPanelWidth,
+        double.infinity,
+      );
+      final availableHeight = (viewport.height - margin * 2).clamp(
+        RetconDimensions.minimumPanelHeight,
+        double.infinity,
+      );
+      var rect = Rect.fromLTWH(
+        floating.rect.left,
+        floating.rect.top,
+        floating.rect.width.clamp(
+          RetconDimensions.minimumPanelWidth,
+          availableWidth,
+        ),
+        floating.rect.height.clamp(
+          RetconDimensions.minimumPanelHeight,
+          availableHeight,
+        ),
+      );
       if (rect.right > viewport.width - margin) {
         rect = rect.shift(Offset(viewport.width - margin - rect.right, 0));
       }
@@ -540,6 +673,14 @@ class WorkspaceController extends ChangeNotifier {
       }
     }
     return true;
+  }
+
+  Future<void> _restoreDetachedWindows() async {
+    final host = _detachedHost;
+    if (host == null) return;
+    for (final panel in _layout.floatingPanels.where((item) => item.detached)) {
+      await host.open(panel);
+    }
   }
 
   Future<void> _save() async {
@@ -581,22 +722,103 @@ class WorkspaceController extends ChangeNotifier {
     ),
   };
 
-  WorkspaceNode _remove(WorkspaceNode node, String id) => switch (node) {
-    TabGroup group => () {
-      final panels = group.panels.where((panel) => panel.id != id).toList();
-      if (panels.isEmpty) {
-        return const TabGroup(panels: [PanelDefinition.workspace]);
-      }
-      final activeIndex = group.activeIndex.clamp(0, panels.length - 1);
-      return TabGroup(panels: panels, activeIndex: activeIndex);
-    }(),
+  WorkspaceNode _dockAt(
+    WorkspaceNode node,
+    PanelDefinition panel,
+    String targetId,
+    DockPosition position,
+  ) => switch (node) {
+    TabGroup group when group.panels.any((item) => item.id == targetId) =>
+      switch (position) {
+        DockPosition.tab => TabGroup(
+          panels: [...group.panels.where((item) => item.id != panel.id), panel],
+          activeIndex: group.panels.where((item) => item.id != panel.id).length,
+        ),
+        DockPosition.left => SplitGroup.horizontal(
+          first: TabGroup(panels: [panel]),
+          second: group,
+        ),
+        DockPosition.right => SplitGroup.horizontal(
+          first: group,
+          second: TabGroup(panels: [panel]),
+        ),
+        DockPosition.top => SplitGroup.vertical(
+          first: TabGroup(panels: [panel]),
+          second: group,
+        ),
+        DockPosition.bottom => SplitGroup.vertical(
+          first: group,
+          second: TabGroup(panels: [panel]),
+        ),
+      },
+    TabGroup group => group,
     SplitGroup split => SplitGroup(
       axis: split.axis,
-      first: _remove(split.first, id),
-      second: _remove(split.second, id),
+      first: _dockAt(split.first, panel, targetId, position),
+      second: _dockAt(split.second, panel, targetId, position),
       fraction: split.fraction,
     ),
   };
+
+  WorkspaceNode _resizeSplit(
+    WorkspaceNode node,
+    String firstPanelId,
+    double fraction,
+  ) => switch (node) {
+    TabGroup group => group,
+    SplitGroup split when _containsPanel(split.first, firstPanelId) =>
+      SplitGroup(
+        axis: split.axis,
+        first: split.first,
+        second: split.second,
+        fraction: fraction,
+      ),
+    SplitGroup split => () {
+      final first = _resizeSplit(split.first, firstPanelId, fraction);
+      if (!identical(first, split.first)) {
+        return SplitGroup(
+          axis: split.axis,
+          first: first,
+          second: split.second,
+          fraction: split.fraction,
+        );
+      }
+      final second = _resizeSplit(split.second, firstPanelId, fraction);
+      if (identical(second, split.second)) return split;
+      return SplitGroup(
+        axis: split.axis,
+        first: split.first,
+        second: second,
+        fraction: split.fraction,
+      );
+    }(),
+  };
+
+  WorkspaceNode _remove(WorkspaceNode node, String id) =>
+      _removeOptional(node, id) ??
+      const TabGroup(panels: [PanelDefinition.workspace]);
+
+  WorkspaceNode? _removeOptional(WorkspaceNode node, String id) =>
+      switch (node) {
+        TabGroup group => () {
+          final panels = group.panels.where((panel) => panel.id != id).toList();
+          if (panels.isEmpty) return null;
+          final activeIndex = group.activeIndex.clamp(0, panels.length - 1);
+          return TabGroup(panels: panels, activeIndex: activeIndex);
+        }(),
+        SplitGroup split => () {
+          final first = _removeOptional(split.first, id);
+          final second = _removeOptional(split.second, id);
+          if (first == null) return second;
+          if (second == null) return first;
+          return SplitGroup(
+            axis: split.axis,
+            first: first,
+            second: second,
+            fraction: split.fraction,
+          );
+        }(),
+      };
 }
 
 class DockingWorkspace extends StatefulWidget {
@@ -700,40 +922,138 @@ class _NodeView extends StatelessWidget {
       workingDirectory: workingDirectory,
       projectId: projectId,
     ),
-    SplitGroup split => Flex(
-      direction: split.axis == SplitAxis.horizontal
-          ? Axis.horizontal
-          : Axis.vertical,
-      children: [
-        Expanded(
-          flex: (split.fraction * 100).round(),
-          child: _NodeView(
-            node: split.first,
-            controller: controller,
-            workspaceSize: workspaceSize,
-            core: core,
-            browserRepository: browserRepository,
-            workingDirectory: workingDirectory,
-            projectId: projectId,
-          ),
-        ),
-        const SizedBox(width: RetconSpacing.xs, height: RetconSpacing.xs),
-        Expanded(
-          flex: ((1 - split.fraction) * 100).round(),
-          child: _NodeView(
-            node: split.second,
-            controller: controller,
-            workspaceSize: workspaceSize,
-            core: core,
-            browserRepository: browserRepository,
-            workingDirectory: workingDirectory,
-            projectId: projectId,
-          ),
-        ),
-      ],
+    SplitGroup split => _SplitView(
+      split: split,
+      controller: controller,
+      workspaceSize: workspaceSize,
+      core: core,
+      browserRepository: browserRepository,
+      workingDirectory: workingDirectory,
+      projectId: projectId,
     ),
   };
 }
+
+class _SplitView extends StatelessWidget {
+  const _SplitView({
+    required this.split,
+    required this.controller,
+    required this.workspaceSize,
+    this.core,
+    this.browserRepository,
+    this.workingDirectory,
+    this.projectId,
+  });
+
+  final SplitGroup split;
+  final WorkspaceController controller;
+  final Size workspaceSize;
+  final CoreClient? core;
+  final BrowserRepository? browserRepository;
+  final String? workingDirectory;
+  final String? projectId;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final horizontal = split.axis == SplitAxis.horizontal;
+      final extent = horizontal ? constraints.maxWidth : constraints.maxHeight;
+      final firstPanelId = _firstPanelId(split.first);
+
+      void resize(double delta) {
+        if (!extent.isFinite || extent <= 0) return;
+        unawaited(
+          controller.setSplitFraction(
+            firstPanelId,
+            split.fraction + delta / extent,
+          ),
+        );
+      }
+
+      final divider = Semantics(
+        label: 'Resize workspace split',
+        value: '${(split.fraction * 100).round()} percent',
+        increasedValue:
+            '${((split.fraction + .05).clamp(.15, .85) * 100).round()} percent',
+        decreasedValue:
+            '${((split.fraction - .05).clamp(.15, .85) * 100).round()} percent',
+        onIncrease: () => resize(extent * .05),
+        onDecrease: () => resize(-extent * .05),
+        child: Focus(
+          onKeyEvent: (node, event) {
+            if (event is! KeyDownEvent) return KeyEventResult.ignored;
+            final decrease = horizontal
+                ? event.logicalKey == LogicalKeyboardKey.arrowLeft
+                : event.logicalKey == LogicalKeyboardKey.arrowUp;
+            final increase = horizontal
+                ? event.logicalKey == LogicalKeyboardKey.arrowRight
+                : event.logicalKey == LogicalKeyboardKey.arrowDown;
+            if (decrease) resize(-extent * .05);
+            if (increase) resize(extent * .05);
+            return decrease || increase
+                ? KeyEventResult.handled
+                : KeyEventResult.ignored;
+          },
+          child: Builder(
+            builder: (focusContext) => MouseRegion(
+              cursor: horizontal
+                  ? SystemMouseCursors.resizeColumn
+                  : SystemMouseCursors.resizeRow,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => Focus.of(focusContext).requestFocus(),
+                onPanStart: (_) => Focus.of(focusContext).requestFocus(),
+                onPanUpdate: (details) =>
+                    resize(horizontal ? details.delta.dx : details.delta.dy),
+                child: SizedBox(
+                  width: horizontal ? RetconSpacing.sm : double.infinity,
+                  height: horizontal ? double.infinity : RetconSpacing.sm,
+                  child: const ColoredBox(color: RetconColors.border),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      return Flex(
+        direction: horizontal ? Axis.horizontal : Axis.vertical,
+        children: [
+          Expanded(
+            flex: (split.fraction * 100).round(),
+            child: _NodeView(
+              node: split.first,
+              controller: controller,
+              workspaceSize: workspaceSize,
+              core: core,
+              browserRepository: browserRepository,
+              workingDirectory: workingDirectory,
+              projectId: projectId,
+            ),
+          ),
+          divider,
+          Expanded(
+            flex: ((1 - split.fraction) * 100).round(),
+            child: _NodeView(
+              node: split.second,
+              controller: controller,
+              workspaceSize: workspaceSize,
+              core: core,
+              browserRepository: browserRepository,
+              workingDirectory: workingDirectory,
+              projectId: projectId,
+            ),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+String _firstPanelId(WorkspaceNode node) => switch (node) {
+  TabGroup group => group.panels.first.id,
+  SplitGroup split => _firstPanelId(split.first),
+};
 
 class _TabGroupView extends StatelessWidget {
   const _TabGroupView({
@@ -755,77 +1075,152 @@ class _TabGroupView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final panel = group.active;
-    return RetconPanel(
-      label: panel.title,
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          Container(
-            color: RetconColors.titleBarInactive,
-            height: 34,
-            child: Row(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        for (final item in group.panels)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 2),
-                            child: TextButton.icon(
-                              onPressed: () =>
-                                  unawaited(controller.selectTab(item.id)),
-                              style: TextButton.styleFrom(
-                                foregroundColor: item.id == panel.id
-                                    ? Theme.of(context).colorScheme.primary
-                                    : null,
+    return DragTarget<PanelDefinition>(
+      onWillAcceptWithDetails: (details) => details.data.id != panel.id,
+      onAcceptWithDetails: (details) => unawaited(
+        controller.dockPanel(
+          details.data,
+          targetPanelId: panel.id,
+          position: DockPosition.tab,
+        ),
+      ),
+      builder: (context, candidates, rejected) => RetconPanel(
+        label: panel.title,
+        padding: EdgeInsets.zero,
+        child: Column(
+          children: [
+            Container(
+              color: RetconColors.titleBarInactive,
+              height: 34,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final item in group.panels)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 2),
+                              child: LongPressDraggable<PanelDefinition>(
+                                data: item,
+                                feedback: Material(
+                                  color: RetconColors.surface,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(
+                                      RetconSpacing.sm,
+                                    ),
+                                    child: Text(item.title),
+                                  ),
+                                ),
+                                child: TextButton.icon(
+                                  onPressed: () =>
+                                      unawaited(controller.selectTab(item.id)),
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: item.id == panel.id
+                                        ? Theme.of(context).colorScheme.primary
+                                        : null,
+                                  ),
+                                  icon: Icon(
+                                    _icon(item.icon),
+                                    size: RetconIconSizes.small,
+                                  ),
+                                  label: Text(item.title),
+                                ),
                               ),
-                              icon: Icon(
-                                _icon(item.icon),
-                                size: RetconIconSizes.small,
-                              ),
-                              label: Text(item.title),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                PopupMenuButton<String>(
-                  tooltip: 'Panel actions',
-                  onSelected: (action) {
-                    if (action == 'close') {
-                      unawaited(controller.close(panel));
-                    }
-                    if (action == 'float') {
-                      unawaited(controller.float(panel, workspaceSize));
-                    }
-                    if (action == 'detach') {
-                      unawaited(
-                        controller.float(panel, workspaceSize, detached: true),
+                  PopupMenuButton<String>(
+                    tooltip: 'Panel actions',
+                    onSelected: (action) {
+                      if (action == 'close') {
+                        unawaited(controller.close(panel));
+                      }
+                      if (action == 'float') {
+                        unawaited(controller.float(panel, workspaceSize));
+                      }
+                      if (action == 'detach') {
+                        unawaited(
+                          controller.float(
+                            panel,
+                            workspaceSize,
+                            detached: true,
+                          ),
+                        );
+                      }
+                      final target = group.panels.firstWhere(
+                        (item) => item.id != panel.id,
+                        orElse: () => panel,
                       );
-                    }
-                  },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'float', child: Text('Float panel')),
-                    PopupMenuItem(value: 'detach', child: Text('Detach panel')),
-                    PopupMenuItem(value: 'close', child: Text('Close panel')),
-                  ],
-                ),
-              ],
+                      final position = switch (action) {
+                        'split-left' => DockPosition.left,
+                        'split-right' => DockPosition.right,
+                        'split-top' => DockPosition.top,
+                        'split-bottom' => DockPosition.bottom,
+                        _ => null,
+                      };
+                      if (position != null && target.id != panel.id) {
+                        unawaited(
+                          controller.dockPanel(
+                            panel,
+                            targetPanelId: target.id,
+                            position: position,
+                          ),
+                        );
+                      }
+                    },
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'float',
+                        child: Text('Float panel'),
+                      ),
+                      const PopupMenuItem(
+                        value: 'detach',
+                        child: Text('Detach panel'),
+                      ),
+                      if (group.panels.length > 1) ...const [
+                        PopupMenuDivider(),
+                        PopupMenuItem(
+                          value: 'split-left',
+                          child: Text('Split left'),
+                        ),
+                        PopupMenuItem(
+                          value: 'split-right',
+                          child: Text('Split right'),
+                        ),
+                        PopupMenuItem(
+                          value: 'split-top',
+                          child: Text('Split top'),
+                        ),
+                        PopupMenuItem(
+                          value: 'split-bottom',
+                          child: Text('Split bottom'),
+                        ),
+                      ],
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
+                        value: 'close',
+                        child: Text('Close panel'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-          Expanded(
-            child: _PanelBody(
-              panel: panel,
-              core: core,
-              browserRepository: browserRepository,
-              workingDirectory: workingDirectory,
-              projectId: projectId,
+            Expanded(
+              child: _PanelBody(
+                panel: panel,
+                core: core,
+                browserRepository: browserRepository,
+                workingDirectory: workingDirectory,
+                projectId: projectId,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

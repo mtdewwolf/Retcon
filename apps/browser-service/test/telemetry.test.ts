@@ -112,7 +112,7 @@ describe("content-free runtime telemetry", () => {
 
   test("environment default is disabled without constructing any external sampler", () => {
     const previous = process.env.RETCON_OBSERVABILITY;
-    delete process.env.RETCON_OBSERVABILITY;
+    Reflect.deleteProperty(process.env, "RETCON_OBSERVABILITY");
     try {
       let writes = 0;
       const recorder = new StructuredRuntimeRecorder({ write: () => writes++ });
@@ -125,7 +125,7 @@ describe("content-free runtime telemetry", () => {
       });
       expect(writes).toBe(0);
     } finally {
-      if (previous === undefined) delete process.env.RETCON_OBSERVABILITY;
+      if (previous === undefined) Reflect.deleteProperty(process.env, "RETCON_OBSERVABILITY");
       else process.env.RETCON_OBSERVABILITY = previous;
     }
   });

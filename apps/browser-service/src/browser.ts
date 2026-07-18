@@ -163,7 +163,12 @@ export class ManagedBrowser {
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const params = objectParam(rawParams);
-    const timeout = timeoutParam(params.timeoutMs);
+    // Cold Chromium startup can exceed the normal operation budget on Windows
+    // while antivirus scans a newly installed browser revision. Lifecycle calls
+    // get a bounded 60-second default; callers can still choose 100–120,000 ms.
+    const lifecycleTimeout =
+      method === "browser.launch" || method === "browser.recover" ? 60_000 : undefined;
+    const timeout = timeoutParam(params.timeoutMs ?? lifecycleTimeout);
     const operation = this.dispatch(method, params, signal);
     const telemetryOperation = browserOperation(method);
     const telemetryName =

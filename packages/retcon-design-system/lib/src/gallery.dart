@@ -5,6 +5,7 @@ import 'components/data.dart';
 import 'components/layout.dart';
 import 'components/navigation.dart';
 import 'components/overlays.dart';
+import 'components/retro_desktop.dart';
 import 'components/surfaces.dart';
 import 'theme.dart';
 import 'tokens.dart';
@@ -113,7 +114,10 @@ class _RetconComponentGalleryState extends State<RetconComponentGallery> {
                   icon: Icons.settings,
                   onPressed: () {},
                 ),
-                const RetconBadge(label: 'Connected', status: RetconStatus.success),
+                const RetconBadge(
+                  label: 'Connected',
+                  status: RetconStatus.success,
+                ),
                 const RetconBadge(
                   label: 'Approval needed',
                   status: RetconStatus.warning,
@@ -145,11 +149,13 @@ class _RetconComponentGalleryState extends State<RetconComponentGallery> {
                   RetconCheckbox(
                     label: 'Remember this choice',
                     value: checked,
-                    onChanged: (value) => setState(() => checked = value ?? false),
+                    onChanged: (value) =>
+                        setState(() => checked = value ?? false),
                   ),
                   RetconRadioGroup<String>(
                     groupValue: radio,
-                    onChanged: (value) => setState(() => radio = value ?? radio),
+                    onChanged: (value) =>
+                        setState(() => radio = value ?? radio),
                     children: const [
                       RetconRadioButton(label: 'First provider', value: 'one'),
                       RetconRadioButton(label: 'Second provider', value: 'two'),
@@ -218,11 +224,17 @@ class _RetconComponentGalleryState extends State<RetconComponentGallery> {
                 semanticsLabel: 'Editor split',
                 first: RetconPanel(
                   label: 'Editor',
-                  child: Text('Editor pane', style: Theme.of(context).textTheme.bodyMedium),
+                  child: Text(
+                    'Editor pane',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
                 ),
                 second: RetconPanel(
                   label: 'Terminal',
-                  child: Text('Terminal pane', style: Theme.of(context).textTheme.bodyMedium),
+                  child: Text(
+                    'Terminal pane',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
                 ),
               ),
             ),
@@ -237,7 +249,9 @@ class _RetconComponentGalleryState extends State<RetconComponentGallery> {
                   onPressed: () => showRetconDialog<void>(
                     context: context,
                     title: 'Confirm action',
-                    content: const Text('Run this task with elevated permissions?'),
+                    content: const Text(
+                      'Run this task with elevated permissions?',
+                    ),
                     actions: [
                       RetconButton(
                         label: 'Cancel',
@@ -283,6 +297,66 @@ class _RetconComponentGalleryState extends State<RetconComponentGallery> {
               ),
             ),
             const SizedBox(height: RetconSpacing.xl),
+            _sectionTitle(context, 'Retro desktop'),
+            RetconPanel(
+              label: 'Desktop components',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: RetconSpacing.sm,
+                    runSpacing: RetconSpacing.sm,
+                    children: [
+                      RetconDesktopIcon(
+                        label: 'Retcon',
+                        icon: Icons.smart_toy,
+                        selected: true,
+                        onPressed: () {},
+                      ),
+                      const RetconStatusIndicator(
+                        label: 'Agent running',
+                        state: RetconIndicatorState.active,
+                      ),
+                      const RetconStatusIndicator(
+                        label: 'Provider warning',
+                        state: RetconIndicatorState.warning,
+                      ),
+                      const RetconStatusIndicator(
+                        label: 'Browser failed',
+                        state: RetconIndicatorState.error,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: RetconSpacing.md),
+                  RetconBalloonNotification(
+                    title: 'Approval needed',
+                    message: 'An agent is waiting to run a network command.',
+                    status: RetconStatus.warning,
+                    onDismiss: () {},
+                  ),
+                  const SizedBox(height: RetconSpacing.md),
+                  RetconTaskbar(
+                    child: Row(
+                      children: [
+                        RetconStartButton(onPressed: () {}),
+                        const Spacer(),
+                        const RetconNotificationArea(
+                          children: [
+                            RetconConnectionIndicator(
+                              label: 'Connected',
+                              state: RetconIndicatorState.active,
+                            ),
+                            SizedBox(width: RetconSpacing.sm),
+                            RetconClock(),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: RetconSpacing.xl),
             _sectionTitle(context, 'Accessibility'),
             RetconPanel(
               label: 'Active preferences',
@@ -300,19 +374,25 @@ class _RetconComponentGalleryState extends State<RetconComponentGallery> {
                     runSpacing: RetconSpacing.sm,
                     children: [
                       RetconBadge(
-                        label: highContrast ? 'High contrast on' : 'High contrast off',
+                        label: highContrast
+                            ? 'High contrast on'
+                            : 'High contrast off',
                         status: highContrast
                             ? RetconStatus.success
                             : RetconStatus.neutral,
                       ),
                       RetconBadge(
-                        label: reducedMotion ? 'Reduced motion on' : 'Reduced motion off',
+                        label: reducedMotion
+                            ? 'Reduced motion on'
+                            : 'Reduced motion off',
                         status: reducedMotion
                             ? RetconStatus.success
                             : RetconStatus.neutral,
                       ),
                       RetconBadge(
-                        label: largeTargets ? 'Large targets on' : 'Large targets off',
+                        label: largeTargets
+                            ? 'Large targets on'
+                            : 'Large targets off',
                         status: largeTargets
                             ? RetconStatus.success
                             : RetconStatus.neutral,

@@ -80,7 +80,9 @@ void main() {
   });
 
   group('Conversation widgets', () {
-    testWidgets('message list renders streaming assistant text', (tester) async {
+    testWidgets('message list renders streaming assistant text', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         MaterialApp(
           theme: buildLunaDarkTheme(),
@@ -204,7 +206,10 @@ void main() {
         ),
       );
 
-      expect(find.text('Send a message to start an agent session.'), findsOneWidget);
+      expect(
+        find.text('Send a message to start an agent session.'),
+        findsOneWidget,
+      );
       expect(find.text('Send'), findsOneWidget);
       expect(find.text('Provider'), findsOneWidget);
     });

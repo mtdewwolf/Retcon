@@ -83,21 +83,29 @@ async function authenticatedStdioSmoke(): Promise<void> {
     pending.delete(message.id);
     clearTimeout(waiting.timer);
     if (message.error) {
-      waiting.reject(new Error(`${message.error.code ?? "service_error"}: ${message.error.message ?? "request failed"}`));
+      waiting.reject(
+        new Error(
+          `${message.error.code ?? "service_error"}: ${message.error.message ?? "request failed"}`,
+        ),
+      );
     } else waiting.resolve(message.result ?? {});
   });
-  const call = (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+  const call = (
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> => {
     requestId += 1;
     const id = requestId;
     const response = new Promise<Record<string, unknown>>((resolvePromise, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(
-          new Error(
-            `${method} stdio response timed out; stderr=${serviceStderr.slice(-4_096)}`,
-          ),
-        );
-      }, method === "browser.verification.run" ? 150_000 : 15_000);
+      const timer = setTimeout(
+        () => {
+          pending.delete(id);
+          reject(
+            new Error(`${method} stdio response timed out; stderr=${serviceStderr.slice(-4_096)}`),
+          );
+        },
+        method === "browser.verification.run" ? 150_000 : 15_000,
+      );
       pending.set(id, { resolve: resolvePromise, reject, timer });
     });
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
@@ -225,7 +233,9 @@ try {
     created.timeline.map((event) => event.sequence),
     created.timeline.map((_event, index) => index + 1),
   );
-  assert.ok(created.artifacts.every((artifact) => artifact.bytes <= MAX_VERIFICATION_SCREENSHOT_BYTES));
+  assert.ok(
+    created.artifacts.every((artifact) => artifact.bytes <= MAX_VERIFICATION_SCREENSHOT_BYTES),
+  );
 
   const matching = (await browser.call(
     "browser.verification.run",

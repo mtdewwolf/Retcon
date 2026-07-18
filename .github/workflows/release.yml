@@ -20,7 +20,7 @@ env:
 jobs:
   windows:
     name: Windows release build
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -28,7 +28,7 @@ jobs:
           toolchain: "1.93.0"
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: "3.38.3"
       - name: Build Rust workspace (release)
         run: cargo build --workspace --release
       - name: Build desktop shell (Windows)

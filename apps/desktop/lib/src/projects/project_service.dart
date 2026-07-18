@@ -58,7 +58,10 @@ class CoreProjectService implements ProjectService {
 
   @override
   Future<ProjectHealth> inspect(String path) async {
-    final result = await _core.request('project.inspect', params: {'path': path});
+    final result = await _core.request(
+      'project.inspect',
+      params: {'path': path},
+    );
     return ProjectHealth.fromJson(
       (result['health'] as Map?)?.cast<String, dynamic>() ?? const {},
     );
@@ -78,9 +81,6 @@ class CoreProjectService implements ProjectService {
 
   @override
   Future<void> remove(String projectId) async {
-    await _core.request(
-      'project.remove',
-      params: {'projectId': projectId},
-    );
+    await _core.request('project.remove', params: {'projectId': projectId});
   }
 }

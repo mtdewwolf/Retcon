@@ -164,29 +164,8 @@ class _TerminalPanelState extends State<TerminalPanel> {
                         return AdaptiveTextSelectionToolbar.buttonItems(
                           anchors: editableTextState.contextMenuAnchors,
                           buttonItems: [
-                            ContextMenuButtonItem(
-                              onPressed: () {
-                                ContextMenuController.removeAny();
-                                final selection = editableTextState
-                                    .textEditingValue
-                                    .selection;
-                                final text = editableTextState
-                                    .textEditingValue
-                                    .text;
-                                if (selection.isValid) {
-                                  unawaited(
-                                    Clipboard.setData(
-                                      ClipboardData(
-                                        text: text.substring(
-                                          selection.start,
-                                          selection.end,
-                                        ),
-                                      ),
-                                    ),
-                                  );
-                                }
-                              },
-                              label: 'Copy',
+                            ...editableTextState.contextMenuButtonItems.where(
+                              (item) => item.type == ContextMenuButtonType.copy,
                             ),
                             ContextMenuButtonItem(
                               onPressed: () {

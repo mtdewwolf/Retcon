@@ -65,6 +65,9 @@ class ShellState extends ChangeNotifier {
   String provider = 'Provider offline';
   int approvalCount = 0;
   int errorCount = 0;
+  bool agentActive = false;
+  bool terminalActive = false;
+  bool browserActive = false;
 
   Future<void> refresh() async {
     if (core.status != CoreConnectionStatus.connected) {
@@ -104,6 +107,28 @@ class ShellState extends ChangeNotifier {
         name == 'permission.rule_deleted') {
       unawaited(refresh());
     }
+    switch (name) {
+      case 'session.started':
+      case 'turn.started':
+        agentActive = true;
+      case 'session.completed':
+      case 'session.cancelled':
+      case 'session.failed':
+        agentActive = false;
+      case 'terminal.started':
+        terminalActive = true;
+      case 'terminal.exited':
+      case 'terminal.stopped':
+        terminalActive = false;
+      case 'browser.session.started':
+        browserActive = true;
+      case 'browser.session.stopped':
+      case 'browser.session.crashed':
+        browserActive = false;
+      default:
+        return;
+    }
+    notifyListeners();
   }
 
   static String _providerLabel(Map<String, dynamic> doctor) {
@@ -149,6 +174,14 @@ class _OpenPaletteIntent extends Intent {
 
 class _ToggleFullScreenIntent extends Intent {
   const _ToggleFullScreenIntent();
+}
+
+class _ToggleStartMenuIntent extends Intent {
+  const _ToggleStartMenuIntent();
+}
+
+class _DismissShellOverlayIntent extends Intent {
+  const _DismissShellOverlayIntent();
 }
 
 /// The Phase 7 frameless desktop shell.
@@ -565,18 +598,26 @@ class _DesktopShellState extends State<DesktopShell> {
 
   @override
   Widget build(BuildContext context) {
+    final retcon = RetconTheme.of(context);
     final shell = shellStateOf(context);
     final projectTitle = _projectTitle;
     final branch = _branch;
     final provider = shell?.provider ?? widget.provider;
     final approvalCount = shell?.approvalCount ?? 0;
     final errorCount = shell?.errorCount ?? 0;
+    final agentActive = shell?.agentActive ?? false;
+    final terminalActive = shell?.terminalActive ?? false;
+    final browserActive = shell?.browserActive ?? false;
 
     return Shortcuts(
       shortcuts: const {
         SingleActivator(LogicalKeyboardKey.keyP, control: true, shift: true):
             _OpenPaletteIntent(),
         SingleActivator(LogicalKeyboardKey.f11): _ToggleFullScreenIntent(),
+        SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true):
+            _ToggleStartMenuIntent(),
+        SingleActivator(LogicalKeyboardKey.escape):
+            _DismissShellOverlayIntent(),
       },
       child: Actions(
         actions: {
@@ -592,6 +633,19 @@ class _DesktopShellState extends State<DesktopShell> {
               return null;
             },
           ),
+          _ToggleStartMenuIntent: CallbackAction<_ToggleStartMenuIntent>(
+            onInvoke: (_) {
+              setState(() => _startMenuOpen = !_startMenuOpen);
+              return null;
+            },
+          ),
+          _DismissShellOverlayIntent:
+              CallbackAction<_DismissShellOverlayIntent>(
+                onInvoke: (_) {
+                  if (_startMenuOpen) setState(() => _startMenuOpen = false);
+                  return null;
+                },
+              ),
         },
         child: Focus(
           autofocus: true,
@@ -625,6 +679,9 @@ class _DesktopShellState extends State<DesktopShell> {
                       core: widget.core,
                       approvalCount: approvalCount,
                       errorCount: errorCount,
+                      agentActive: agentActive,
+                      terminalActive: terminalActive,
+                      browserActive: browserActive,
                       startMenuOpen: _startMenuOpen,
                       onStartPressed: () =>
                           setState(() => _startMenuOpen = !_startMenuOpen),
@@ -636,7 +693,9 @@ class _DesktopShellState extends State<DesktopShell> {
                 if (_startMenuOpen)
                   Positioned(
                     left: 0,
-                    bottom: RetconDimensions.taskbarHeight,
+                    bottom: retcon.largeTargets
+                        ? RetconDimensions.accessibleTaskbarHeight
+                        : RetconDimensions.taskbarHeight,
                     child: _StartMenu(onCommand: _run),
                   ),
               ],
@@ -878,6 +937,9 @@ class _Taskbar extends StatelessWidget {
     required this.core,
     required this.approvalCount,
     required this.errorCount,
+    required this.agentActive,
+    required this.terminalActive,
+    required this.browserActive,
     required this.startMenuOpen,
     required this.onStartPressed,
     required this.onApprovalsPressed,
@@ -885,54 +947,77 @@ class _Taskbar extends StatelessWidget {
   final CoreClient? core;
   final int approvalCount;
   final int errorCount;
+  final bool agentActive;
+  final bool terminalActive;
+  final bool browserActive;
   final bool startMenuOpen;
   final VoidCallback onStartPressed;
   final VoidCallback onApprovalsPressed;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) => Container(
-      height: RetconDimensions.taskbarHeight,
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: [RetconColors.titleBarTop, RetconColors.titleBarBottom],
-        ),
-      ),
+    builder: (context, constraints) => RetconTaskbar(
       child: Row(
         children: [
-          Semantics(
-            button: true,
-            expanded: startMenuOpen,
-            child: TextButton.icon(
-              onPressed: onStartPressed,
-              icon: const Icon(Icons.window),
-              label: const Text('start'),
-            ),
-          ),
+          RetconStartButton(expanded: startMenuOpen, onPressed: onStartPressed),
           const VerticalDivider(width: RetconSpacing.sm),
           const RetconBadge(label: 'Workspace'),
-          const Spacer(),
-          if (constraints.maxWidth >= 900) ...[
-            InkWell(
-              onTap: onApprovalsPressed,
-              child: RetconBadge(
-                label: '$approvalCount approvals',
-                status: approvalCount == 0
-                    ? RetconStatus.neutral
-                    : RetconStatus.warning,
-              ),
-            ),
-            const SizedBox(width: RetconSpacing.xs),
-            RetconBadge(
-              label: '$errorCount errors',
-              status: errorCount == 0
-                  ? RetconStatus.success
-                  : RetconStatus.error,
+          if (constraints.maxWidth >= 1400) ...[
+            const SizedBox(width: RetconSpacing.sm),
+            RetconActivityLight(
+              label: 'Agent',
+              state: agentActive
+                  ? RetconIndicatorState.active
+                  : RetconIndicatorState.inactive,
             ),
             const SizedBox(width: RetconSpacing.sm),
+            RetconActivityLight(
+              label: 'Terminal',
+              state: terminalActive
+                  ? RetconIndicatorState.active
+                  : RetconIndicatorState.inactive,
+            ),
+            const SizedBox(width: RetconSpacing.sm),
+            RetconActivityLight(
+              label: 'Browser',
+              state: browserActive
+                  ? RetconIndicatorState.active
+                  : RetconIndicatorState.inactive,
+            ),
           ],
-          _CoreStatus(core: core),
-          const SizedBox(width: RetconSpacing.sm),
+          const Spacer(),
+          RetconNotificationArea(
+            children: [
+              if (constraints.maxWidth >= 900) ...[
+                Semantics(
+                  button: true,
+                  label: 'Open $approvalCount pending approvals',
+                  child: InkWell(
+                    onTap: onApprovalsPressed,
+                    child: RetconBadge(
+                      label: '$approvalCount approvals',
+                      status: approvalCount == 0
+                          ? RetconStatus.neutral
+                          : RetconStatus.warning,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: RetconSpacing.xs),
+                RetconBadge(
+                  label: '$errorCount errors',
+                  status: errorCount == 0
+                      ? RetconStatus.success
+                      : RetconStatus.error,
+                ),
+                const SizedBox(width: RetconSpacing.sm),
+              ],
+              _CoreStatus(core: core),
+              if (constraints.maxWidth >= 760) ...[
+                const SizedBox(width: RetconSpacing.sm),
+                const RetconClock(),
+              ],
+            ],
+          ),
         ],
       ),
     ),
@@ -944,31 +1029,20 @@ class _StartMenu extends StatelessWidget {
   final ValueChanged<ShellCommand> onCommand;
 
   @override
-  Widget build(BuildContext context) => Material(
-    elevation: 12,
-    child: SizedBox(
-      width: 280,
-      child: RetconPanel(
-        label: 'Start menu',
-        padding: const EdgeInsets.all(RetconSpacing.xs),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final command in ShellCommand.values.where(
-              (command) =>
-                  command != ShellCommand.commandPalette &&
-                  command != ShellCommand.fullScreen,
-            ))
-              ListTile(
-                dense: true,
-                leading: Icon(command.icon),
-                title: Text(command.label),
-                onTap: () => onCommand(command),
-              ),
-          ],
+  Widget build(BuildContext context) => RetconStartMenu(
+    children: [
+      for (final command in ShellCommand.values.where(
+        (command) =>
+            command != ShellCommand.commandPalette &&
+            command != ShellCommand.fullScreen,
+      ))
+        ListTile(
+          dense: true,
+          leading: Icon(command.icon),
+          title: Text(command.label),
+          onTap: () => onCommand(command),
         ),
-      ),
-    ),
+    ],
   );
 }
 

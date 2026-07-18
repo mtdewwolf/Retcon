@@ -11,8 +11,8 @@ dependencies:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
-  get_it: ^8.0.3
-  go_router: ^14.8.1
+  get_it: ^9.2.1
+  go_router: ^17.3.0
   logging: ^1.3.0
   provider: ^6.1.2
   retcon_design_system:
@@ -23,7 +23,7 @@ dependencies:
     path: ../../packages/retcon-file-viewer
   retcon_diff_viewer:
     path: ../../packages/retcon-diff-viewer
-  window_manager: ^0.4.3
+  window_manager: ^0.5.2
 
 dev_dependencies:
   flutter_test:

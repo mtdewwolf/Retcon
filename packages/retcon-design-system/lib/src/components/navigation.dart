@@ -72,7 +72,10 @@ class _RetconTreeViewState extends State<RetconTreeView> {
     }
 
     walk(widget.nodes);
-    _focusedIndex = _focusedIndex.clamp(0, _visible.isEmpty ? 0 : _visible.length - 1);
+    _focusedIndex = _focusedIndex.clamp(
+      0,
+      _visible.isEmpty ? 0 : _visible.length - 1,
+    );
   }
 
   void _toggleExpanded(RetconTreeNodeData node) {
@@ -189,8 +192,12 @@ class _RetconTreeViewState extends State<RetconTreeView> {
                     children: [
                       if (node.children.isNotEmpty)
                         RetconIconButton(
-                          label: expanded ? 'Collapse ${node.label}' : 'Expand ${node.label}',
-                          icon: expanded ? Icons.expand_more : Icons.chevron_right,
+                          label: expanded
+                              ? 'Collapse ${node.label}'
+                              : 'Expand ${node.label}',
+                          icon: expanded
+                              ? Icons.expand_more
+                              : Icons.chevron_right,
                           onPressed: () => _toggleExpanded(node),
                         )
                       else
@@ -259,21 +266,23 @@ class RetconTabs extends StatefulWidget {
   State<RetconTabs> createState() => _RetconTabsState();
 }
 
-class _RetconTabsState extends State<RetconTabs> with SingleTickerProviderStateMixin {
+class _RetconTabsState extends State<RetconTabs>
+    with SingleTickerProviderStateMixin {
   late TabController _controller;
 
   @override
   void initState() {
     super.initState();
-    _controller = TabController(
-      length: widget.tabs.length,
-      vsync: this,
-      initialIndex: widget.initialIndex.clamp(0, widget.tabs.length - 1),
-    )..addListener(() {
-        if (!_controller.indexIsChanging) {
-          widget.onChanged?.call(_controller.index);
-        }
-      });
+    _controller =
+        TabController(
+          length: widget.tabs.length,
+          vsync: this,
+          initialIndex: widget.initialIndex.clamp(0, widget.tabs.length - 1),
+        )..addListener(() {
+          if (!_controller.indexIsChanging) {
+            widget.onChanged?.call(_controller.index);
+          }
+        });
   }
 
   @override

@@ -203,5 +203,5 @@ describe("managed Chromium", () => {
       await rm(root, { recursive: true, force: true });
     }
     expect(browser.status().running).toBeFalse();
-  }, 60_000);
+  }, 120_000);
 });

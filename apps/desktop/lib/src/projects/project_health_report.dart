@@ -32,8 +32,7 @@ class ProjectHealthReport extends StatelessWidget {
           ],
           Text('Health checks', style: theme.textTheme.titleSmall),
           const SizedBox(height: RetconSpacing.xs),
-          for (final check in health.checks)
-            _HealthCheckTile(check: check),
+          for (final check in health.checks) _HealthCheckTile(check: check),
         ],
       ),
     );
@@ -64,9 +63,7 @@ class _AnalysisSummary extends StatelessWidget {
     return Wrap(
       spacing: RetconSpacing.xs,
       runSpacing: RetconSpacing.xs,
-      children: [
-        for (final label in chips) RetconBadge(label: label),
-      ],
+      children: [for (final label in chips) RetconBadge(label: label)],
     );
   }
 

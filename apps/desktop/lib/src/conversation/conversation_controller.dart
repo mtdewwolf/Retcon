@@ -7,11 +7,9 @@ import 'conversation_models.dart';
 
 /// Drives the agent conversation panel from core RPC and the event stream.
 class ConversationController extends ChangeNotifier {
-  ConversationController({
-    required CoreClient core,
-    String? workingDirectory,
-  }) : _core = core,
-       _workingDirectory = workingDirectory {
+  ConversationController({required CoreClient core, String? workingDirectory})
+    : _core = core,
+      _workingDirectory = workingDirectory {
     _events = _core.events.listen(_onEvent);
     _core.addListener(_handleCoreStatus);
     unawaited(_loadProviders());
@@ -253,10 +251,7 @@ class ConversationController extends ChangeNotifier {
         notifyListeners();
       case 'session.completed':
       case 'session.cancelled':
-        _finishTurn(
-          cancelled: kind == 'session.cancelled',
-          failed: false,
-        );
+        _finishTurn(cancelled: kind == 'session.cancelled', failed: false);
       case 'session.failed':
         _finishTurn(failed: true, error: payload['detail']?.toString());
       case 'turn.started':
@@ -270,8 +265,7 @@ class ConversationController extends ChangeNotifier {
       case 'agent.event':
         _handleNormalizedAgentEvent(payload);
       default:
-        if (kind.endsWith('.approval_requested') ||
-            kind.contains('approval')) {
+        if (kind.endsWith('.approval_requested') || kind.contains('approval')) {
           _handleApproval(payload);
         }
     }
@@ -282,7 +276,9 @@ class ConversationController extends ChangeNotifier {
     final data = (payload['data'] as Map?)?.cast<String, dynamic>() ?? payload;
     switch (kind) {
       case 'text_delta':
-        _appendAssistantText(data['text']?.toString() ?? data['delta']?.toString() ?? '');
+        _appendAssistantText(
+          data['text']?.toString() ?? data['delta']?.toString() ?? '',
+        );
       case 'tool_requested':
       case 'tool_started':
         _addToolMessage(
@@ -291,7 +287,9 @@ class ConversationController extends ChangeNotifier {
           running: kind == 'tool_started',
         );
       case 'tool_output':
-        _updateLatestToolOutput(data['output']?.toString() ?? data['text']?.toString());
+        _updateLatestToolOutput(
+          data['output']?.toString() ?? data['text']?.toString(),
+        );
       case 'tool_completed':
         _completeLatestTool(data['output']?.toString());
       case 'approval_requested':
@@ -359,7 +357,9 @@ class ConversationController extends ChangeNotifier {
           running: true,
         );
       case 'tool_result':
-        _completeLatestTool(map['output']?.toString() ?? map['content']?.toString());
+        _completeLatestTool(
+          map['output']?.toString() ?? map['content']?.toString(),
+        );
       case 'result':
         final result = map['result']?.toString();
         if (result != null && result.isNotEmpty) {
@@ -415,11 +415,13 @@ class ConversationController extends ChangeNotifier {
   void _handleApproval(Map<String, dynamic> payload) {
     final approval = PendingApproval(
       id: payload['id']?.toString() ?? _nextId('approval'),
-      title: payload['title']?.toString() ??
+      title:
+          payload['title']?.toString() ??
           payload['summary']?.toString() ??
           payload['tool']?.toString() ??
           'Approval required',
-      detail: payload['detail']?.toString() ??
+      detail:
+          payload['detail']?.toString() ??
           payload['description']?.toString() ??
           payload['method']?.toString(),
     );
@@ -500,7 +502,10 @@ class ConversationController extends ChangeNotifier {
     for (var index = _messages.length - 1; index >= 0; index--) {
       final message = _messages[index];
       if (message.role == ConversationMessageRole.tool) {
-        _messages[index] = message.copyWith(toolOutput: output, streaming: true);
+        _messages[index] = message.copyWith(
+          toolOutput: output,
+          streaming: true,
+        );
         notifyListeners();
         return;
       }
@@ -555,13 +560,16 @@ class ConversationController extends ChangeNotifier {
   TokenUsage _parseUsage(Map<String, dynamic> data) {
     final usage = (data['usage'] as Map?)?.cast<String, dynamic>() ?? data;
     return TokenUsage(
-      inputTokens: (usage['input_tokens'] as num?)?.toInt() ??
+      inputTokens:
+          (usage['input_tokens'] as num?)?.toInt() ??
           (usage['inputTokens'] as num?)?.toInt() ??
           0,
-      outputTokens: (usage['output_tokens'] as num?)?.toInt() ??
+      outputTokens:
+          (usage['output_tokens'] as num?)?.toInt() ??
           (usage['outputTokens'] as num?)?.toInt() ??
           0,
-      costUsd: (usage['cost_usd'] as num?)?.toDouble() ??
+      costUsd:
+          (usage['cost_usd'] as num?)?.toDouble() ??
           (usage['costUsd'] as num?)?.toDouble(),
     );
   }

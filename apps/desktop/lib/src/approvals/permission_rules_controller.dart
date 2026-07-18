@@ -51,9 +51,7 @@ class PermissionRuleItem {
 
 String? _eventKind(Map<String, dynamic> event) {
   final nested = event['event'];
-  final envelope = nested is Map
-      ? nested.cast<String, dynamic>()
-      : event;
+  final envelope = nested is Map ? nested.cast<String, dynamic>() : event;
   return envelope['kind']?.toString() ??
       envelope['name']?.toString() ??
       envelope['type']?.toString();
@@ -158,10 +156,7 @@ class PermissionRulesController extends ChangeNotifier {
     _error = null;
     notifyListeners();
     try {
-      await core.request(
-        'permission.rules.delete',
-        params: {'ruleId': ruleId},
-      );
+      await core.request('permission.rules.delete', params: {'ruleId': ruleId});
       await refresh();
     } catch (error) {
       _error = error.toString();

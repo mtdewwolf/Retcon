@@ -11,9 +11,7 @@ void main() {
         if (method == 'task.create') {
           expect(params['title'], 'New roadmap item');
           expect(params['projectId'], projectId);
-          return {
-            'task': _details(status: 'backlog'),
-          };
+          return {'task': _details(status: 'backlog')};
         }
         throw StateError('Unexpected request: $method');
       });

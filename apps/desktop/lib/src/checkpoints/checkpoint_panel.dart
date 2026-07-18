@@ -6,11 +6,7 @@ import 'checkpoint_controller.dart';
 
 /// Checkpoint history with detail, preview, and selective restore.
 class CheckpointPanel extends StatefulWidget {
-  const CheckpointPanel({
-    required this.core,
-    required this.root,
-    super.key,
-  });
+  const CheckpointPanel({required this.core, required this.root, super.key});
 
   final CoreClient core;
   final String root;
@@ -82,9 +78,9 @@ class _CheckpointPanelState extends State<CheckpointPanel> {
     if (report.conflicts.isNotEmpty) {
       message.write(', conflicts ${report.conflicts.length}');
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message.toString())),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message.toString())));
   }
 
   @override
@@ -93,8 +89,7 @@ class _CheckpointPanelState extends State<CheckpointPanel> {
     return AnimatedBuilder(
       animation: Listenable.merge([_controller, widget.core]),
       builder: (context, _) {
-        final connected =
-            widget.core.status == CoreConnectionStatus.connected;
+        final connected = widget.core.status == CoreConnectionStatus.connected;
         return RetconPanel(
           label: 'Checkpoints',
           padding: const EdgeInsets.all(RetconSpacing.md),
@@ -134,8 +129,7 @@ class _CheckpointPanelState extends State<CheckpointPanel> {
                 const Expanded(
                   child: Center(child: CircularProgressIndicator()),
                 )
-              else if (_controller.error != null &&
-                  _controller.items.isEmpty)
+              else if (_controller.error != null && _controller.items.isEmpty)
                 Text(
                   _controller.error!,
                   style: theme.textTheme.bodyMedium?.copyWith(
@@ -155,9 +149,7 @@ class _CheckpointPanelState extends State<CheckpointPanel> {
                     children: [
                       Expanded(
                         flex: 2,
-                        child: _CheckpointList(
-                          controller: _controller,
-                        ),
+                        child: _CheckpointList(controller: _controller),
                       ),
                       const SizedBox(width: RetconSpacing.md),
                       Expanded(
@@ -188,8 +180,7 @@ class _CheckpointList extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView.separated(
       itemCount: controller.items.length,
-      separatorBuilder: (_, _) =>
-          const SizedBox(height: RetconSpacing.xs),
+      separatorBuilder: (_, _) => const SizedBox(height: RetconSpacing.xs),
       itemBuilder: (context, index) {
         final item = controller.items[index];
         final selected = controller.selectedId == item.id;
@@ -307,14 +298,11 @@ class _CheckpointDetailPane extends StatelessWidget {
               child: const Text('Clear'),
             ),
             FilledButton.icon(
-              onPressed:
-                  controller.selectedPaths.isEmpty || controller.mutating
+              onPressed: controller.selectedPaths.isEmpty || controller.mutating
                   ? null
                   : onRestore,
               icon: const Icon(Icons.undo),
-              label: Text(
-                'Restore (${controller.selectedPaths.length})',
-              ),
+              label: Text('Restore (${controller.selectedPaths.length})'),
             ),
           ],
         ),

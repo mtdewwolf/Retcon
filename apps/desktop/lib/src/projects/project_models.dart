@@ -33,14 +33,15 @@ class ProjectMetadata {
     this.testCommand,
   });
 
-  factory ProjectMetadata.fromJson(Map<String, dynamic> json) => ProjectMetadata(
-    name: json['name']?.toString() ?? 'Project',
-    repositoryPath: json['repositoryPath']?.toString() ?? '',
-    remoteUrl: json['remoteUrl']?.toString(),
-    pinned: json['pinned'] == true,
-    preferredProvider: json['preferredProvider']?.toString(),
-    testCommand: json['testCommand']?.toString(),
-  );
+  factory ProjectMetadata.fromJson(Map<String, dynamic> json) =>
+      ProjectMetadata(
+        name: json['name']?.toString() ?? 'Project',
+        repositoryPath: json['repositoryPath']?.toString() ?? '',
+        remoteUrl: json['remoteUrl']?.toString(),
+        pinned: json['pinned'] == true,
+        preferredProvider: json['preferredProvider']?.toString(),
+        testCommand: json['testCommand']?.toString(),
+      );
 
   final String name;
   final String repositoryPath;
@@ -73,7 +74,8 @@ class OpenProjectResult {
         metadata: ProjectMetadata.fromJson(
           (json['metadata'] as Map?)?.cast<String, dynamic>() ?? const {},
         ),
-        analysis: (json['analysis'] as Map?)?.cast<String, dynamic>() ?? const {},
+        analysis:
+            (json['analysis'] as Map?)?.cast<String, dynamic>() ?? const {},
         health: ProjectHealth.fromJson(
           (json['health'] as Map?)?.cast<String, dynamic>() ?? const {},
         ),
@@ -111,11 +113,7 @@ class ProjectHealth {
 }
 
 class HealthCheck {
-  const HealthCheck({
-    required this.name,
-    required this.status,
-    this.detail,
-  });
+  const HealthCheck({required this.name, required this.status, this.detail});
 
   factory HealthCheck.fromJson(Map<String, dynamic> json) => HealthCheck(
     name: json['name']?.toString() ?? 'Check',

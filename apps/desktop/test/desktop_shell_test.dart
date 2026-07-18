@@ -85,6 +85,80 @@ void main() {
     expect(find.text('Approval center'), findsOneWidget);
   });
 
+  testWidgets('Start menu is keyboard reachable and exposes primary commands', (
+    tester,
+  ) async {
+    await setDesktopSize(tester);
+    await tester.pumpWidget(
+      DesktopShellTestApp(
+        shell: DesktopShell(
+          core: testCore(),
+          windowController: FakeWindowController(),
+        ),
+      ),
+    );
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+
+    expect(find.bySemanticsLabel('Start menu'), findsWidgets);
+    for (final command in [
+      'New project',
+      'Open project',
+      'Approval center',
+      'Open terminal',
+      'Open browser',
+      'Task board',
+      'Settings',
+      'Diagnostics',
+      'Exit Retcon',
+    ]) {
+      expect(find.text(command), findsOneWidget);
+    }
+    final startFocusNodes = tester.widgetList<Focus>(
+      find.ancestor(of: find.text('New project'), matching: find.byType(Focus)),
+    );
+    expect(startFocusNodes.any((focus) => focus.autofocus), isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.text('New project'), findsNothing);
+  });
+
+  test(
+    'shell state tracks counters and color-independent activity events',
+    () async {
+      final core = FakeConnectedCoreClient();
+      final state = ShellState(core);
+      addTearDown(state.dispose);
+      addTearDown(core.dispose);
+
+      await state.refresh();
+      expect(state.provider, 'Claude Code 2.1.211 (ready)');
+      expect(state.approvalCount, 2);
+      expect(state.errorCount, 1);
+
+      core.emit('turn.started');
+      core.emit('terminal.started');
+      core.emit('browser.session.started');
+      await Future<void>.delayed(Duration.zero);
+      expect(state.agentActive, isTrue);
+      expect(state.terminalActive, isTrue);
+      expect(state.browserActive, isTrue);
+
+      core.emit('session.completed');
+      core.emit('terminal.exited');
+      core.emit('browser.session.crashed');
+      await Future<void>.delayed(Duration.zero);
+      expect(state.agentActive, isFalse);
+      expect(state.terminalActive, isFalse);
+      expect(state.browserActive, isFalse);
+    },
+  );
+
   testWidgets('task board command opens the Phase 21 board', (tester) async {
     await setDesktopSize(tester);
     await tester.pumpWidget(
@@ -411,14 +485,42 @@ void main() {
     expect(find.byTooltip('Close'), findsOneWidget);
     expect(find.text('start'), findsOneWidget);
   });
+
+  for (final scale in const [1.25, 1.5]) {
+    testWidgets('shell remains usable at ${scale}x display scaling', (
+      tester,
+    ) async {
+      await setDesktopSize(
+        tester,
+        size: const Size(760, 480),
+        devicePixelRatio: scale,
+      );
+      await tester.pumpWidget(
+        DesktopShellTestApp(
+          shell: DesktopShell(
+            core: testCore(),
+            windowController: FakeWindowController(),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(find.text('start'), findsOneWidget);
+    });
+  }
 }
 
 Future<void> setDesktopSize(
   WidgetTester tester, {
   Size size = const Size(1200, 800),
+  double devicePixelRatio = 1,
 }) async {
-  tester.view.devicePixelRatio = 1;
-  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = devicePixelRatio;
+  tester.view.physicalSize = Size(
+    size.width * devicePixelRatio,
+    size.height * devicePixelRatio,
+  );
   addTearDown(tester.view.resetDevicePixelRatio);
   addTearDown(tester.view.resetPhysicalSize);
 }
@@ -464,6 +566,8 @@ class FakeConnectedCoreClient extends CoreClient {
   final _fakeEvents = StreamController<Map<String, dynamic>>.broadcast();
   bool _browserRunning = false;
 
+  void emit(String kind) => _fakeEvents.add({'kind': kind});
+
   @override
   CoreConnectionStatus get status => CoreConnectionStatus.connected;
 
@@ -478,6 +582,20 @@ class FakeConnectedCoreClient extends CoreClient {
   }) async {
     methods.add(method);
     requests.add(_CoreRequest(method, params));
+    if (method == 'provider.doctor') {
+      return const {
+        'provider_name': 'Claude Code',
+        'overall_status': 'ready',
+        'version': '2.1.211',
+        'checks': [
+          {'status': 'failure'},
+          {'status': 'success'},
+        ],
+      };
+    }
+    if (method == 'approval.list') {
+      return const {'pendingCount': 2, 'approvals': []};
+    }
     if (method == 'task.list') {
       return includeTask
           ? const {

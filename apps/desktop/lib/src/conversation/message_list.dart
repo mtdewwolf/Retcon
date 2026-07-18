@@ -5,10 +5,7 @@ import 'conversation_models.dart';
 
 /// Scrollable transcript with streaming text, tool cards, and errors.
 class MessageList extends StatefulWidget {
-  const MessageList({
-    required this.messages,
-    super.key,
-  });
+  const MessageList({required this.messages, super.key});
 
   final List<ConversationMessage> messages;
 
@@ -175,7 +172,10 @@ class _ToolCard extends StatelessWidget {
                 ),
               ),
               if (message.streaming)
-                const RetconBadge(label: 'Running', status: RetconStatus.warning),
+                const RetconBadge(
+                  label: 'Running',
+                  status: RetconStatus.warning,
+                ),
             ],
           ),
           if (message.toolInput != null) ...[

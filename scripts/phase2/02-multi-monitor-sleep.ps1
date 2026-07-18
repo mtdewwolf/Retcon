@@ -30,10 +30,10 @@ $sampleLayout = @{
     version = 1
     root    = @{
         type         = "split"
-        orientation  = "horizontal"
+        axis         = "horizontal"
         fraction     = 0.24
-        first        = @{ type = "tabs"; activeIndex = 0; panels = @(@{ id = "explorer"; title = "Explorer" }) }
-        second       = @{ type = "tabs"; activeIndex = 0; panels = @(@{ id = "workspace"; title = "Workspace" }) }
+        first        = @{ type = "tabs"; activeIndex = 0; panels = @(@{ id = "explorer"; title = "Project explorer"; icon = "folder" }) }
+        second       = @{ type = "tabs"; activeIndex = 0; panels = @(@{ id = "workspace"; title = "Workspace"; icon = "dashboard" }) }
     }
     floatingPanels = @()
     closedPanels   = @()

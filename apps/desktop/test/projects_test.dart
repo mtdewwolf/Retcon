@@ -153,10 +153,8 @@ void main() {
           builder: (context) => Scaffold(
             body: Center(
               child: FilledButton(
-                onPressed: () => ProjectPickerDialog.show(
-                  context,
-                  controller: controller,
-                ),
+                onPressed: () =>
+                    ProjectPickerDialog.show(context, controller: controller),
                 child: const Text('Open picker'),
               ),
             ),

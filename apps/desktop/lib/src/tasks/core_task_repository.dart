@@ -71,10 +71,7 @@ class CoreTaskRepository implements TaskRepository {
     }
     final result = await _rpc.request(
       'task.create',
-      params: {
-        'title': trimmed,
-        'projectId': ?projectId,
-      },
+      params: {'title': trimmed, 'projectId': ?projectId},
     );
     return _decodeTask(_map(result['task']));
   }

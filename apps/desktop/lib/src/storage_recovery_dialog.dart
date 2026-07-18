@@ -118,7 +118,11 @@ class StorageRecoveryDialog extends StatelessWidget {
 
 /// Observes core connection failures and surfaces the recovery dialog when needed.
 class StorageRecoveryGate extends StatefulWidget {
-  const StorageRecoveryGate({super.key, required this.core, required this.child});
+  const StorageRecoveryGate({
+    super.key,
+    required this.core,
+    required this.child,
+  });
 
   final CoreClient core;
   final Widget child;

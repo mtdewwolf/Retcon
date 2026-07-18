@@ -167,6 +167,7 @@ abstract final class RetconDimensions {
   static const double toolbarHeight = 34;
   static const double statusBarHeight = 24;
   static const double taskbarHeight = 36;
+  static const double accessibleTaskbarHeight = 48;
   static const double minimumPanelWidth = 180;
   static const double minimumPanelHeight = 120;
   static const double compactTarget = 32;

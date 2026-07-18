@@ -1084,4 +1084,28 @@ mod doctor_tests {
         assert_eq!(bundle["report"]["provider_id"], "claude-code");
         assert!(bundle["generated_at"].is_string());
     }
+
+    #[tokio::test]
+    #[ignore = "requires authenticated Claude Code; run with RETCON_AGENT_E2E=1"]
+    async fn authenticated_claude_turn_can_be_cancelled() -> Result<(), String> {
+        assert_eq!(std::env::var("RETCON_AGENT_E2E").as_deref(), Ok("1"));
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        let mut turn = super::AgentTurn::start(
+            &cwd,
+            "Use Bash to run powershell -NoProfile -Command Start-Sleep -Seconds 30, then reply RETCON_CANCEL_TOO_LATE. Do not modify files.",
+            |_| {},
+            |_| {},
+        )?;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(
+            turn.try_exit_code().is_none(),
+            "turn exited before cancellation"
+        );
+        turn.cancel().await;
+        let code = tokio::time::timeout(std::time::Duration::from_secs(10), turn.wait())
+            .await
+            .map_err(|_| "cancelled turn did not exit promptly".to_owned())?;
+        assert!(code.is_some(), "cancelled turn should report an exit code");
+        Ok(())
+    }
 }

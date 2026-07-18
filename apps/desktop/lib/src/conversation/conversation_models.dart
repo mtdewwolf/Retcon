@@ -58,11 +58,7 @@ class ConversationMessage {
 
 /// Token and cost counters surfaced in the session header.
 class TokenUsage {
-  const TokenUsage({
-    this.inputTokens = 0,
-    this.outputTokens = 0,
-    this.costUsd,
-  });
+  const TokenUsage({this.inputTokens = 0, this.outputTokens = 0, this.costUsd});
 
   final int inputTokens;
   final int outputTokens;
@@ -79,11 +75,7 @@ class TokenUsage {
 
 /// Approval prompt shown read-only until Wave 4 wiring lands.
 class PendingApproval {
-  const PendingApproval({
-    required this.id,
-    required this.title,
-    this.detail,
-  });
+  const PendingApproval({required this.id, required this.title, this.detail});
 
   final String id;
   final String title;

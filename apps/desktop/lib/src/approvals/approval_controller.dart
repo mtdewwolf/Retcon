@@ -32,7 +32,8 @@ class ApprovalItem {
       id: json['id']?.toString() ?? '',
       sessionId: json['sessionId']?.toString() ?? '',
       status: json['status']?.toString() ?? 'pending',
-      title: request['summary']?.toString() ??
+      title:
+          request['summary']?.toString() ??
           request['title']?.toString() ??
           request['method']?.toString() ??
           'Approval required',

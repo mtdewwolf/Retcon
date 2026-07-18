@@ -43,7 +43,10 @@ class _RetconSplitterState extends State<RetconSplitter> {
     if (total <= 0) return;
     setState(() {
       final firstSize = _ratio * total + delta;
-      final clampedFirst = firstSize.clamp(widget.minFirst, total - widget.minSecond);
+      final clampedFirst = firstSize.clamp(
+        widget.minFirst,
+        total - widget.minSecond,
+      );
       _ratio = (clampedFirst / total).clamp(0.05, 0.95);
     });
   }
@@ -52,11 +55,15 @@ class _RetconSplitterState extends State<RetconSplitter> {
   Widget build(BuildContext context) {
     final retcon = RetconTheme.of(context);
     final isHorizontal = widget.axis == Axis.horizontal;
-    final dividerThickness = retcon.largeTargets ? RetconSpacing.md : RetconSpacing.sm;
+    final dividerThickness = retcon.largeTargets
+        ? RetconSpacing.md
+        : RetconSpacing.sm;
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final total = isHorizontal ? constraints.maxWidth : constraints.maxHeight;
+        final total = isHorizontal
+            ? constraints.maxWidth
+            : constraints.maxHeight;
         final firstSize = total * _ratio;
         final secondSize = total - firstSize - dividerThickness;
 
@@ -72,7 +79,8 @@ class _RetconSplitterState extends State<RetconSplitter> {
                 child: widget.first,
               ),
               Focus(
-                onFocusChange: (focused) => setState(() => _dividerFocused = focused),
+                onFocusChange: (focused) =>
+                    setState(() => _dividerFocused = focused),
                 onKeyEvent: (node, event) {
                   if (event is! KeyDownEvent) return KeyEventResult.ignored;
                   final step = retcon.largeTargets ? 24.0 : 16.0;
@@ -104,7 +112,9 @@ class _RetconSplitterState extends State<RetconSplitter> {
                   child: GestureDetector(
                     behavior: HitTestBehavior.translucent,
                     onPanUpdate: (details) {
-                      final delta = isHorizontal ? details.delta.dx : details.delta.dy;
+                      final delta = isHorizontal
+                          ? details.delta.dx
+                          : details.delta.dy;
                       _adjust(delta, total);
                     },
                     child: AnimatedContainer(

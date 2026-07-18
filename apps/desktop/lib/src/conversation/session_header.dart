@@ -45,8 +45,7 @@ class SessionHeader extends StatelessWidget {
                 label: _stateLabel(state),
                 status: _stateStatus(state),
               ),
-              if (providerLabel != null)
-                RetconBadge(label: providerLabel!),
+              if (providerLabel != null) RetconBadge(label: providerLabel!),
               RetconBadge(label: '${usage.totalTokens} tokens'),
               if (usage.costUsd != null)
                 RetconBadge(label: '\$${usage.costUsd!.toStringAsFixed(4)}'),
@@ -79,10 +78,7 @@ class SessionHeader extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        approval.title,
-                        style: theme.textTheme.titleSmall,
-                      ),
+                      Text(approval.title, style: theme.textTheme.titleSmall),
                       if (approval.detail != null) ...[
                         const SizedBox(height: RetconSpacing.xxs),
                         Text(approval.detail!),

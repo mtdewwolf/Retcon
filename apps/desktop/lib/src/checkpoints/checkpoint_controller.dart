@@ -114,9 +114,7 @@ List<String> _stringList(Object? value) => (value as List<dynamic>? ?? const [])
 
 String? _eventKind(Map<String, dynamic> event) {
   final nested = event['event'];
-  final envelope = nested is Map
-      ? nested.cast<String, dynamic>()
-      : event;
+  final envelope = nested is Map ? nested.cast<String, dynamic>() : event;
   return envelope['kind']?.toString() ??
       envelope['name']?.toString() ??
       envelope['type']?.toString();
@@ -166,11 +164,10 @@ class CheckpointController extends ChangeNotifier {
         'checkpoint.list',
         params: {'root': root, 'limit': 50},
       );
-      final checkpoints =
-          (result['checkpoints'] as List<dynamic>? ?? const [])
-              .cast<Map<String, dynamic>>()
-              .map(CheckpointItem.fromJson)
-              .toList();
+      final checkpoints = (result['checkpoints'] as List<dynamic>? ?? const [])
+          .cast<Map<String, dynamic>>()
+          .map(CheckpointItem.fromJson)
+          .toList();
       _items = checkpoints;
       final selected = selectedId;
       if (selected != null && !_items.any((item) => item.id == selected)) {
@@ -221,11 +218,10 @@ class CheckpointController extends ChangeNotifier {
       );
       final checkpointJson =
           (result['checkpoint'] as Map?)?.cast<String, dynamic>() ?? result;
-      final changes =
-          (result['fileChanges'] as List<dynamic>? ?? const [])
-              .cast<Map<String, dynamic>>()
-              .map(CheckpointFileChange.fromJson)
-              .toList();
+      final changes = (result['fileChanges'] as List<dynamic>? ?? const [])
+          .cast<Map<String, dynamic>>()
+          .map(CheckpointFileChange.fromJson)
+          .toList();
       _detail = CheckpointDetail(
         checkpoint: CheckpointItem.fromJson(checkpointJson),
         fileChanges: changes,
@@ -251,11 +247,10 @@ class CheckpointController extends ChangeNotifier {
         'checkpoint.preview',
         params: {'root': root, 'checkpointId': id},
       );
-      final items =
-          (result['items'] as List<dynamic>? ?? const [])
-              .cast<Map<String, dynamic>>()
-              .map(CheckpointPreviewItem.fromJson)
-              .toList();
+      final items = (result['items'] as List<dynamic>? ?? const [])
+          .cast<Map<String, dynamic>>()
+          .map(CheckpointPreviewItem.fromJson)
+          .toList();
       final current = _detail;
       if (current == null || current.checkpoint.id != id) return;
       _detail = CheckpointDetail(

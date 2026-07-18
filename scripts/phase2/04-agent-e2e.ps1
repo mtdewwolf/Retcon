@@ -51,10 +51,53 @@ if ($env:RETCON_AGENT_E2E -ne "1") {
 
 Write-Host "Running live agent smoke via core spike (requires authenticated Claude Code)..." -ForegroundColor Cyan
 Push-Location $RepoRoot
-$env:RUST_LOG = "retcon_agents=debug"
-cargo test -p retcon-core --lib -- --nocapture 2>&1 | Out-Null
-Pop-Location
+$authOutput = & $claude.Source auth status 2>$null
+try {
+    $auth = ($authOutput -join "`n") | ConvertFrom-Json
+} catch {
+    Pop-Location
+    Write-Host "FAIL (could not parse Claude authentication status)"
+    exit 1
+}
+if (-not $auth.loggedIn) {
+    Pop-Location
+    Write-Host "FAIL (Claude Code is not authenticated)"
+    exit 1
+}
 
-Write-Host "Complete live turn/cancel/resume via Retcon desktop or RPC client; capture session log."
-Write-Host "PASS (CLI present; capture E2E log for final sign-off)"
+Write-Host "Live turn: stream text and one read-only tool event..." -ForegroundColor Cyan
+$prompt = "Use the Bash tool exactly once to run git rev-parse --show-toplevel, then reply with only RETCON_AGENT_E2E_OK. Do not modify files."
+$turnOutput = & $claude.Source -p $prompt --output-format stream-json --verbose --allowedTools Bash 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    Write-Host "FAIL (live Claude turn exited $LASTEXITCODE)"
+    exit 1
+}
+$turnText = $turnOutput -join "`n"
+$sessionMatch = [regex]::Match($turnText, '"session_id":"([A-Za-z0-9-]+)"')
+if (-not $sessionMatch.Success -or $turnText -notmatch '"type":"tool_use"' -or $turnText -notmatch 'RETCON_AGENT_E2E_OK') {
+    Pop-Location
+    Write-Host "FAIL (live turn did not include session, tool, and completion evidence)"
+    exit 1
+}
+$sessionId = $sessionMatch.Groups[1].Value
+
+Write-Host "Native session resume..." -ForegroundColor Cyan
+$resumeOutput = & $claude.Source -p "Reply with only RETCON_AGENT_RESUME_OK." --output-format stream-json --verbose --resume $sessionId 2>&1
+if ($LASTEXITCODE -ne 0 -or ($resumeOutput -join "`n") -notmatch 'RETCON_AGENT_RESUME_OK') {
+    Pop-Location
+    Write-Host "FAIL (native session resume)"
+    exit 1
+}
+
+Write-Host "Adapter cancellation..." -ForegroundColor Cyan
+cargo test -p retcon-agents authenticated_claude_turn_can_be_cancelled -- --ignored --nocapture
+$cancelExit = $LASTEXITCODE
+Pop-Location
+if ($cancelExit -ne 0) {
+    Write-Host "FAIL (adapter cancellation)"
+    exit 1
+}
+
+Write-Host "PASS (authenticated turn + tool event + cancellation + native resume; raw output intentionally not persisted)"
 exit 0

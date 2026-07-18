@@ -23,12 +23,11 @@ class ProjectController extends ChangeNotifier {
   factory ProjectController.fromCore(
     CoreClient core, {
     ProjectOpenedCallback? onProjectOpened,
-  }) =>
-      ProjectController(
-        service: CoreProjectService(core),
-        core: core,
-        onProjectOpened: onProjectOpened,
-      );
+  }) => ProjectController(
+    service: CoreProjectService(core),
+    core: core,
+    onProjectOpened: onProjectOpened,
+  );
 
   final ProjectService _service;
   final ProjectOpenedCallback? onProjectOpened;

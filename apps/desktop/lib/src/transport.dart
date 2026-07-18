@@ -60,11 +60,7 @@ final class UnixProtocolConnection implements ProtocolConnection {
 }
 
 final class PipeProtocolConnection implements ProtocolConnection {
-  PipeProtocolConnection._(
-    this._file,
-    this._controller,
-    this._timer,
-  );
+  PipeProtocolConnection._(this._file, this._controller, this._timer);
 
   final RandomAccessFile _file;
   final StreamController<String> _controller;

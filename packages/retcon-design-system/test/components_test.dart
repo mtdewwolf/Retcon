@@ -205,7 +205,9 @@ void main() {
     expect(find.byType(RetconSplitter), findsOneWidget);
   });
 
-  testWidgets('notification shows icon and live region semantics', (tester) async {
+  testWidgets('notification shows icon and live region semantics', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       MaterialApp(
         theme: buildLunaDarkTheme(),
@@ -235,10 +237,7 @@ void main() {
       MaterialApp(
         theme: buildLunaDarkTheme(reducedMotion: true),
         home: const Scaffold(
-          body: RetconTooltip(
-            message: 'Help text',
-            child: Text('Hover me'),
-          ),
+          body: RetconTooltip(message: 'Help text', child: Text('Hover me')),
         ),
       ),
     );
@@ -253,9 +252,7 @@ void main() {
         theme: buildLunaDarkTheme(),
         home: Scaffold(
           body: RetconContextMenu(
-            items: [
-              RetconMenuItem(label: 'Copy', onSelected: () {}),
-            ],
+            items: [RetconMenuItem(label: 'Copy', onSelected: () {})],
             child: const Text('Target'),
           ),
         ),
@@ -265,6 +262,86 @@ void main() {
     await tester.tap(find.text('Target'), buttons: kSecondaryButton);
     await tester.pumpAndSettle();
     expect(find.text('Copy'), findsOneWidget);
+  });
+
+  testWidgets(
+    'retro taskbar exposes start, notification, and clock semantics',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      var opened = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildLunaDarkTheme(),
+          home: Scaffold(
+            body: RetconTaskbar(
+              child: Row(
+                children: [
+                  RetconStartButton(onPressed: () => opened = true),
+                  const Spacer(),
+                  RetconNotificationArea(
+                    children: [
+                      const RetconConnectionIndicator(
+                        label: 'Core connected',
+                        state: RetconIndicatorState.active,
+                      ),
+                      RetconClock(now: () => DateTime(2026, 7, 17, 14, 5)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.bySemanticsLabel('Application taskbar'), findsOneWidget);
+      expect(find.bySemanticsLabel('start menu'), findsOneWidget);
+      expect(find.bySemanticsLabel('active: Core connected'), findsOneWidget);
+      expect(find.bySemanticsLabel('Local time 2:05 PM'), findsOneWidget);
+      await tester.tap(find.text('start'));
+      expect(opened, isTrue);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('retro desktop states remain explicit in high contrast', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildLunaDarkTheme(highContrast: true, largeTargets: true),
+        home: Scaffold(
+          body: Column(
+            children: [
+              const RetconStatusIndicator(
+                label: 'Provider unavailable',
+                state: RetconIndicatorState.error,
+              ),
+              RetconBalloonNotification(
+                title: 'Agent stopped',
+                message: 'The provider exited unexpectedly.',
+                status: RetconStatus.error,
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      find.bySemanticsLabel('error: Provider unavailable'),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel('Agent stopped. The provider exited unexpectedly.'),
+      findsOneWidget,
+    );
+    final dismiss = tester.getSize(find.byTooltip('Dismiss Agent stopped'));
+    expect(dismiss.width, greaterThanOrEqualTo(44));
+    expect(dismiss.height, greaterThanOrEqualTo(44));
+    semantics.dispose();
   });
 
   testWidgets('gallery composes all component types', (tester) async {
@@ -288,7 +365,11 @@ void main() {
     expect(find.byType(RetconSplitter), findsOneWidget);
     expect(find.byType(RetconContextMenu), findsOneWidget);
     expect(find.byType(RetconDropdown<String>), findsOneWidget);
+    expect(find.byType(RetconTaskbar), findsOneWidget);
+    expect(find.byType(RetconDesktopIcon), findsOneWidget);
+    expect(find.byType(RetconBalloonNotification), findsOneWidget);
     expect(find.text('Core controls'), findsOneWidget);
+    expect(find.text('Retro desktop'), findsOneWidget);
     expect(find.text('Accessibility'), findsOneWidget);
   });
 
@@ -321,9 +402,7 @@ void main() {
         home: Scaffold(
           body: RetconMenu(
             label: 'File',
-            items: [
-              RetconMenuItem(label: 'Open', onSelected: () {}),
-            ],
+            items: [RetconMenuItem(label: 'Open', onSelected: () {})],
           ),
         ),
       ),

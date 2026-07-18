@@ -7,6 +7,7 @@ export 'src/components/data.dart';
 export 'src/components/layout.dart';
 export 'src/components/navigation.dart';
 export 'src/components/overlays.dart';
+export 'src/components/retro_desktop.dart';
 export 'src/components/surfaces.dart';
 export 'src/gallery.dart';
 export 'src/theme.dart';

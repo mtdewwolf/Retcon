@@ -37,12 +37,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "E2E: navigate, screenshot, console/network, action, close..." -ForegroundColor Cyan
-$env:RETCON_BROWSER_E2E = "1"
-bun test test/browser.test.ts
+# Playwright's Windows pipe transport is run under Node. Bun remains the service
+# package manager and unit-test runner; direct Playwright launches under Bun can
+# hang after the browser process starts without completing the pipe handshake.
+bun run test:e2e
 $e2eExit = $LASTEXITCODE
 
 Write-Host "Launch proof script..." -ForegroundColor Cyan
-bun run scripts/verify-browser.ts
+bun run browser:verify
 $verifyExit = $LASTEXITCODE
 Pop-Location
 

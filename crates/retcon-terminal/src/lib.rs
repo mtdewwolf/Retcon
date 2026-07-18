@@ -238,10 +238,14 @@ mod tests {
         })
         .unwrap();
         session.resize(120, 40).unwrap();
+        // ConPTY may not accept input until the shell has attached to its
+        // pseudoconsole. A short readiness window avoids dropping the first
+        // command on slower interactive Windows hosts.
+        std::thread::sleep(Duration::from_millis(500));
         session
-            .write("Write-Output 'RETCON_UNICODE_✓'\r\n".as_bytes())
+            .write("Write-Output 'RETCON_UNICODE_✓'\r".as_bytes())
             .unwrap();
-        let output_deadline = Instant::now() + Duration::from_secs(5);
+        let output_deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let seen = output
                 .lock()

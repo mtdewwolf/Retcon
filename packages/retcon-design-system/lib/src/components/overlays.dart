@@ -93,7 +93,10 @@ class RetconDialog extends StatelessWidget {
               children: [
                 Semantics(
                   header: true,
-                  child: Text(title, style: Theme.of(context).textTheme.titleMedium),
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ),
                 const SizedBox(height: RetconSpacing.md),
                 Flexible(child: SingleChildScrollView(child: content)),
@@ -180,10 +183,7 @@ class RetconDropdown<T> extends StatelessWidget {
           hint: hint == null ? null : Text(hint!),
           items: [
             for (final item in items)
-              DropdownMenuItem<T>(
-                value: item.value,
-                child: Text(item.label),
-              ),
+              DropdownMenuItem<T>(value: item.value, child: Text(item.label)),
           ],
           onChanged: enabled ? onChanged : null,
         ),
@@ -360,18 +360,28 @@ class RetconNotification {
   }) {
     final retcon = RetconTheme.of(context);
     final (icon, color) = switch (level) {
-      RetconNotificationLevel.success => (Icons.check_circle, retcon.successColor),
-      RetconNotificationLevel.warning => (Icons.warning_amber, retcon.warningColor),
+      RetconNotificationLevel.success => (
+        Icons.check_circle,
+        retcon.successColor,
+      ),
+      RetconNotificationLevel.warning => (
+        Icons.warning_amber,
+        retcon.warningColor,
+      ),
       RetconNotificationLevel.error => (
         Icons.error,
         Theme.of(context).colorScheme.error,
       ),
-      RetconNotificationLevel.info => (Icons.info_outline, retcon.mutedTextColor),
+      RetconNotificationLevel.info => (
+        Icons.info_outline,
+        retcon.mutedTextColor,
+      ),
     };
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        duration: duration ??
+        duration:
+            duration ??
             (retcon.reducedMotion
                 ? const Duration(seconds: 8)
                 : const Duration(seconds: 4)),
@@ -396,10 +406,7 @@ class RetconNotification {
         ),
         action: actionLabel == null
             ? null
-            : SnackBarAction(
-                label: actionLabel,
-                onPressed: onAction ?? () {},
-              ),
+            : SnackBarAction(label: actionLabel, onPressed: onAction ?? () {}),
       ),
     );
   }

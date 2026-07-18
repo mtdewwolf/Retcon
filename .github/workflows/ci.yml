@@ -12,129 +12,103 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  NODE_VERSION: "22.23.0"
+  FLUTTER_VERSION: "3.38.3"
+  BUN_VERSION: "1.3.10"
+  RUST_VERSION: "1.93.0"
 
 jobs:
-  jobs:
+  protocol:
     name: Protocol (schema + fixtures)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - name: Validate schema and fixtures
-        run: node scripts/protocol/validate.mjs
-      - name: Verify generated clients are fresh
-        run: |
-          node scripts/protocol/generate-typescript.mjs
-          node scripts/protocol/generate-dart.mjs
-          git diff --exit-code apps/browser-service/src/generated apps/desktop/lib/src/generated
+          node-version: ${{ env.NODE_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93.0"
-      - name: Protocol fixture tests
-        run: cargo test -p retcon-protocol
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Run canonical protocol and metadata verification
+        run: node scripts/verify.mjs --suite protocol
 
   rust:
     name: Rust (fmt, clippy, test)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.93.0"
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Tests
-        run: cargo test --workspace
-
-  flutter:
-    name: Flutter (analyze, test)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - name: Design system — analyze & test
-        working-directory: packages/retcon-design-system
-        run: |
-          flutter pub get
-          flutter analyze
-          flutter test
-      - name: Desktop app — analyze & test
-        working-directory: apps/desktop
-        run: |
-          flutter pub get
-          flutter analyze
-          flutter test
-
-  browser-service:
-    name: Browser service (lint, typecheck, test)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/browser-service
-    env:
-      RETCON_BROWSER_E2E: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install
-        run: bun install --frozen-lockfile
-      - name: Install managed Chromium
-        run: bunx playwright install --with-deps chromium
-      - name: Lint
-        run: bunx @biomejs/biome check src
-      - name: Typecheck
-        run: bunx tsc --noEmit
-      - name: Tests
-        run: bun test
-
-  website:
-    name: Website (build and verify)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/website
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run canonical Rust verification
+        run: node scripts/verify.mjs --suite rust
+
+  flutter:
+    name: Flutter (all apps/packages analyze + test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Analyze and test all six Flutter surfaces
+        run: node scripts/verify.mjs --suite flutter
+
+  browser-service:
+    name: Browser service (lint, typecheck, test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Run canonical browser-service verification
+        run: node scripts/verify.mjs --suite browser
+
+  website:
+    name: Website (build and verify)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/website/package-lock.json
-      - run: npm ci
-      - run: npm test
+      - name: Run canonical website verification
+        run: node scripts/verify.mjs --suite website
 
   windows-build:
     name: Windows build
-    runs-on: windows-latest
+    runs-on: windows-2022
     needs: [rust, flutter]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93.0"
+          toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
-      - name: Build Rust workspace (release)
-        run: cargo build --workspace --release
-      - name: Build desktop shell (Windows)
-        working-directory: apps/desktop
-        run: |
-          flutter pub get
-          flutter build windows --release
+      - name: Run canonical Windows release build
+        run: node scripts/verify.mjs --suite windows-build
       - name: Upload core service artifact
         uses: actions/upload-artifact@v4
         with:
