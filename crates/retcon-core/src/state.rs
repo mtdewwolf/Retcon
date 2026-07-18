@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::CoreError;
+use crate::browser_verification::{BrowserVerificationRunner, ServiceBrowserVerificationRunner};
 use crate::dev_servers::{DevServerRuntime, DurableDevServerRuntime};
 use crate::event::EventBus;
 use crate::jobs::JobSupervisor;
@@ -37,6 +38,7 @@ struct Inner {
     sessions: SessionRegistry,
     browser: BrowserHandle,
     browser_service: Arc<dyn BrowserService>,
+    browser_verification_runner: Arc<dyn BrowserVerificationRunner>,
     storage: Storage,
     filesystem: FilesystemHandle,
     recovery: RecoveryReport,
@@ -50,7 +52,7 @@ impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, None, None)
+        Self::from_storage(storage, verification_runner, None, None, None)
     }
 
     pub fn new_with_verification_runner(
@@ -58,7 +60,7 @@ impl CoreState {
         verification_runner: Arc<dyn VerificationRunner>,
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
-        Self::from_storage(storage, verification_runner, None, None)
+        Self::from_storage(storage, verification_runner, None, None, None)
     }
 
     pub fn new_with_dev_server_runtime(
@@ -67,7 +69,13 @@ impl CoreState {
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, Some(dev_server_runtime), None)
+        Self::from_storage(
+            storage,
+            verification_runner,
+            Some(dev_server_runtime),
+            None,
+            None,
+        )
     }
 
     pub fn new_with_browser_service(
@@ -76,7 +84,22 @@ impl CoreState {
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, None, Some(browser_service))
+        Self::from_storage(
+            storage,
+            verification_runner,
+            None,
+            Some(browser_service),
+            None,
+        )
+    }
+
+    pub fn new_with_browser_verification_runner(
+        data_dir: &std::path::Path,
+        runner: Arc<dyn BrowserVerificationRunner>,
+    ) -> Result<Self, CoreError> {
+        let storage = Storage::open(data_dir)?;
+        let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
+        Self::from_storage(storage, verification_runner, None, None, Some(runner))
     }
 
     fn from_storage(
@@ -84,6 +107,7 @@ impl CoreState {
         verification_runner: Arc<dyn VerificationRunner>,
         dev_server_runtime: Option<Arc<dyn DevServerRuntime>>,
         browser_service: Option<Arc<dyn BrowserService>>,
+        browser_verification_runner: Option<Arc<dyn BrowserVerificationRunner>>,
     ) -> Result<Self, CoreError> {
         let (shutdown, _) = watch::channel(false);
         let schema_version = storage.database().schema_version().ok();
@@ -101,6 +125,12 @@ impl CoreState {
         });
         let browser_service = browser_service
             .unwrap_or_else(|| Arc::new(NodeBrowserService::discover(storage.data_dir())));
+        let browser_verification_runner = browser_verification_runner.unwrap_or_else(|| {
+            Arc::new(ServiceBrowserVerificationRunner::new(
+                storage.clone(),
+                browser_service.clone(),
+            ))
+        });
         if recovery.changed_state() {
             events.emit(
                 "system.recovery",
@@ -118,6 +148,7 @@ impl CoreState {
                 sessions: SessionRegistry::default(),
                 browser: BrowserHandle::default(),
                 browser_service,
+                browser_verification_runner,
                 storage,
                 filesystem: FilesystemHandle::default(),
                 recovery,
@@ -162,6 +193,9 @@ impl CoreState {
     }
     pub fn browser_service(&self) -> &dyn BrowserService {
         self.inner.browser_service.as_ref()
+    }
+    pub fn browser_verification_runner(&self) -> &dyn BrowserVerificationRunner {
+        self.inner.browser_verification_runner.as_ref()
     }
     pub fn storage(&self) -> &Storage {
         &self.inner.storage
@@ -237,6 +271,7 @@ impl CoreState {
             "durable_verification": true,
             "durable_dev_servers": true,
             "durable_browser": true,
+            "durable_browser_verification": true,
         })
     }
 

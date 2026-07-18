@@ -487,6 +487,59 @@ fn permission_project_id(state: &CoreState, request: &Request) -> Option<Uuid> {
             .map(|instance| instance.project_id);
     }
     if request.method.starts_with("browser.") {
+        if request.method.starts_with("browser.verification.") {
+            let repository = state.storage().database().browser_verification();
+            if let Some(definition_id) = request
+                .params
+                .get("definitionId")
+                .and_then(|value| value.as_str())
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+            {
+                return repository
+                    .definition(definition_id)
+                    .ok()
+                    .flatten()
+                    .map(|value| value.project_id);
+            }
+            if let Some(run_id) = request
+                .params
+                .get("runId")
+                .and_then(|value| value.as_str())
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+            {
+                return repository
+                    .run(run_id)
+                    .ok()
+                    .flatten()
+                    .map(|value| value.project_id);
+            }
+            if let Some(comparison_id) = request
+                .params
+                .get("comparisonId")
+                .and_then(|value| value.as_str())
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+            {
+                return repository
+                    .comparison_project_id(comparison_id)
+                    .ok()
+                    .flatten();
+            }
+            return request
+                .params
+                .get("projectId")
+                .and_then(|value| value.as_str())
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .filter(|project_id| {
+                    state
+                        .storage()
+                        .database()
+                        .projects()
+                        .get(*project_id)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                });
+        }
         let repository = state.storage().database().durable_browsers();
         if let Some(session_id) = request
             .params

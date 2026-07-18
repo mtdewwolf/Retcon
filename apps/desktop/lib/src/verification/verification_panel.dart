@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
 import '../tasks/task_models.dart';
+import 'browser_verification_controller.dart';
+import 'browser_verification_panel.dart';
 import 'verification_controller.dart';
 import 'verification_models.dart';
 
@@ -13,16 +15,18 @@ class TaskVerificationSection extends StatelessWidget {
     super.key,
     this.onOpenPreview,
     this.previewReady = false,
+    this.browserController,
   });
 
   final VerificationController controller;
   final RoadmapTask task;
   final Future<void> Function()? onOpenPreview;
   final bool previewReady;
+  final BrowserVerificationController? browserController;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: controller,
+    animation: Listenable.merge([controller, ?browserController]),
     builder: (context, _) {
       final blocker = controller.completionBlocker;
       return RetconPanel(
@@ -76,6 +80,34 @@ class TaskVerificationSection extends StatelessWidget {
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ],
+            if (browserController?.completionBlocker
+                case final browserBlocker?) ...[
+              const SizedBox(height: RetconSpacing.xs),
+              Text(
+                browserBlocker,
+                key: const Key('browser-verification-completion-blocker'),
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            if (browserController?.latestRun case final browserRun?) ...[
+              const SizedBox(height: RetconSpacing.xs),
+              Text(
+                'Browser evidence: ${browserRun.status.name} · '
+                '${browserRun.visualComparisons.length} visual · '
+                '${browserRun.accessibilityIssues.length} accessibility · '
+                '${browserRun.consoleErrors.length} console errors',
+                key: const Key('task-browser-evidence-summary'),
+              ),
+            ],
+            if ((browserController?.warningCount ?? 0) > 0) ...[
+              const SizedBox(height: RetconSpacing.xs),
+              Text(
+                'Browser verification has '
+                '${browserController!.warningCount} non-blocking warnings.',
+                key: const Key('browser-verification-completion-warning'),
+                style: const TextStyle(color: Colors.amber),
+              ),
+            ],
             if (controller.latestRun case final run?) ...[
               const SizedBox(height: RetconSpacing.xs),
               Text(
@@ -101,6 +133,7 @@ class TaskVerificationSection extends StatelessWidget {
                   onPressed: () => VerificationDialog.show(
                     context,
                     controller: controller,
+                    browserController: browserController,
                     task: task,
                   ),
                   icon: const Icon(Icons.fact_check_outlined),
@@ -120,19 +153,25 @@ class VerificationDialog extends StatelessWidget {
     required this.controller,
     required this.task,
     super.key,
+    this.browserController,
   });
 
   final VerificationController controller;
   final RoadmapTask task;
+  final BrowserVerificationController? browserController;
 
   static Future<void> show(
     BuildContext context, {
     required VerificationController controller,
+    BrowserVerificationController? browserController,
     required RoadmapTask task,
   }) => showDialog<void>(
     context: context,
-    builder: (context) =>
-        VerificationDialog(controller: controller, task: task),
+    builder: (context) => VerificationDialog(
+      controller: controller,
+      browserController: browserController,
+      task: task,
+    ),
   );
 
   @override
@@ -167,7 +206,11 @@ class VerificationDialog extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: VerificationPanel(controller: controller, task: task),
+            child: VerificationPanel(
+              controller: controller,
+              browserController: browserController,
+              task: task,
+            ),
           ),
         ],
       ),
@@ -181,11 +224,13 @@ class VerificationPanel extends StatefulWidget {
     required this.task,
     super.key,
     this.onOpenFile,
+    this.browserController,
   });
 
   final VerificationController controller;
   final RoadmapTask task;
   final ValueChanged<VerificationFileLink>? onOpenFile;
+  final BrowserVerificationController? browserController;
 
   @override
   State<VerificationPanel> createState() => _VerificationPanelState();
@@ -196,7 +241,7 @@ class _VerificationPanelState extends State<VerificationPanel> {
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
-    length: 4,
+    length: widget.browserController == null ? 4 : 5,
     child: AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
@@ -204,12 +249,18 @@ class _VerificationPanelState extends State<VerificationPanel> {
         return Column(
           children: [
             _RunToolbar(controller: controller),
-            const TabBar(
+            TabBar(
+              isScrollable: widget.browserController != null,
               tabs: [
-                Tab(icon: Icon(Icons.tune), text: 'Setup'),
-                Tab(icon: Icon(Icons.timeline), text: 'Live run'),
-                Tab(icon: Icon(Icons.history), text: 'History'),
-                Tab(icon: Icon(Icons.summarize), text: 'Completion report'),
+                const Tab(icon: Icon(Icons.tune), text: 'Setup'),
+                const Tab(icon: Icon(Icons.timeline), text: 'Live run'),
+                if (widget.browserController != null)
+                  const Tab(icon: Icon(Icons.language), text: 'Browser'),
+                const Tab(icon: Icon(Icons.history), text: 'History'),
+                const Tab(
+                  icon: Icon(Icons.summarize),
+                  text: 'Completion report',
+                ),
               ],
             ),
             if (controller.error != null)
@@ -235,6 +286,8 @@ class _VerificationPanelState extends State<VerificationPanel> {
                               setState(() => _showStderr = value),
                           onOpenFile: widget.onOpenFile,
                         ),
+                        if (widget.browserController case final browser?)
+                          BrowserVerificationPanel(controller: browser),
                         _HistoryTab(controller: controller),
                         CompletionReportPanel(
                           task: widget.task,

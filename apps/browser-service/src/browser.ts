@@ -30,6 +30,7 @@ import {
   timeoutParam,
   withTimeout,
 } from "./validation.ts";
+import { BrowserVerificationRunner } from "./verification.ts";
 
 export const MAX_LOG_ENTRIES = 1_000;
 const MAX_COOKIES = 500;
@@ -114,6 +115,7 @@ export class ManagedBrowser {
   private readonly artifactRoot: string;
   private readonly profileRoot: string;
   private readonly inputRoots: string[];
+  private readonly verificationRunner: BrowserVerificationRunner;
   private rootsReady: Promise<void>;
 
   constructor(emit: (event: BrowserEvent) => void, options: ManagedBrowserOptions = {}) {
@@ -124,6 +126,11 @@ export class ManagedBrowser {
       options.profileRoot ?? join(repositoryRoot, "output/browser-profiles"),
     );
     this.inputRoots = (options.inputRoots ?? [repositoryRoot]).map((root) => resolve(root));
+    this.verificationRunner = new BrowserVerificationRunner({
+      artifactRoot: this.artifactRoot,
+      inputRoots: this.inputRoots,
+      emit: this.emit,
+    });
     this.rootsReady = Promise.all([
       ensureRoot(this.artifactRoot),
       ensureRoot(this.profileRoot),
@@ -244,6 +251,12 @@ export class ManagedBrowser {
     if (method === "browser.installation") return this.installation();
     if (method === "browser.launch") return this.launchManaged(params);
     if (method === "browser.recover") return this.recover(params);
+    if (method === "browser.verification.run") {
+      return (await this.verificationRunner.run(params, signal)) as unknown as Record<
+        string,
+        unknown
+      >;
+    }
     if (method === "browser.status") {
       return this.status(
         params.sessionId === undefined ? undefined : identifier(params.sessionId, "sessionId"),

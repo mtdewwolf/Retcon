@@ -12,16 +12,20 @@
     "browser:verify": "node scripts/verify-browser.ts",
     "test": "bun test",
     "test:e2e": "node scripts/e2e.ts",
+    "test:verification-e2e": "node scripts/verification-e2e.ts",
     "typecheck": "tsc --noEmit",
     "lint": "bunx @biomejs/biome check src",
     "format": "bunx @biomejs/biome format --write src"
   },
   "dependencies": {
-    "playwright": "1.61.1"
+    "pixelmatch": "^7.2.0",
+    "playwright": "1.61.1",
+    "pngjs": "^7.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/bun": "^1.1.14",
+    "@types/pngjs": "^6.0.5",
     "typescript": "^5.7.0"
   }
 }

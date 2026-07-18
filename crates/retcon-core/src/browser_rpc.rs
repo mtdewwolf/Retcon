@@ -27,6 +27,9 @@ const MAX_LOG_ENTRY_BYTES: usize = 64 * 1024;
 
 pub async fn handle(state: CoreState, request: Request) -> Response {
     let Request { id, method, params } = request;
+    if method.starts_with("browser.verification.") {
+        return crate::browser_verification_rpc::handle(&state, id, &method, &params).await;
+    }
     match method.as_str() {
         "browser.startService" | "browser.stopService" | "browser.call" => {
             crate::spikes::browser::handle(state, Request { id, method, params }).await
