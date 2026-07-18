@@ -21,6 +21,7 @@ pub mod event;
 mod file_rpc;
 pub mod frame;
 mod git_rpc;
+mod ide_rpc;
 pub mod jobs;
 pub mod lifecycle;
 mod permissions_rpc;

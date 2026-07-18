@@ -705,6 +705,59 @@ impl ProjectRepository<'_> {
             [path], row_project).optional())
     }
 
+    /// Find the active project owning an exact repository or tracked worktree path.
+    pub fn find_by_workspace_path(&self, path: &str) -> Result<Option<Project>> {
+        self.0.read(|db| {
+            let exact = db
+                .query_row(
+                "SELECT DISTINCT p.id,p.name,p.created_at,p.updated_at \
+                 FROM projects p \
+                 JOIN repository_locations r ON r.project_id=p.id \
+                 LEFT JOIN git_worktrees w ON w.repository_location_id=r.id AND w.removed_at IS NULL \
+                 WHERE (r.path=?1 OR w.path=?1) AND p.archived_at IS NULL \
+                 LIMIT 1",
+                [path],
+                row_project,
+            )
+                .optional()?;
+            if exact.is_some() {
+                return Ok(exact);
+            }
+
+            // Older worktree records may contain a path relative to their repository root.
+            // Resolve those records before comparing so an otherwise valid tracked worktree is
+            // not rejected after the file RPC canonicalizes its root.
+            let requested = std::path::Path::new(path);
+            let mut statement = db.prepare(
+                "SELECT p.id,p.name,p.created_at,p.updated_at,r.path,w.path \
+                 FROM projects p \
+                 JOIN repository_locations r ON r.project_id=p.id \
+                 JOIN git_worktrees w ON w.repository_location_id=r.id \
+                 WHERE w.removed_at IS NULL AND p.archived_at IS NULL",
+            )?;
+            let candidates = statement.query_map([], |row| {
+                Ok((
+                    row_project(row)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?;
+            for candidate in candidates {
+                let (project, repository_path, worktree_path) = candidate?;
+                let worktree = std::path::Path::new(&worktree_path);
+                let joined = if worktree.is_absolute() {
+                    worktree.to_path_buf()
+                } else {
+                    std::path::Path::new(&repository_path).join(worktree)
+                };
+                if joined.canonicalize().ok().as_deref() == Some(requested) {
+                    return Ok(Some(project));
+                }
+            }
+            Ok(None)
+        })
+    }
+
     /// Resolve a repository location id from its root path.
     pub fn location_id_by_path(&self, path: &str) -> Result<Option<Uuid>> {
         self.0.read(|db| {
@@ -1495,6 +1548,25 @@ impl ApprovalRepository<'_> {
                 .query_row([fingerprint], row_approval)
                 .optional()
         })
+    }
+
+    pub fn find_approved_by_fingerprint(&self, fingerprint: &str) -> Result<Option<Approval>> {
+        self.0.read(|db| {
+            let mut statement = db.prepare(
+                "SELECT id,session_id,tool_call_id,status,request_json,decision_json,requested_at,decided_at FROM approvals WHERE status='approved' AND json_extract(decision_json,'$.remember')='once' AND json_extract(request_json,'$.fingerprint')=?1 ORDER BY decided_at DESC LIMIT 1",
+            )?;
+            statement
+                .query_row([fingerprint], row_approval)
+                .optional()
+        })
+    }
+
+    /// Atomically consume a one-time approved request.
+    pub fn consume_approved(&self, id: Uuid) -> Result<bool> {
+        Ok(self.0.execute(
+            "UPDATE approvals SET status='consumed' WHERE id=?1 AND status='approved'",
+            &[&id.as_bytes()],
+        )? > 0)
     }
 
     pub fn decide(&self, id: Uuid, status: &str, decision: &serde_json::Value) -> Result<Approval> {

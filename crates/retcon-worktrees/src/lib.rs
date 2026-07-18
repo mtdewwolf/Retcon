@@ -48,14 +48,21 @@ impl WorktreeManager {
         session_id: Option<Uuid>,
     ) -> Result<GitWorktree, WorktreeError> {
         retcon_git::worktree_add(repo, path, branch).await?;
-        self.persist(repo, path, Some(branch), session_id).await
+        let canonical = canonical_worktree_path(repo, path);
+        self.persist(repo, &canonical, Some(branch), session_id)
+            .await
     }
 
     /// Remove a Git worktree and mark the persisted record removed.
     pub async fn remove(&self, repo: &Path, path: &str) -> Result<bool, WorktreeError> {
+        let canonical = canonical_worktree_path(repo, path);
         retcon_git::worktree_remove(repo, path).await?;
         let repos = &self.database;
-        if let Some(record) = repos.git_worktrees().find_by_path(path)? {
+        if let Some(record) = repos
+            .git_worktrees()
+            .find_by_path(&canonical)?
+            .or(repos.git_worktrees().find_by_path(path)?)
+        {
             repos.git_worktrees().mark_removed(record.id)?;
             return Ok(true);
         }
@@ -69,7 +76,16 @@ impl WorktreeManager {
         session_id: Uuid,
     ) -> Result<GitWorktree, WorktreeError> {
         let repos = &self.database;
-        let Some(record) = repos.git_worktrees().find_by_path(path)? else {
+        let canonical = Path::new(path)
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new(path).to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        let Some(record) = repos
+            .git_worktrees()
+            .find_by_path(&canonical)?
+            .or(repos.git_worktrees().find_by_path(path)?)
+        else {
             return Err(WorktreeError::NotFound(path.to_owned()));
         };
         repos
@@ -144,6 +160,20 @@ impl WorktreeManager {
 fn canonical_repo_path(repo: &Path) -> String {
     repo.canonicalize()
         .unwrap_or_else(|_| repo.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn canonical_worktree_path(repo: &Path, path: &str) -> String {
+    let path = Path::new(path);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo.join(path)
+    };
+    joined
+        .canonicalize()
+        .unwrap_or(joined)
         .to_string_lossy()
         .into_owned()
 }

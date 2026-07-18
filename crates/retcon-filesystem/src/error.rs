@@ -27,6 +27,12 @@ pub enum FilesystemError {
     /// The request parameters were invalid.
     #[error("{0}")]
     InvalidRequest(String),
+    /// The requested conditional write no longer matches the file on disk.
+    #[error("file changed since it was read")]
+    Conflict {
+        /// Revision currently present on disk, or `None` when the path is absent.
+        current_revision: Option<String>,
+    },
     /// An I/O error occurred.
     #[error(transparent)]
     Io(#[from] io::Error),

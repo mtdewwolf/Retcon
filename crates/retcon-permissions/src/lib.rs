@@ -28,6 +28,8 @@ pub enum RpcPermission {
         user_message: String,
         /// Technical detail for logs and support bundles.
         technical_message: String,
+        /// Durable approval identifier to include when retrying, when available.
+        approval_id: Option<uuid::Uuid>,
     },
 }
 
@@ -69,6 +71,7 @@ pub fn check_rpc_method_with_bypass(method: &str, bypass: bool) -> RpcPermission
             technical_message: format!(
                 "permission denied for {method}: approval engine unavailable (set RETCON_PERMISSIONS_BYPASS=1 for dev)"
             ),
+            approval_id: None,
         };
     }
 
@@ -96,6 +99,12 @@ mod tests {
             "terminal.start",
             "terminal.input",
             "file.write",
+            "ide.openProject",
+            "ide.openWorktree",
+            "ide.openFile",
+            "ide.openDiff",
+            "ide.openTerminalLocation",
+            "ide.configuration.update",
             "task.acceptance.override",
             "task.acceptance.delete",
             "verification.start",
@@ -244,6 +253,29 @@ mod tests {
     fn deny_file_write_by_default() {
         let decision = check_rpc_method_with_bypass("file.write", false);
         assert!(matches!(decision, RpcPermission::Denied { .. }));
+    }
+
+    #[test]
+    fn protect_ide_launches_and_configuration_changes() {
+        for method in [
+            "ide.openProject",
+            "ide.openWorktree",
+            "ide.openFile",
+            "ide.openDiff",
+            "ide.openTerminalLocation",
+            "ide.configuration.update",
+        ] {
+            assert!(matches!(
+                check_rpc_method_with_bypass(method, false),
+                RpcPermission::Denied { .. }
+            ));
+        }
+        for method in ["ide.detect", "ide.configuration.get"] {
+            assert_eq!(
+                check_rpc_method_with_bypass(method, false),
+                RpcPermission::Allowed
+            );
+        }
     }
 
     #[test]

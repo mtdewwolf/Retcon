@@ -9,7 +9,7 @@ pub mod watch;
 pub use error::FilesystemError;
 pub use service::{
     DEFAULT_READ_LIMIT, DEFAULT_WRITE_LIMIT, FileEntry, FileReadResult, FileService,
-    FileWriteResult, LIST_MAX_ENTRIES, resolve_within_root,
+    FileWriteCondition, FileWriteResult, LIST_MAX_ENTRIES, resolve_within_root,
 };
 pub use watch::{FileChangeEvent, FileWatchHandle, WatchRegistry, new_watch_id};
 

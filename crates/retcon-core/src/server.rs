@@ -318,13 +318,9 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
         if let retcon_permissions::RpcPermission::Denied {
             user_message,
             technical_message,
+            approval_id,
         } = check.permission
         {
-            let approval_id = check
-                .audit
-                .first()
-                .and_then(|record| record.payload.get("id").and_then(|value| value.as_str()))
-                .map(str::to_owned);
             let mut error = CoreError::new(
                 ErrorCode::PermissionDenied,
                 ErrorSource::Rpc,
@@ -336,7 +332,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             )
             .retryable(true);
             if let Some(approval_id) = approval_id {
-                error = error.diagnostic(json!({"approvalId": approval_id}));
+                error = error.diagnostic(json!({"approvalId": approval_id.to_string()}));
             }
             return Response::error(request.id, &error);
         }
@@ -430,6 +426,7 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
             Some("verification") => crate::verification_rpc::handle(state.clone(), request).await,
             Some("devServer") => crate::dev_servers_rpc::handle(state.clone(), request).await,
             Some("diagnostics") => crate::diagnostics_rpc::handle(state.clone(), request).await,
+            Some("ide") => crate::ide_rpc::handle(state.clone(), request).await,
             Some("approval") | Some("permission") => {
                 crate::permissions_rpc::handle(state.clone(), request).await
             }
@@ -448,6 +445,31 @@ async fn dispatch(request: Request, state: &CoreState) -> Response {
 }
 
 fn permission_project_id(state: &CoreState, request: &Request) -> Option<Uuid> {
+    let workspace_path = if request.method.starts_with("file.") {
+        request.params.get("root")
+    } else if matches!(
+        request.method.as_str(),
+        "ide.openFile" | "ide.openDiff" | "ide.openTerminalLocation"
+    ) {
+        request.params.get("workspacePath")
+    } else if matches!(
+        request.method.as_str(),
+        "ide.openProject" | "ide.openWorktree"
+    ) {
+        request.params.get("path")
+    } else {
+        None
+    };
+    if let Some(path) = workspace_path.and_then(|value| value.as_str())
+        && let Ok(path) = std::fs::canonicalize(path)
+        && let Ok(Some(project)) = state
+            .storage()
+            .database()
+            .projects()
+            .find_by_workspace_path(&path.to_string_lossy())
+    {
+        return Some(project.id);
+    }
     if request.method.starts_with("devServer.") {
         let repository = state.storage().database().dev_servers();
         if request.method == "devServer.configure" {

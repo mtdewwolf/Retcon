@@ -26,6 +26,12 @@ pub fn category_for_method(method: &str) -> Option<ApprovalCategory> {
             Some(ApprovalCategory::Terminal)
         }
         "file.write" => Some(ApprovalCategory::File),
+        "ide.openProject"
+        | "ide.openWorktree"
+        | "ide.openFile"
+        | "ide.openDiff"
+        | "ide.openTerminalLocation" => Some(ApprovalCategory::Terminal),
+        "ide.configuration.update" => Some(ApprovalCategory::System),
         "task.acceptance.override"
         | "task.acceptance.delete"
         | "verification.commands.configure" => Some(ApprovalCategory::System),
@@ -92,6 +98,12 @@ pub fn method_summary(method: &str) -> &'static str {
         "terminal.start" => "Start a terminal session",
         "terminal.input" => "Send terminal input",
         "file.write" => "Write a file",
+        "ide.openProject" => "Open a project in an IDE",
+        "ide.openWorktree" => "Open a worktree in an IDE",
+        "ide.openFile" => "Open a file in an IDE",
+        "ide.openDiff" => "Open a diff in an IDE",
+        "ide.openTerminalLocation" => "Open an IDE terminal at a workspace location",
+        "ide.configuration.update" => "Change the preferred IDE",
         "task.acceptance.override" => "Override a task acceptance criterion",
         "task.acceptance.delete" => "Delete a task acceptance criterion",
         "verification.start" => "Start project verification commands",

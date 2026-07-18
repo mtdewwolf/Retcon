@@ -23,6 +23,7 @@ use crate::verification::{DurableVerificationRunner, VerificationRunner};
 use retcon_browser::{BrowserService, NodeBrowserService};
 use retcon_filesystem::FilesystemHandle;
 use retcon_permissions::ApprovalEngine;
+use retcon_platform::{IdeIntegration, SystemIdeIntegration};
 use retcon_storage::{RecoveryReport, Storage};
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ struct Inner {
     verification_runner: Arc<dyn VerificationRunner>,
     dev_server_runtime: Arc<dyn DevServerRuntime>,
     diagnostics: Arc<DiagnosticsService>,
+    ide: Arc<dyn IdeIntegration>,
     runtime_observability_installed: AtomicBool,
 }
 
@@ -56,7 +58,7 @@ impl CoreState {
     pub fn new(data_dir: &std::path::Path) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, None, None, None)
+        Self::from_storage(storage, verification_runner, None, None, None, None)
     }
 
     pub fn new_with_verification_runner(
@@ -64,7 +66,7 @@ impl CoreState {
         verification_runner: Arc<dyn VerificationRunner>,
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
-        Self::from_storage(storage, verification_runner, None, None, None)
+        Self::from_storage(storage, verification_runner, None, None, None, None)
     }
 
     pub fn new_with_dev_server_runtime(
@@ -77,6 +79,7 @@ impl CoreState {
             storage,
             verification_runner,
             Some(dev_server_runtime),
+            None,
             None,
             None,
         )
@@ -94,6 +97,7 @@ impl CoreState {
             None,
             Some(browser_service),
             None,
+            None,
         )
     }
 
@@ -103,7 +107,16 @@ impl CoreState {
     ) -> Result<Self, CoreError> {
         let storage = Storage::open(data_dir)?;
         let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
-        Self::from_storage(storage, verification_runner, None, None, Some(runner))
+        Self::from_storage(storage, verification_runner, None, None, Some(runner), None)
+    }
+
+    pub fn new_with_ide_integration(
+        data_dir: &std::path::Path,
+        ide: Arc<dyn IdeIntegration>,
+    ) -> Result<Self, CoreError> {
+        let storage = Storage::open(data_dir)?;
+        let verification_runner = Arc::new(DurableVerificationRunner::new(storage.clone()));
+        Self::from_storage(storage, verification_runner, None, None, None, Some(ide))
     }
 
     fn from_storage(
@@ -112,6 +125,7 @@ impl CoreState {
         dev_server_runtime: Option<Arc<dyn DevServerRuntime>>,
         browser_service: Option<Arc<dyn BrowserService>>,
         browser_verification_runner: Option<Arc<dyn BrowserVerificationRunner>>,
+        ide: Option<Arc<dyn IdeIntegration>>,
     ) -> Result<Self, CoreError> {
         let (shutdown, _) = watch::channel(false);
         let schema_version = storage.database().schema_version().ok();
@@ -162,6 +176,7 @@ impl CoreState {
                 verification_runner,
                 dev_server_runtime,
                 diagnostics,
+                ide: ide.unwrap_or_else(|| Arc::new(SystemIdeIntegration)),
                 runtime_observability_installed: AtomicBool::new(false),
             }),
         };
@@ -225,6 +240,10 @@ impl CoreState {
     }
     pub fn diagnostics_service(&self) -> &Arc<DiagnosticsService> {
         &self.inner.diagnostics
+    }
+
+    pub fn ide(&self) -> &dyn IdeIntegration {
+        self.inner.ide.as_ref()
     }
 
     pub fn install_runtime_observability(&self) {
@@ -311,6 +330,7 @@ impl CoreState {
             "durable_browser": true,
             "durable_browser_verification": true,
             "local_diagnostics": true,
+            "ide_integration": true,
         })
     }
 

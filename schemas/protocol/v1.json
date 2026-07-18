@@ -310,6 +310,16 @@
       "diagnostics.data.export",
       "diagnostics.data.delete"
     ],
+    "ide": [
+      "ide.detect",
+      "ide.configuration.get",
+      "ide.configuration.update",
+      "ide.openProject",
+      "ide.openWorktree",
+      "ide.openFile",
+      "ide.openDiff",
+      "ide.openTerminalLocation"
+    ],
     "storage": [
       "storage.status",
       "storage.recover",

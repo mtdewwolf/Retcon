@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
@@ -13,14 +12,17 @@ class FileExplorerController extends ChangeNotifier {
     required FileService service,
     required String root,
     Stream<Map<String, dynamic>>? events,
+    Future<void> Function(String path)? onOpenExternal,
   }) : _service = service,
-       _root = root {
+       _root = root,
+       _onOpenExternal = onOpenExternal {
     _events = events?.listen(_handleEvent);
     unawaited(refresh());
   }
 
   final FileService _service;
   final String _root;
+  final Future<void> Function(String path)? _onOpenExternal;
   StreamSubscription<Map<String, dynamic>>? _events;
   FileWatchHandle? _watch;
 
@@ -33,6 +35,7 @@ class FileExplorerController extends ChangeNotifier {
   String get root => _root;
   String? get selectedPath => _selectedPath;
   Object? get error => _error;
+  bool get canOpenExternal => _onOpenExternal != null;
   Iterable<String> get expandedPaths => _expanded;
 
   List<FileEntry> entriesFor(String? path) => _children[path ?? ''] ?? const [];
@@ -65,15 +68,7 @@ class FileExplorerController extends ChangeNotifier {
   }
 
   Future<void> openExternal(String path) async {
-    if (Platform.isWindows) {
-      await Process.start('cmd', ['/c', 'start', '', path], runInShell: true);
-      return;
-    }
-    if (Platform.isMacOS) {
-      await Process.start('open', [path]);
-      return;
-    }
-    await Process.start('xdg-open', [path]);
+    await _onOpenExternal?.call(path);
   }
 
   Future<void> disposeController() async {
@@ -108,8 +103,8 @@ class FileExplorerController extends ChangeNotifier {
   void _handleEvent(Map<String, dynamic> event) {
     final kind = event['kind']?.toString();
     if (kind != 'file.changed') return;
-    final payload = (event['payload'] as Map?)?.cast<String, dynamic>() ??
-        event;
+    final payload =
+        (event['payload'] as Map?)?.cast<String, dynamic>() ?? event;
     final change = FileChangeEvent.fromPayload(payload);
     if (change.watchId != _watch?.watchId) return;
     final parent = _parentDirectoryKey(change.path);
@@ -124,9 +119,7 @@ class FileExplorerController extends ChangeNotifier {
   }
 
   String? _parentPath(String path) {
-    final separator = Platform.pathSeparator;
-    if (!path.contains(separator)) return null;
-    final index = path.lastIndexOf(separator);
+    final index = path.lastIndexOf(RegExp(r'[/\\]'));
     if (index <= 0) return null;
     return path.substring(0, index);
   }
@@ -139,6 +132,7 @@ class FileExplorerPanel extends StatefulWidget {
     required this.root,
     this.events,
     this.onFileSelected,
+    this.onOpenExternal,
     super.key,
   });
 
@@ -146,6 +140,7 @@ class FileExplorerPanel extends StatefulWidget {
   final String root;
   final Stream<Map<String, dynamic>>? events;
   final ValueChanged<String>? onFileSelected;
+  final Future<void> Function(String path)? onOpenExternal;
 
   @override
   State<FileExplorerPanel> createState() => _FileExplorerPanelState();
@@ -161,6 +156,7 @@ class _FileExplorerPanelState extends State<FileExplorerPanel> {
       service: widget.service,
       root: widget.root,
       events: widget.events,
+      onOpenExternal: widget.onOpenExternal,
     );
     _controller.addListener(_notifySelection);
   }
@@ -175,6 +171,7 @@ class _FileExplorerPanelState extends State<FileExplorerPanel> {
         service: widget.service,
         root: widget.root,
         events: widget.events,
+        onOpenExternal: widget.onOpenExternal,
       );
       _controller.addListener(_notifySelection);
     }
@@ -224,11 +221,7 @@ class _FileExplorerPanelState extends State<FileExplorerPanel> {
           child: ListView(
             children: [
               for (final entry in _controller.entriesFor(null))
-                _ExplorerTile(
-                  controller: _controller,
-                  entry: entry,
-                  depth: 0,
-                ),
+                _ExplorerTile(controller: _controller, entry: entry, depth: 0),
             ],
           ),
         ),
@@ -296,7 +289,9 @@ class _ExplorerTile extends StatelessWidget {
       trailing: _GitBadge(status: entry.gitStatus),
       selected: controller.selectedPath == entry.path,
       onTap: () => controller.select(entry.path),
-      onLongPress: () => controller.openExternal(entry.path),
+      onLongPress: controller.canOpenExternal
+          ? () => controller.openExternal(entry.path)
+          : null,
     );
   }
 }

@@ -9,11 +9,7 @@ enum _ApprovalCenterTab { pending, rules }
 
 /// Approval center panel for reviewing requests and editing permission rules.
 class ApprovalCenterPanel extends StatefulWidget {
-  const ApprovalCenterPanel({
-    required this.core,
-    this.projectId,
-    super.key,
-  });
+  const ApprovalCenterPanel({required this.core, this.projectId, super.key});
 
   final CoreClient core;
   final String? projectId;
@@ -67,8 +63,7 @@ class _ApprovalCenterPanelState extends State<ApprovalCenterPanel> {
     return AnimatedBuilder(
       animation: Listenable.merge([_approvals, _rules, widget.core]),
       builder: (context, _) {
-        final connected =
-            widget.core.status == CoreConnectionStatus.connected;
+        final connected = widget.core.status == CoreConnectionStatus.connected;
         return RetconPanel(
           label: 'Approval center',
           padding: const EdgeInsets.all(RetconSpacing.md),
@@ -235,10 +230,7 @@ class _PermissionRulesViewState extends State<_PermissionRulesView> {
   }
 
   Future<void> _create() async {
-    await widget.controller.createRule(
-      effect: _effect,
-      method: _method.text,
-    );
+    await widget.controller.createRule(effect: _effect, method: _method.text);
     if (widget.controller.error == null) {
       _method.clear();
     }
