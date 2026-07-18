@@ -1,12 +1,12 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:retcon_design_system/retcon_design_system.dart';
 
 import 'core_client.dart';
+import 'diagnostics/core_diagnostics_repository.dart';
+import 'diagnostics/desktop_diagnostics.dart';
 
 /// Provider setup checks with repair actions and diagnostic export.
 class ProviderDoctorDialog extends StatefulWidget {
@@ -19,9 +19,9 @@ class ProviderDoctorDialog extends StatefulWidget {
 
 class _ProviderDoctorDialogState extends State<ProviderDoctorDialog> {
   Map<String, dynamic>? _report;
-  Object? _error;
+  String? _error;
   bool _loading = true;
-  String? _exportPath;
+  String? _exportName;
   List<Map<String, dynamic>>? _pathHints;
 
   @override
@@ -34,7 +34,7 @@ class _ProviderDoctorDialogState extends State<ProviderDoctorDialog> {
     setState(() {
       _loading = true;
       _error = null;
-      _exportPath = null;
+      _exportName = null;
       _pathHints = null;
     });
     try {
@@ -45,59 +45,43 @@ class _ProviderDoctorDialogState extends State<ProviderDoctorDialog> {
           ) ??
           <String, dynamic>{};
       if (mounted) setState(() => _report = result);
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
+    } on Object {
+      DesktopDiagnostics.instance.captureOperationFailure(
+        component: 'desktop.provider_doctor',
+        code: 'provider_doctor_load_failed',
+      );
+      if (mounted) {
+        setState(() => _error = 'Provider checks are temporarily unavailable.');
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Map<String, dynamic> _bundlePayload() {
-    final report = _report;
-    if (report == null || report.isEmpty) {
-      return const {};
-    }
-    return {
-      'kind': 'provider_doctor_bundle',
-      'generated_at': DateTime.now().toUtc().toIso8601String(),
-      'report': report,
-    };
-  }
-
-  Future<void> _copyDiagnostics() async {
-    final payload = _bundlePayload();
-    if (payload.isEmpty) return;
-    await Clipboard.setData(
-      ClipboardData(text: const JsonEncoder.withIndent('  ').convert(payload)),
-    );
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Diagnostic bundle copied.')));
-  }
-
   Future<void> _exportDiagnostics() async {
-    final payload = _bundlePayload();
-    if (payload.isEmpty) return;
-    final base =
-        Platform.environment['LOCALAPPDATA'] ?? Directory.systemTemp.path;
-    final directory = Directory(
-      '$base${Platform.pathSeparator}Retcon${Platform.pathSeparator}diagnostics',
-    );
-    await directory.create(recursive: true);
-    final stamp = DateTime.now()
-        .toUtc()
-        .toIso8601String()
-        .replaceAll(':', '-');
-    final file = File('${directory.path}${Platform.pathSeparator}provider-doctor-$stamp.json');
-    await file.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(payload),
-    );
-    if (!mounted) return;
-    setState(() => _exportPath = file.path);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Exported diagnostics to ${file.path}')),
-    );
+    final core = widget.core;
+    if (core == null || core.status != CoreConnectionStatus.connected) {
+      setState(() => _error = 'Retcon Core is unavailable.');
+      return;
+    }
+    try {
+      final bundle = await CoreDiagnosticsRepository.fromCore(
+        core,
+      ).exportSupportBundle(context: 'provider_doctor');
+      if (!mounted) return;
+      setState(() => _exportName = bundle.fileName);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Created sanitized bundle ${bundle.fileName}')),
+      );
+    } on Object {
+      DesktopDiagnostics.instance.captureOperationFailure(
+        component: 'desktop.provider_doctor',
+        code: 'provider_doctor_bundle_failed',
+      );
+      if (mounted) {
+        setState(() => _error = 'Could not create the support bundle.');
+      }
+    }
   }
 
   Future<void> _runRepair(Map<String, dynamic> action) async {
@@ -189,16 +173,11 @@ class _ProviderDoctorDialogState extends State<ProviderDoctorDialog> {
       if (_report != null && _report!.isNotEmpty) ...[
         RetconBadge(label: _overallLabel(), status: _overallStatus()),
         const SizedBox(width: 8),
-        TextButton(onPressed: _copyDiagnostics, child: const Text('Copy')),
         TextButton(
           onPressed: _exportDiagnostics,
           child: const Text('Export bundle'),
         ),
-        if (_exportPath != null)
-          TextButton(
-            onPressed: () => _revealPath(_exportPath!),
-            child: const Text('Reveal export'),
-          ),
+        if (_exportName != null) Text('Created $_exportName'),
         ..._repairButtons(
           (_report!['repair_actions'] as List? ?? const []).cast<Map>(),
         ),
@@ -237,7 +216,8 @@ class _DoctorReportView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final checks = (report['checks'] as List? ?? const []).cast<Map>();
-    final hints = pathHints ?? (report['path_hints'] as List? ?? const []).cast<Map>();
+    final hints =
+        pathHints ?? (report['path_hints'] as List? ?? const []).cast<Map>();
     return SingleChildScrollView(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

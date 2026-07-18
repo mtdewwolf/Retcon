@@ -3,6 +3,8 @@ import 'dart:developer' as developer;
 import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
 
+import 'diagnostics/desktop_diagnostics.dart';
+
 /// Configure structured logging for the desktop shell.
 ///
 /// Phase 1 scope: hierarchical loggers emitting to the developer log (and the
@@ -11,20 +13,26 @@ import 'package:logging/logging.dart';
 void initLogging() {
   Logger.root.level = kDebugMode ? Level.ALL : Level.INFO;
   Logger.root.onRecord.listen((record) {
+    DesktopDiagnostics.instance.captureLog(record);
+    final component = _safeComponent(record.loggerName);
+    final eventCode = record.level >= Level.SEVERE
+        ? 'desktop_log_error'
+        : 'desktop_log';
     developer.log(
-      record.message,
+      eventCode,
       time: record.time,
       level: record.level.value,
-      name: record.loggerName,
-      error: record.error,
-      stackTrace: record.stackTrace,
+      name: component,
     );
     if (kDebugMode) {
       // ignore: avoid_print — deliberate console mirror for debug runs.
       print(
         '${record.time.toIso8601String()} ${record.level.name} '
-        '[${record.loggerName}] ${record.message}',
+        '[$component] $eventCode',
       );
     }
   });
 }
+
+String _safeComponent(String value) =>
+    RegExp(r'^[A-Za-z0-9_.-]{1,64}$').hasMatch(value) ? value : 'desktop';

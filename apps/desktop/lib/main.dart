@@ -11,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'src/core_client.dart';
 import 'src/desktop_shell.dart';
+import 'src/diagnostics/desktop_diagnostics.dart';
 import 'src/logging.dart';
 import 'src/projects/project_controller.dart';
 import 'src/storage_recovery_dialog.dart';
@@ -21,6 +22,7 @@ final services = GetIt.instance;
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   initLogging();
+  installDesktopErrorCapture();
   services.registerLazySingleton(CoreClient.new);
   services.registerLazySingleton<ProjectController>(
     () => ProjectController.fromCore(services<CoreClient>()),
@@ -29,6 +31,7 @@ Future<void> main() async {
     () => ShellState(services<CoreClient>()),
   );
   await windowManager.ensureInitialized();
+  DesktopDiagnostics.instance.bindCore(services<CoreClient>());
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
       size: Size(1100, 720),
@@ -64,10 +67,8 @@ class RetconApp extends StatelessWidget {
       routes: [
         GoRoute(
           path: '/',
-          builder: (context, state) => DesktopShell(
-            core: client,
-            projectController: projectController,
-          ),
+          builder: (context, state) =>
+              DesktopShell(core: client, projectController: projectController),
         ),
       ],
     );
