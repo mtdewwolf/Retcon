@@ -38,6 +38,12 @@ void main() {
         controller.latestRun!.visualComparisons.single.status,
         VisualComparisonStatus.approved,
       );
+
+      await controller.saveDefinition(
+        controller.definition!.copyWith(name: 'Updated browser verification'),
+      );
+      expect(controller.latestRun, isNull);
+      expect(controller.completionBlocker, contains('Run'));
     },
   );
 
@@ -76,6 +82,22 @@ void main() {
       expect(controller.definition?.steps.single.id, 'open');
     },
   );
+
+  test('browser controller requires the configured live server', () async {
+    var liveConfig = 'another-server';
+    final controller = BrowserVerificationController(
+      repository: _repository(),
+      taskId: taskId,
+      devServerInstanceId: (requiredConfigId) =>
+          requiredConfigId == liveConfig ? 'live-instance' : null,
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+
+    expect(controller.canRun, isFalse);
+    liveConfig = definition.requiredServerId!;
+    expect(controller.canRun, isTrue);
+  });
 
   testWidgets(
     'workspace edits definitions and reviews complete browser evidence',

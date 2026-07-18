@@ -256,9 +256,16 @@ class _TaskBoardPanelState extends State<TaskBoardPanel> {
         final controller = BrowserVerificationController(
           repository: _browserVerificationRepository,
           taskId: task.id,
-          devServerInstanceId: () {
-            final id = _devServerController.snapshot?.instanceId;
-            return id == null || id.isEmpty ? null : id;
+          devServerInstanceId: (requiredConfigId) {
+            final snapshot = _devServerController.snapshot;
+            if (snapshot == null || !snapshot.running) return null;
+            if (requiredConfigId != null &&
+                requiredConfigId.isNotEmpty &&
+                snapshot.config.id != requiredConfigId) {
+              return null;
+            }
+            final id = snapshot.instanceId;
+            return id.isEmpty ? null : id;
           },
         );
         unawaited(controller.load());

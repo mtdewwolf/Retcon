@@ -33,6 +33,7 @@ enum BrowserTimelineKind {
   console,
   screenshot,
   assertion,
+  accessibility,
   error,
   takeover,
   completion,
@@ -166,6 +167,7 @@ class BrowserVerificationDefinition {
     this.required = true,
     this.failOnAccessibility = true,
     this.enabled = true,
+    this.updatedAt,
   });
 
   final String id;
@@ -183,6 +185,7 @@ class BrowserVerificationDefinition {
   final bool required;
   final bool failOnAccessibility;
   final bool enabled;
+  final DateTime? updatedAt;
 
   BrowserVerificationDefinition copyWith({
     String? name,
@@ -198,6 +201,7 @@ class BrowserVerificationDefinition {
     bool? required,
     bool? failOnAccessibility,
     bool? enabled,
+    DateTime? updatedAt,
   }) => BrowserVerificationDefinition(
     id: id,
     taskId: taskId,
@@ -214,6 +218,7 @@ class BrowserVerificationDefinition {
     required: required ?? this.required,
     failOnAccessibility: failOnAccessibility ?? this.failOnAccessibility,
     enabled: enabled ?? this.enabled,
+    updatedAt: updatedAt ?? this.updatedAt,
   );
 }
 

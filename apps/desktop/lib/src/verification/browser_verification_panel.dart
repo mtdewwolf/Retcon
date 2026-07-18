@@ -187,7 +187,8 @@ class _DefinitionEditorState extends State<_DefinitionEditor> {
                     key: const Key('browser-required-server'),
                     initialValue: value.requiredServerId,
                     decoration: const InputDecoration(
-                      labelText: 'Required server / instance',
+                      labelText: 'Required server configuration',
+                      helperText: 'Verification uses its live server instance.',
                     ),
                     onChanged: (text) =>
                         _draft = _value.copyWith(requiredServerId: text),
@@ -1228,6 +1229,7 @@ IconData _timelineIcon(BrowserTimelineKind kind) => switch (kind) {
   BrowserTimelineKind.console => Icons.terminal,
   BrowserTimelineKind.screenshot => Icons.screenshot,
   BrowserTimelineKind.assertion => Icons.fact_check,
+  BrowserTimelineKind.accessibility => Icons.accessibility_new,
   BrowserTimelineKind.error => Icons.error,
   BrowserTimelineKind.takeover => Icons.pan_tool,
   BrowserTimelineKind.completion => Icons.flag,

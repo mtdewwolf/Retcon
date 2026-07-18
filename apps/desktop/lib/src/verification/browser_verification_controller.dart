@@ -18,7 +18,10 @@ class BrowserVerificationController extends ChangeNotifier {
 
   final BrowserVerificationRepository _repository;
   final String taskId;
-  final String? Function()? devServerInstanceId;
+
+  /// Returns the live instance for [requiredConfigId], or null when that
+  /// configured server is not currently available.
+  final String? Function(String? requiredConfigId)? devServerInstanceId;
   StreamSubscription<BrowserVerificationEvent>? _events;
 
   BrowserVerificationDefinition? definition;
@@ -27,6 +30,7 @@ class BrowserVerificationController extends ChangeNotifier {
   bool loading = false;
   bool saving = false;
   bool loaded = false;
+  bool loadFailed = false;
   String? error;
 
   BrowserVerificationRun? get latestRun =>
@@ -37,9 +41,11 @@ class BrowserVerificationController extends ChangeNotifier {
   bool get canRun =>
       configured &&
       !running &&
-      (devServerInstanceId == null || devServerInstanceId!() != null);
+      (devServerInstanceId == null ||
+          devServerInstanceId!(definition?.requiredServerId) != null);
   bool get allowsCompletion {
     if (!loaded) return false;
+    if (loadFailed) return false;
     if (!required) return true;
     final latest = latestRun;
     return latest != null &&
@@ -52,6 +58,9 @@ class BrowserVerificationController extends ChangeNotifier {
 
   String? get completionBlocker {
     if (!loaded) return 'Browser verification configuration is loading.';
+    if (loadFailed) {
+      return 'Browser verification evidence could not be loaded.';
+    }
     if (!required || allowsCompletion) return null;
     final latest = latestRun;
     if (running) return 'Required browser verification is still running.';
@@ -81,6 +90,7 @@ class BrowserVerificationController extends ChangeNotifier {
 
   Future<void> load() async {
     loading = true;
+    loadFailed = false;
     error = null;
     notifyListeners();
     try {
@@ -89,10 +99,17 @@ class BrowserVerificationController extends ChangeNotifier {
         _repository.listHistory(taskId),
       ]);
       definition = values[0] as BrowserVerificationDefinition?;
-      history = values[1] as List<BrowserVerificationRun>;
+      final loadedHistory = values[1] as List<BrowserVerificationRun>;
+      final definitionUpdatedAt = definition?.updatedAt;
+      history = definitionUpdatedAt == null
+          ? loadedHistory
+          : loadedHistory
+                .where((run) => !run.startedAt.isBefore(definitionUpdatedAt))
+                .toList();
       loaded = true;
     } on Object catch (caught) {
       error = caught.toString();
+      loadFailed = true;
       loaded = true;
     } finally {
       loading = false;
@@ -112,6 +129,8 @@ class BrowserVerificationController extends ChangeNotifier {
     notifyListeners();
     try {
       definition = await _repository.saveDefinition(value);
+      activeRun = null;
+      history = const [];
     } on Object catch (caught) {
       error = caught.toString();
     } finally {
@@ -129,7 +148,7 @@ class BrowserVerificationController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    final instanceId = devServerInstanceId?.call();
+    final instanceId = devServerInstanceId?.call(value.requiredServerId);
     if (devServerInstanceId != null && instanceId == null) {
       error = 'Start the required development server before verification.';
       notifyListeners();

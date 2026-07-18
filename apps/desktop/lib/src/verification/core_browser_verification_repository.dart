@@ -78,12 +78,28 @@ class CoreBrowserVerificationRepository
     _knownDefinitionIds.addAll(
       definitions.map((item) => item['id']?.toString() ?? ''),
     );
-    final matches = definitions.where(
-      (item) =>
-          item['taskId']?.toString() == taskId &&
-          item['status']?.toString() != 'archived',
-    );
-    return matches.isEmpty ? null : _codec.decodeDefinition(matches.first);
+    final scoped = definitions
+        .where(
+          (item) =>
+              item['taskId']?.toString() == taskId &&
+              item['status']?.toString() != 'archived',
+        )
+        .toList();
+    final active = scoped
+        .where((item) => item['status']?.toString() == 'active')
+        .toList();
+    if (active.length > 1) {
+      throw StateError(
+        'Multiple active browser verification definitions exist for this '
+        'task. Archive extras before completing the task.',
+      );
+    }
+    final selected = active.isNotEmpty
+        ? active.single
+        : scoped.isEmpty
+        ? null
+        : scoped.first;
+    return selected == null ? null : _codec.decodeDefinition(selected);
   }
 
   @override
@@ -140,12 +156,17 @@ class CoreBrowserVerificationRepository
     required bool approve,
     String reason = '',
   }) async {
+    final normalizedReason = reason.trim();
     final response = await _rpc.request(
       'browser.verification.review',
       params: {
         'runId': runId,
         'decision': approve ? 'approve' : 'reject',
-        'reason': reason,
+        'reason': normalizedReason.isEmpty
+            ? approve
+                  ? 'Browser evidence approved during desktop review.'
+                  : 'Browser evidence rejected during desktop review.'
+            : normalizedReason,
       },
     );
     return _decodeRun(_map(response['verification']));
@@ -253,6 +274,7 @@ class BrowserVerificationDtoCodec {
         enabled:
             wire['status']?.toString() != 'disabled' &&
             wire['status']?.toString() != 'archived',
+        updatedAt: _date(wire['updatedAt']),
       );
 
   Map<String, dynamic> encodeDefinition(BrowserVerificationDefinition value) =>
@@ -392,9 +414,10 @@ class BrowserVerificationDtoCodec {
     ];
     final console = variantMaps('console');
     final pageErrors = variantMaps('pageErrors');
+    final durableConsole = section('console');
     final consoleErrors = <String>{
       ..._strings(wire['consoleErrors']),
-      ..._strings(section('console')),
+      if (durableConsole is List) ...durableConsole.whereType<String>(),
       ...console
           .where(
             (entry) =>
@@ -434,12 +457,26 @@ class BrowserVerificationDtoCodec {
     );
     _appendTimelineSection(
       timeline,
+      accessibilityItems.map(
+        (item) => {
+          ...item,
+          'passed':
+              _accessibilitySeverity(item['severity']) !=
+              AccessibilitySeverity.critical,
+        },
+      ),
+      BrowserTimelineKind.accessibility,
+      fallbackLabel: 'Accessibility finding',
+    );
+    _appendTimelineSection(
+      timeline,
       variantMaps(
         'artifacts',
       ).where((item) => item['kind']?.toString() == 'screenshot'),
       BrowserTimelineKind.screenshot,
       fallbackLabel: 'Screenshot captured',
     );
+    final artifacts = _maps(section('artifacts'));
     final visualComparisons = <Map<String, dynamic>>[
       for (final comparison in _maps(section('visualComparisons')))
         {
@@ -449,6 +486,12 @@ class BrowserVerificationDtoCodec {
               variants,
               comparison['variantKey']?.toString(),
             ),
+          if (comparison['baselineArtifactHash'] == null)
+            'baselineArtifactHash': _visualArtifactHash(
+              artifacts,
+              comparison['variantKey']?.toString(),
+              const {'visual-baseline', 'baseline'},
+            ),
         },
       for (final variant in variants)
         for (final comparison in _maps(variant['visualComparisons']))
@@ -456,6 +499,12 @@ class BrowserVerificationDtoCodec {
             ...comparison,
             if (comparison['viewport'] == null)
               'viewport': variant['viewport'] ?? variant['variant'] ?? variant,
+            if (comparison['baselineArtifactHash'] == null)
+              'baselineArtifactHash': _visualArtifactHash(
+                artifacts,
+                variant['key']?.toString() ?? variant['name']?.toString(),
+                const {'visual-baseline', 'baseline'},
+              ),
           },
     ];
     final warningCount = _int(run['warningCount'], 0);
@@ -496,6 +545,28 @@ class BrowserVerificationDtoCodec {
         variant['key']?.toString() == key || variant['name']?.toString() == key,
     orElse: () => <String, dynamic>{'key': key ?? 'viewport'},
   );
+
+  String? _visualArtifactHash(
+    List<Map<String, dynamic>> artifacts,
+    String? variantKey,
+    Set<String> kinds,
+  ) {
+    for (final artifact in artifacts.reversed) {
+      final metadata = _map(artifact['metadata']);
+      final service = _map(metadata['serviceMetadata']);
+      final kind =
+          artifact['kind']?.toString() ?? service['kind']?.toString() ?? '';
+      final variant =
+          service['variant']?.toString() ?? metadata['variant']?.toString();
+      if (!kinds.contains(kind) ||
+          (variantKey != null && variant != null && variant != variantKey)) {
+        continue;
+      }
+      final hash = artifact['hash']?.toString();
+      if (hash != null && _artifactHash.hasMatch(hash)) return hash;
+    }
+    return null;
+  }
 
   BrowserTimelineEvent _assertionTimeline(Map<String, dynamic> wire) =>
       BrowserTimelineEvent(

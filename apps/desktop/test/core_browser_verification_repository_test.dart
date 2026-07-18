@@ -24,6 +24,7 @@ void main() {
       expect(definition!.requiredServerId, serverId);
       expect(definition.viewports.single.label, 'Desktop');
       expect(definition.retryCount, 2);
+      expect(definition.updatedAt, isNotNull);
       expect(definition.visualThreshold, closeTo(0.025, 0.00001));
       expect(definition.maskSelectors, ['.clock']);
       expect(definition.steps.single.assertions.single.expected, 'Dashboard');
@@ -79,6 +80,10 @@ void main() {
         contains(currentHash),
       );
       expect(
+        run.visualComparisons.single.baseline?.localPath,
+        contains(baselineHash),
+      );
+      expect(
         run.accessibilityIssues.single.category,
         AccessibilityCategory.labels,
       );
@@ -87,6 +92,11 @@ void main() {
         run.timeline.map((event) => event.kind),
         contains(BrowserTimelineKind.error),
       );
+      expect(
+        run.timeline.map((event) => event.kind),
+        contains(BrowserTimelineKind.accessibility),
+      );
+      expect(run.consoleErrors, isNot(contains('Dashboard hydrated')));
       final history = await repository.listHistory(taskId);
       expect(history.single.id, runId);
       expect(
@@ -123,6 +133,11 @@ void main() {
               .params['comparisonId'],
           comparisonId,
         );
+        await repository.reviewRun(runId, approve: true);
+        final review = rpc.calls.firstWhere(
+          (call) => call.method == 'browser.verification.review',
+        );
+        expect(review.params['reason'], isNotEmpty);
         await repository.cancelRun(runId);
         expect(rpc.calls.last.method, 'browser.verification.cancel');
       },
@@ -208,6 +223,8 @@ const currentHash =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const diffHash =
     'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+const baselineHash =
+    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
 
 final definitionDto = <String, dynamic>{
   'id': definitionId,
@@ -237,6 +254,7 @@ final definitionDto = <String, dynamic>{
     'ignoreSelectors': ['video'],
   },
   'status': 'active',
+  'updatedAt': 1784289999000,
   'required': true,
   'steps': [
     {
@@ -319,6 +337,22 @@ Map<String, dynamic> verificationDto({required bool approved}) => {
   ],
   'artifacts': [
     {
+      'id': '88888888-8888-4888-8888-888888888887',
+      'runId': runId,
+      'kind': 'visual-baseline',
+      'hash': baselineHash,
+      'mimeType': 'image/png',
+      'sizeBytes': 1024,
+      'metadata': {
+        'serviceMetadata': {
+          'kind': 'visual-baseline',
+          'variant': 'desktop',
+          'stepId': 'dashboard',
+        },
+      },
+      'createdAt': 1784290003000,
+    },
+    {
       'id': '88888888-8888-4888-8888-888888888888',
       'runId': runId,
       'kind': 'screenshot',
@@ -355,6 +389,15 @@ Map<String, dynamic> verificationDto({required bool approved}) => {
     },
   ],
   'console': [
+    {
+      'id': 0,
+      'runId': runId,
+      'sequence': 0,
+      'level': 'info',
+      'message': 'Dashboard hydrated',
+      'source': 'dashboard.js',
+      'createdAt': 1784290002000,
+    },
     {
       'id': 1,
       'runId': runId,
