@@ -133,6 +133,18 @@ impl ArtifactStore {
         })
     }
 
+    /// Remove one artifact only when no durable database row references it.
+    /// This is used by privacy deletion and never follows caller-provided paths.
+    pub fn delete_if_unreferenced(&self, database: &Database, hash: &str) -> Result<bool> {
+        let path = self.path_for(hash)?;
+        if referenced_hashes(database)?.contains(hash) || !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&path)
+            .map_err(|error| StorageError::io("delete unreferenced artifact", &path, error))?;
+        Ok(true)
+    }
+
     /// Report bytes occupied by content files.
     pub fn disk_usage(&self) -> Result<u64> {
         let mut total = 0_u64;

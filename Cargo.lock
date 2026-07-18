@@ -824,6 +824,12 @@ dependencies = [
 [[package]]
 name = "retcon-diagnostics"
 version = "0.1.0"
+dependencies = [
+ "retcon-secrets",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "retcon-filesystem"
