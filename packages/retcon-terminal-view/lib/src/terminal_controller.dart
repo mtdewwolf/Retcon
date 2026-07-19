@@ -15,6 +15,8 @@ class TerminalTab {
     this.alive = true,
   });
 
+  static const int maxOutputChars = 256 * 1024;
+
   final int terminalId;
   final String sessionId;
   final String title;
@@ -22,6 +24,14 @@ class TerminalTab {
   String output;
   int? exitCode;
   bool alive;
+
+  void appendOutput(String data) {
+    if (data.isEmpty) return;
+    output += data;
+    if (output.length > maxOutputChars) {
+      output = output.substring(output.length - maxOutputChars);
+    }
+  }
 }
 
 /// Manages multiple terminal tabs and core RPC/event subscriptions.
@@ -160,7 +170,7 @@ class TerminalController extends ChangeNotifier {
       final data = payload['data']?.toString() ?? '';
       final tab = _tabs.where((item) => item.terminalId == id).firstOrNull;
       if (tab == null) return;
-      tab.output += data;
+      tab.appendOutput(data);
       notifyListeners();
       return;
     }

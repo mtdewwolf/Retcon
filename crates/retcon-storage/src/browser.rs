@@ -432,7 +432,25 @@ impl BrowserRepository<'_> {
     }
 
     pub fn history(&self, session_id: Uuid) -> Result<Vec<BrowserHistoryEvent>> {
-        self.0.read(|db|{let mut statement=db.prepare("SELECT id,browser_session_id,project_id,kind,actor,payload_json,created_at FROM browser_history WHERE browser_session_id=?1 ORDER BY id")?;statement.query_map([session_id.as_bytes()],row_history)?.collect()})
+        self.history_limited(session_id, MAX_HISTORY_ENTRIES as usize)
+    }
+
+    pub fn history_limited(
+        &self,
+        session_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<BrowserHistoryEvent>> {
+        let limit = limit.clamp(1, MAX_HISTORY_ENTRIES as usize) as i64;
+        self.0.read(|db|{
+            let mut statement=db.prepare(
+                "SELECT id,browser_session_id,project_id,kind,actor,payload_json,created_at FROM browser_history WHERE browser_session_id=?1 ORDER BY id DESC LIMIT ?2",
+            )?;
+            let mut rows: Vec<BrowserHistoryEvent> = statement
+                .query_map(params![session_id.as_bytes(), limit], row_history)?
+                .collect::<rusqlite::Result<_>>()?;
+            rows.reverse();
+            Ok(rows)
+        })
     }
 
     pub fn record_event(
@@ -559,6 +577,10 @@ fn record_event(
     payload: &Value,
 ) -> rusqlite::Result<()> {
     tx.execute("INSERT INTO browser_history(browser_session_id,project_id,kind,actor,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![session.as_bytes(),project.as_bytes(),kind,actor,serde_json::to_string(payload).map_err(|error|rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,now_ms()])?;
+    tx.execute(
+        "DELETE FROM browser_history WHERE browser_session_id=?1 AND id NOT IN (SELECT id FROM browser_history WHERE browser_session_id=?1 ORDER BY id DESC LIMIT ?2)",
+        params![session.as_bytes(), MAX_HISTORY_ENTRIES],
+    )?;
     Ok(())
 }
 fn validation_error(message: impl Into<String>) -> rusqlite::Error {
