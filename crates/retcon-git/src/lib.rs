@@ -155,6 +155,19 @@ async fn run_git_limited(repo: &Path, args: &[&str], max_bytes: usize) -> Result
             if read == 0 {
                 break;
             }
+            if buffer.len().saturating_add(read) > max_bytes {
+                // Keep a truncated tail for diagnostics rather than growing without bound.
+                let keep = max_bytes.saturating_sub(chunk[..read].len().min(max_bytes));
+                if keep < buffer.len() {
+                    buffer.drain(..buffer.len() - keep);
+                }
+                let take = read.min(max_bytes.saturating_sub(buffer.len()));
+                buffer.extend_from_slice(&chunk[..take]);
+                // Drain the rest so the process can exit, but stop retaining it.
+                let mut discard = [0_u8; 8192];
+                while stderr.read(&mut discard).await.map_err(|e| e.to_string())? > 0 {}
+                break;
+            }
             buffer.extend_from_slice(&chunk[..read]);
         }
         Ok(buffer)

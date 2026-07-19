@@ -1029,6 +1029,7 @@ export class ManagedBrowser {
       if (path) videoPaths.push(path);
     }
     this.sessions.delete(sessionId);
+    this.recoverable.delete(sessionId);
     this.emit({ type: "browser.closed", payload: { sessionId } });
     return { closed: true, sessionId, videoPaths, audit: session.audit };
   }
