@@ -88,23 +88,72 @@ bool _fileContainsTestMacro(File file) {
   }
 }
 
+/// Directories that never contain project test sources.
+const _skippedDirs = {
+  '.git',
+  '.dart_tool',
+  '.claude',
+  'node_modules',
+  'target',
+  'build',
+};
+
 void _walk(Directory dir, void Function(File file) onFile) {
   if (!dir.existsSync()) return;
-  for (final entity in dir.listSync(recursive: true, followLinks: false)) {
-    if (entity is File) {
+  for (final entity in dir.listSync(followLinks: false)) {
+    if (entity is Directory) {
+      if (_skippedDirs.contains(p.basename(entity.path))) continue;
+      _walk(entity, onFile);
+    } else if (entity is File) {
       onFile(entity);
     }
   }
 }
 
+final _globCache = <String, RegExp>{};
+
 bool _matchesGlob(String relativePath, String glob) {
   final normalized = relativePath.replaceAll(r'\', '/');
+  final regex = _globCache.putIfAbsent(glob, () => globToRegExp(glob));
+  return regex.hasMatch(normalized);
+}
+
+/// Convert a glob pattern to a [RegExp]. Supports `**/` (any directory
+/// depth, including none), `*` (any run of non-separator characters),
+/// `?` (one non-separator character), and `{a,b}` alternates.
+RegExp globToRegExp(String glob) {
   final pattern = glob.replaceAll(r'\', '/');
-  if (pattern.startsWith('**/')) {
-    final suffix = pattern.substring(3);
-    return normalized.endsWith(suffix) ||
-        normalized.contains('/$suffix') ||
-        normalized == suffix;
+  final buffer = StringBuffer('^');
+  var i = 0;
+  while (i < pattern.length) {
+    final char = pattern[i];
+    if (pattern.startsWith('**/', i)) {
+      buffer.write('(?:.*/)?');
+      i += 3;
+    } else if (pattern.startsWith('**', i)) {
+      buffer.write('.*');
+      i += 2;
+    } else if (char == '*') {
+      buffer.write('[^/]*');
+      i += 1;
+    } else if (char == '?') {
+      buffer.write('[^/]');
+      i += 1;
+    } else if (char == '{') {
+      final end = pattern.indexOf('}', i);
+      if (end == -1) {
+        buffer.write(RegExp.escape(char));
+        i += 1;
+      } else {
+        final options = pattern.substring(i + 1, end).split(',');
+        buffer.write('(?:${options.map(RegExp.escape).join('|')})');
+        i = end + 1;
+      }
+    } else {
+      buffer.write(RegExp.escape(char));
+      i += 1;
+    }
   }
-  return normalized == pattern;
+  buffer.write(r'$');
+  return RegExp(buffer.toString());
 }

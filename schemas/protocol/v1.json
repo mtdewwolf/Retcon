@@ -123,7 +123,7 @@
       "type": "object",
       "required": ["transport", "path", "token", "pid", "version", "protocolVersion"],
       "properties": {
-        "transport": { "enum": ["named_pipe", "unix_socket"] },
+        "transport": { "enum": ["tcp_loopback", "named_pipe", "unix_socket"] },
         "path": { "type": "string", "minLength": 1, "maxLength": 512 },
         "token": { "type": "string", "minLength": 32, "maxLength": 512 },
         "pid": { "type": "integer", "minimum": 1 },

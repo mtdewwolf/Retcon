@@ -13,6 +13,7 @@ import 'browser/browser.dart';
 import 'checkpoints/checkpoints.dart';
 import 'conversation/conversation_panel.dart';
 import 'core_client.dart';
+import 'core_log_panel.dart';
 import 'ide/ide.dart';
 
 /// Persistent, versioned workspace layout.  This stays deliberately independent
@@ -169,6 +170,11 @@ class PanelDefinition {
   static const terminal = PanelDefinition(
     id: 'terminal',
     title: 'Terminal',
+    icon: 'terminal',
+  );
+  static const coreLog = PanelDefinition(
+    id: 'core-log',
+    title: 'Core log terminal',
     icon: 'terminal',
   );
   static const browser = PanelDefinition(
@@ -1356,6 +1362,9 @@ class _PanelBody extends StatelessWidget {
         events: core!.events,
       );
     }
+    if (panel.id == 'core-log' && core != null) {
+      return CoreLogPanel(core: core!);
+    }
     if (panel.id == 'approvals' && core != null) {
       return ApprovalCenterPanel(core: core!, projectId: projectId);
     }
@@ -1409,6 +1418,7 @@ String _message(String id) => switch (id) {
   'explorer' => 'Open a project to begin.',
   'workspace' => 'Agent conversation appears here when Core is connected.',
   'terminal' => 'Terminal sessions appear here.',
+  'core-log' => 'Core process and connection output appears here.',
   'browser' => 'Connect to Retcon Core to start the browser service.',
   'approvals' => 'Pending approvals appear here when Core is connected.',
   'review' => 'Diff review appears here when a project is open.',

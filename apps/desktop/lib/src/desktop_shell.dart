@@ -26,6 +26,7 @@ enum ShellCommand {
   approvals('Approval center', Icons.verified_user),
   checkpoints('Checkpoints', Icons.history),
   terminal('Open terminal', Icons.terminal),
+  coreLog('Open Core log terminal', Icons.terminal_outlined),
   browser('Open browser', Icons.language),
   serverCenter('Dev server center', Icons.dns),
   taskBoard('Task board', Icons.view_kanban),
@@ -327,6 +328,8 @@ class _DesktopShellState extends State<DesktopShell> {
         await _workspace.openPanel(PanelDefinition.checkpoints);
       case ShellCommand.terminal:
         await _workspace.float(PanelDefinition.terminal, const Size(900, 600));
+      case ShellCommand.coreLog:
+        await _workspace.openPanel(PanelDefinition.coreLog);
       case ShellCommand.browser:
         await _workspace.openPanel(PanelDefinition.browser);
       case ShellCommand.serverCenter:
@@ -852,6 +855,7 @@ class _ApplicationMenu extends StatelessWidget {
       _menu('Browser', [ShellCommand.browser, ShellCommand.serverCenter]),
       _menu('Tools', [
         ShellCommand.terminal,
+        ShellCommand.coreLog,
         ShellCommand.externalEditor,
         ShellCommand.settings,
         ShellCommand.diagnostics,

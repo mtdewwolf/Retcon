@@ -199,6 +199,7 @@ fn write_discovery(
 ) -> Result<(), CoreError> {
     let discovery = Discovery {
         transport: match endpoint.kind {
+            retcon_platform::TransportKind::TcpLoopback => "tcp_loopback".into(),
             retcon_platform::TransportKind::NamedPipe => "named_pipe".into(),
             retcon_platform::TransportKind::UnixSocket => "unix_socket".into(),
         },

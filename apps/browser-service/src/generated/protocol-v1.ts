@@ -3,7 +3,7 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 
-export type TransportKind = "named_pipe" | "unix_socket";
+export type TransportKind = "tcp_loopback" | "named_pipe" | "unix_socket";
 
 export interface Discovery {
   transport: TransportKind;

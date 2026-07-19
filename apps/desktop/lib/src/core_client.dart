@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
@@ -26,6 +27,19 @@ class CoreRequestMetric {
   final DateTime timestamp;
 }
 
+/// A bounded, local record of Core process and connection output.
+class CoreLogEntry {
+  const CoreLogEntry({
+    required this.timestamp,
+    required this.source,
+    required this.message,
+  });
+
+  final DateTime timestamp;
+  final String source;
+  final String message;
+}
+
 class CoreRpcException implements Exception {
   CoreRpcException(this.message, [this.details]);
   final String message;
@@ -42,14 +56,19 @@ class CoreClient extends ChangeNotifier {
   final Directory dataDirectory;
   final _events = StreamController<Map<String, dynamic>>.broadcast();
   final _requestMetrics = StreamController<CoreRequestMetric>.broadcast();
+  final _coreLogs = StreamController<CoreLogEntry>.broadcast();
   final _pending = <int, Completer<Map<String, dynamic>>>{};
+  final _recentCoreLogs = ListQueue<CoreLogEntry>();
+  final _coreOutputSubscriptions = <StreamSubscription<String>>[];
   ProtocolConnection? _connection;
+  Future<void> _writeTail = Future.value();
   StreamSubscription<String>? _lines;
   Timer? _heartbeat;
+  Timer? _reconnectTimer;
   bool _closing = false;
-  bool _reconnectScheduled = false;
   int _nextId = 0;
   int _generation = 0;
+  int _reconnectAttempt = 0;
   CoreConnectionStatus _status = CoreConnectionStatus.disconnected;
   Object? _lastConnectionError;
 
@@ -57,12 +76,21 @@ class CoreClient extends ChangeNotifier {
   Object? get lastConnectionError => _lastConnectionError;
   Stream<Map<String, dynamic>> get events => _events.stream;
   Stream<CoreRequestMetric> get requestMetrics => _requestMetrics.stream;
+  Stream<CoreLogEntry> get coreLogs => _coreLogs.stream;
+  List<CoreLogEntry> get recentCoreLogs => List.unmodifiable(_recentCoreLogs);
+
+  void clearCoreLogs() {
+    _recentCoreLogs.clear();
+    notifyListeners();
+  }
 
   Future<void> connect({bool launchIfNeeded = true}) async {
     if (_status == CoreConnectionStatus.connected ||
         _status == CoreConnectionStatus.connecting) {
       return;
     }
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _setStatus(
       _generation == 0
           ? CoreConnectionStatus.connecting
@@ -70,7 +98,16 @@ class CoreClient extends ChangeNotifier {
     );
     _closing = false;
     try {
+      _recordCoreLog('client', 'Connecting to Retcon Core.');
       var discovery = await _readDiscovery();
+      if (discovery != null && !await _isProcessAlive(discovery.pid)) {
+        _warn(
+          'stale core discovery removed',
+          'pid=${discovery.pid} path=${discovery.path}',
+        );
+        await _removeDiscovery();
+        discovery = null;
+      }
       if (discovery == null && launchIfNeeded) {
         await _launchCore();
         discovery = await _waitForDiscovery();
@@ -78,6 +115,10 @@ class CoreClient extends ChangeNotifier {
       if (discovery == null) {
         throw CoreRpcException('Retcon Core is not running.');
       }
+      _recordCoreLog(
+        'client',
+        'Using Core discovery for PID ${discovery.pid} at ${discovery.path}.',
+      );
       final connection = await openTransport(discovery);
       await connection.writeLine(jsonEncode({'auth': discovery.token}));
       await connection.writeLine(
@@ -104,9 +145,9 @@ class CoreClient extends ChangeNotifier {
       _heartbeat?.cancel();
       _heartbeat = Timer.periodic(const Duration(seconds: 10), (_) {
         unawaited(
-          connection
-              .writeLine(jsonEncode(const PingFrame().toJson()))
-              .catchError((Object _) {}),
+          _writeLine(
+            jsonEncode(const PingFrame().toJson()),
+          ).catchError((Object _) {}),
         );
         request(
           'core.health',
@@ -115,9 +156,18 @@ class CoreClient extends ChangeNotifier {
       });
       await request('core.health');
       _lastConnectionError = null;
+      _reconnectAttempt = 0;
+      _recordCoreLog(
+        'client',
+        'Connected to Retcon Core (PID ${discovery.pid}).',
+      );
     } catch (error) {
       _lastConnectionError = error;
       _setStatus(CoreConnectionStatus.disconnected);
+      _warn('Core connection failed', error);
+      if (!_closing && launchIfNeeded) {
+        _scheduleReconnect();
+      }
       rethrow;
     }
   }
@@ -142,7 +192,7 @@ class CoreClient extends ChangeNotifier {
     final completer = Completer<Map<String, dynamic>>();
     _pending[id] = completer;
     try {
-      await _connection!.writeLine(
+      await _writeLine(
         jsonEncode(RpcRequest(id: id, method: method, params: params).toJson()),
       );
       final result = await completer.future.timeout(timeout);
@@ -170,7 +220,20 @@ class CoreClient extends ChangeNotifier {
   }
 
   Future<void> cancelRequest(int id) async {
-    await _connection?.writeLine(jsonEncode(CancelFrame(id).toJson()));
+    if (_connection == null) return;
+    await _writeLine(jsonEncode(CancelFrame(id).toJson()));
+  }
+
+  Future<void> _writeLine(String line) {
+    final connection = _connection;
+    if (connection == null) {
+      return Future<void>.error(
+        CoreRpcException('Retcon Core is disconnected.'),
+      );
+    }
+    final write = _writeTail.then((_) => connection.writeLine(line));
+    _writeTail = write.then<void>((_) {}, onError: (_, _) {});
+    return write;
   }
 
   void _handleLine(String line) {
@@ -200,41 +263,97 @@ class CoreClient extends ChangeNotifier {
   }
 
   void _handleDisconnect([Object? error]) {
-    if (_closing || _reconnectScheduled) return;
-    _log.warning('core connection closed', error);
+    if (_closing || _reconnectTimer != null) return;
+    _warn('core connection closed', error);
     _connection = null;
+    _writeTail = Future.value();
     for (final pending in _pending.values) {
       if (!pending.isCompleted) {
         pending.completeError(CoreRpcException('Core connection closed.'));
       }
     }
     _pending.clear();
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    if (_closing || _reconnectTimer != null) return;
     _setStatus(CoreConnectionStatus.reconnecting);
-    _reconnectScheduled = true;
-    Future<void>.delayed(const Duration(milliseconds: 500), () async {
-      _reconnectScheduled = false;
+    _reconnectAttempt++;
+    final delay = _reconnectAttempt == 1
+        ? const Duration(milliseconds: 500)
+        : const Duration(seconds: 2);
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
       if (_closing) return;
-      try {
-        await connect();
-      } catch (_) {
-        if (!_closing) {
-          Future<void>.delayed(const Duration(seconds: 2), _handleDisconnect);
-        }
-      }
+      unawaited(_retryConnection());
     });
   }
 
+  Future<void> _retryConnection() async {
+    try {
+      await connect();
+    } catch (error) {
+      if (!_closing) {
+        _warn('core reconnect attempt failed', error);
+        _scheduleReconnect();
+      }
+    }
+  }
+
   Future<Discovery?> _readDiscovery() async {
-    final file = File(
-      '${dataDirectory.path}${Platform.pathSeparator}core.json',
-    );
+    final file = _discoveryFile;
     if (!await file.exists()) return null;
     try {
       return Discovery.fromJson(
         (jsonDecode(await file.readAsString()) as Map).cast<String, dynamic>(),
       );
-    } catch (_) {
+    } catch (error) {
+      _warn('invalid core discovery removed', error);
+      await _removeDiscovery();
       return null;
+    }
+  }
+
+  File get _discoveryFile =>
+      File('${dataDirectory.path}${Platform.pathSeparator}core.json');
+
+  Future<void> _removeDiscovery() async {
+    try {
+      if (await _discoveryFile.exists()) {
+        await _discoveryFile.delete();
+      }
+    } catch (error) {
+      _warn('could not remove stale core discovery', error);
+    }
+  }
+
+  Future<bool> _isProcessAlive(int pid) async {
+    if (pid <= 0) return false;
+    try {
+      if (Platform.isWindows) {
+        final result = await Process.run('tasklist', [
+          '/FI',
+          'PID eq $pid',
+          '/FO',
+          'CSV',
+          '/NH',
+        ]);
+        if (result.exitCode != 0) return true;
+        final output = result.stdout.toString();
+        return RegExp(
+          r'^"retcon-core\.exe","' + pid.toString() + r'",',
+          caseSensitive: false,
+          multiLine: true,
+        ).hasMatch(output);
+      }
+      final result = await Process.run('kill', ['-0', pid.toString()]);
+      return result.exitCode == 0;
+    } catch (error) {
+      // Failing to inspect the PID should never make us delete a possibly
+      // active core discovery record. Keep it and let the connection retry.
+      _warn('could not validate core process', error);
+      return true;
     }
   }
 
@@ -254,22 +373,73 @@ class CoreClient extends ChangeNotifier {
       ?override,
       '${Directory.current.path}${Platform.pathSeparator}target${Platform.pathSeparator}debug${Platform.pathSeparator}retcon-core.exe',
       '${Directory.current.path}${Platform.pathSeparator}..${Platform.pathSeparator}..${Platform.pathSeparator}target${Platform.pathSeparator}debug${Platform.pathSeparator}retcon-core.exe',
-      '${File(Platform.resolvedExecutable).parent.path}${Platform.pathSeparator}retcon-core.exe',
+      ..._coreExecutableCandidates(),
     ];
     final executable = candidates
         .where((path) => File(path).existsSync())
         .firstOrNull;
     if (executable == null) {
+      _recordCoreLog(
+        'launcher',
+        'retcon-core.exe was not found in any configured launch location.',
+      );
       throw CoreRpcException(
         'retcon-core.exe was not found. Build the Rust workspace or set RETCON_CORE_PATH.',
       );
     }
-    await Process.start(executable, [
+    final process = await Process.start(executable, [
       '--data-dir',
       dataDirectory.path,
       '--log-format',
       'json',
-    ], mode: ProcessStartMode.detached);
+    ], mode: ProcessStartMode.detachedWithStdio);
+    _recordCoreLog('launcher', 'Started retcon-core.exe (PID ${process.pid}).');
+    _captureCoreOutput(process.stdout, 'core stdout');
+    _captureCoreOutput(process.stderr, 'core stderr');
+  }
+
+  Iterable<String> _coreExecutableCandidates() sync* {
+    var directory = File(Platform.resolvedExecutable).parent;
+    for (var depth = 0; depth < 8; depth++) {
+      yield '${directory.path}${Platform.pathSeparator}retcon-core.exe';
+      yield '${directory.path}${Platform.pathSeparator}target${Platform.pathSeparator}debug${Platform.pathSeparator}retcon-core.exe';
+      yield '${directory.path}${Platform.pathSeparator}target${Platform.pathSeparator}release${Platform.pathSeparator}retcon-core.exe';
+      final parent = directory.parent;
+      if (parent.path == directory.path) return;
+      directory = parent;
+    }
+  }
+
+  void _captureCoreOutput(Stream<List<int>> output, String source) {
+    final subscription = output
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(
+          (line) => _recordCoreLog(source, line),
+          onError: (Object error) => _warn('could not read $source', error),
+        );
+    _coreOutputSubscriptions.add(subscription);
+  }
+
+  void _warn(String message, [Object? error]) {
+    _log.warning(message, error);
+    _recordCoreLog('client', error == null ? message : '$message: $error');
+  }
+
+  void _recordCoreLog(String source, String message) {
+    final normalized = message.trim();
+    if (normalized.isEmpty) return;
+    final entry = CoreLogEntry(
+      timestamp: DateTime.now().toLocal(),
+      source: source,
+      message: normalized,
+    );
+    _recentCoreLogs.add(entry);
+    while (_recentCoreLogs.length > 512) {
+      _recentCoreLogs.removeFirst();
+    }
+    if (!_coreLogs.isClosed) _coreLogs.add(entry);
+    notifyListeners();
   }
 
   void _setStatus(CoreConnectionStatus value) {
@@ -281,11 +451,16 @@ class CoreClient extends ChangeNotifier {
   @override
   void dispose() {
     _closing = true;
+    _reconnectTimer?.cancel();
     _heartbeat?.cancel();
     _lines?.cancel();
+    for (final subscription in _coreOutputSubscriptions) {
+      unawaited(subscription.cancel());
+    }
     unawaited(_connection?.close());
     _events.close();
     _requestMetrics.close();
+    _coreLogs.close();
     super.dispose();
   }
 

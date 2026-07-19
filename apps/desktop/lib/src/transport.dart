@@ -13,6 +13,9 @@ abstract interface class ProtocolConnection {
 
 /// Open a transport connection using discovery metadata.
 Future<ProtocolConnection> openTransport(Discovery discovery) async {
+  if (discovery.transport == 'tcp_loopback') {
+    return TcpProtocolConnection.connect(discovery.path);
+  }
   if (discovery.transport == 'unix_socket') {
     return UnixProtocolConnection.connect(discovery.path);
   }
@@ -22,6 +25,42 @@ Future<ProtocolConnection> openTransport(Discovery discovery) async {
   throw UnsupportedError(
     'Named pipe transport is only supported on Windows desktop builds.',
   );
+}
+
+final class TcpProtocolConnection implements ProtocolConnection {
+  TcpProtocolConnection._(this._socket, this._lines);
+
+  final Socket _socket;
+  final Stream<String> _lines;
+
+  static Future<TcpProtocolConnection> connect(String address) async {
+    final endpoint = Uri.parse('tcp://$address');
+    final socket = await Socket.connect(
+      endpoint.host,
+      endpoint.port,
+      timeout: const Duration(seconds: 3),
+    );
+    final lines = socket
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .asBroadcastStream();
+    return TcpProtocolConnection._(socket, lines);
+  }
+
+  @override
+  Stream<String> get lines => _lines;
+
+  @override
+  Future<void> writeLine(String line) async {
+    _socket.writeln(line);
+    await _socket.flush();
+  }
+
+  @override
+  Future<void> close() async {
+    _socket.destroy();
+  }
 }
 
 final class UnixProtocolConnection implements ProtocolConnection {

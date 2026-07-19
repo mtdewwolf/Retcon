@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:retcon_test_dashboard/controllers/test_dashboard_controller.dart';
 import 'package:retcon_test_dashboard/models/test_suite_models.dart';
+import 'package:retcon_test_dashboard/services/test_discovery.dart';
 import 'package:retcon_test_dashboard/services/test_inventory.dart';
 import 'package:retcon_test_dashboard/services/test_parser.dart';
 
@@ -53,6 +54,59 @@ assertion failed
       expect(cases[0].status, TestCaseStatus.passed);
       expect(cases[1].status, TestCaseStatus.failed);
       expect(cases[2].status, TestCaseStatus.skipped);
+    });
+  });
+
+  group('test discovery', () {
+    test('globToRegExp matches inventory glob patterns', () {
+      final dartGlob = globToRegExp('test/**/*_test.dart');
+      expect(dartGlob.hasMatch('test/foo_test.dart'), isTrue);
+      expect(dartGlob.hasMatch('test/nested/bar_test.dart'), isTrue);
+      expect(dartGlob.hasMatch('lib/foo_test.dart'), isFalse);
+      expect(dartGlob.hasMatch('test/helper.dart'), isFalse);
+
+      final tsGlob = globToRegExp('test/**/*.test.ts');
+      expect(tsGlob.hasMatch('test/rpc.test.ts'), isTrue);
+      expect(tsGlob.hasMatch('test/deep/rpc.test.ts'), isTrue);
+      expect(tsGlob.hasMatch('src/rpc.ts'), isFalse);
+
+      final braceGlob = globToRegExp('**/*.{rs,toml}');
+      expect(braceGlob.hasMatch('crates/core/src/lib.rs'), isTrue);
+      expect(braceGlob.hasMatch('Cargo.toml'), isTrue);
+      expect(braceGlob.hasMatch('crates/core/src/lib.md'), isFalse);
+    });
+
+    test('discoverTestFiles finds suite files and skips vendor dirs', () {
+      final root = Directory.systemTemp.createTempSync('retcon_dashboard');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final app = Directory(p.join(root.path, 'apps', 'demo'));
+      File(
+        p.join(app.path, 'test', 'unit', 'a_test.dart'),
+      ).createSync(recursive: true);
+      File(p.join(app.path, 'test', 'b_test.dart')).createSync(recursive: true);
+      File(p.join(app.path, 'test', 'helper.dart')).createSync(recursive: true);
+      File(
+        p.join(app.path, 'node_modules', 'pkg', 'test', 'c_test.dart'),
+      ).createSync(recursive: true);
+
+      final suite = TestSuiteDefinition(
+        id: 'demo',
+        name: 'Demo',
+        stack: TestStack.flutter,
+        workingDirectory: app.path,
+        command: 'flutter',
+        commandArgs: const ['test'],
+        testFileGlob: 'test/**/*_test.dart',
+      );
+
+      final discovered = discoverTestFiles(root.path, [suite]);
+      final files = discovered['demo']!.files
+          .map((file) => file.replaceAll(r'\', '/'))
+          .toList();
+
+      expect(files, hasLength(2));
+      expect(files, contains('apps/demo/test/unit/a_test.dart'));
+      expect(files, contains('apps/demo/test/b_test.dart'));
     });
   });
 

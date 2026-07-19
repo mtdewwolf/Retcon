@@ -135,6 +135,13 @@ function openTransport(discovery: Discovery): Promise<Socket> {
     const socket =
       discovery.transport === "unix_socket"
         ? netConnect({ path: discovery.path })
+        : discovery.transport === "tcp_loopback"
+          ? (() => {
+              const separator = discovery.path.lastIndexOf(":");
+              const host = discovery.path.slice(0, separator);
+              const port = Number(discovery.path.slice(separator + 1));
+              return netConnect({ host, port });
+            })()
         : netConnect(discovery.path);
     socket.once("connect", () => resolve(socket));
     socket.once("error", reject);
@@ -166,7 +173,11 @@ export function connect(pipeName: string | undefined): RpcClient {
     return new DisconnectedRpcClient();
   }
   void CoreRpcClient.connect({
-    transport: pipeName.includes("pipe\\") ? "named_pipe" : "unix_socket",
+    transport: pipeName.includes("pipe\\")
+      ? "named_pipe"
+      : pipeName.includes(":")
+        ? "tcp_loopback"
+        : "unix_socket",
     path: pipeName,
     token: "",
     pid: 0,

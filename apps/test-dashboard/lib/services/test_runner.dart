@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import '../models/test_suite_models.dart';
@@ -41,21 +42,13 @@ class TestRunner {
         environment: _environmentFor(suite),
       );
 
-      final stdoutBuffer = StringBuffer();
-      final stderrBuffer = StringBuffer();
-      final stdoutSub = process.stdout.listen(
-        (data) => stdoutBuffer.write(String.fromCharCodes(data)),
-      );
-      final stderrSub = process.stderr.listen(
-        (data) => stderrBuffer.write(String.fromCharCodes(data)),
-      );
+      const decoder = Utf8Decoder(allowMalformed: true);
+      final stdoutFuture = process.stdout.transform(decoder).join();
+      final stderrFuture = process.stderr.transform(decoder).join();
 
       final exitCode = await process.exitCode;
-      await stdoutSub.cancel();
-      await stderrSub.cancel();
-
-      final stdout = stdoutBuffer.toString();
-      final stderr = stderrBuffer.toString();
+      final stdout = await stdoutFuture;
+      final stderr = await stderrFuture;
       final cases = _parser.parse(
         stack: suite.stack,
         stdout: stdout,

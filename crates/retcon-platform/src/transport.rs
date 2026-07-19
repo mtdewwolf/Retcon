@@ -1,4 +1,4 @@
-//! Cross-platform local transport: Windows named pipes and Unix domain sockets.
+//! Cross-platform local transport: loopback TCP on Windows and Unix domain sockets.
 
 #![allow(missing_docs)]
 
@@ -12,6 +12,8 @@ use crate::error::TransportError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
+    /// A loopback-only TCP listener, used by the Windows desktop client.
+    TcpLoopback,
     /// Windows named pipe (`\\.\pipe\...`).
     NamedPipe,
     /// Unix domain socket file.
@@ -40,12 +42,8 @@ pub fn default_endpoint(data_dir: &Path) -> LocalEndpoint {
     {
         let _ = data_dir;
         LocalEndpoint {
-            kind: TransportKind::NamedPipe,
-            path: PathBuf::from(format!(
-                r"\\.\pipe\retcon-{}-{}",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            )),
+            kind: TransportKind::TcpLoopback,
+            path: PathBuf::from("127.0.0.1:0"),
         }
     }
     #[cfg(unix)]
@@ -66,6 +64,7 @@ pub fn default_endpoint(data_dir: &Path) -> LocalEndpoint {
 }
 
 enum ListenerInner {
+    Tcp(tokio::net::TcpListener),
     #[cfg(windows)]
     NamedPipe(windows_pipe::WindowsPipeListener),
     #[cfg(unix)]
@@ -86,8 +85,21 @@ impl TransportListener {
     }
 
     /// Bind a specific endpoint, removing stale Unix socket files when needed.
-    pub async fn bind_endpoint(endpoint: LocalEndpoint) -> Result<Self, TransportError> {
+    pub async fn bind_endpoint(mut endpoint: LocalEndpoint) -> Result<Self, TransportError> {
         match endpoint.kind {
+            TransportKind::TcpLoopback => {
+                let listener = tokio::net::TcpListener::bind(endpoint.path_string())
+                    .await
+                    .map_err(|source| TransportError::io("bind loopback TCP listener", source))?;
+                let address = listener
+                    .local_addr()
+                    .map_err(|source| TransportError::io("read loopback TCP address", source))?;
+                endpoint.path = PathBuf::from(address.to_string());
+                Ok(Self {
+                    endpoint,
+                    inner: ListenerInner::Tcp(listener),
+                })
+            }
             #[cfg(windows)]
             TransportKind::NamedPipe => Ok(Self {
                 endpoint: endpoint.clone(),
@@ -136,6 +148,12 @@ impl TransportListener {
     /// Accept the next inbound connection.
     pub async fn accept(&mut self) -> Result<TransportStream, TransportError> {
         match &mut self.inner {
+            ListenerInner::Tcp(listener) => {
+                let (stream, _) = listener.accept().await.map_err(|source| {
+                    TransportError::io("accept loopback TCP connection", source)
+                })?;
+                Ok(TransportStream::tcp(stream))
+            }
             #[cfg(windows)]
             ListenerInner::NamedPipe(listener) => listener.accept().await,
             #[cfg(unix)]
@@ -151,6 +169,7 @@ impl TransportListener {
 }
 
 enum TransportStreamInner {
+    Tcp(tokio::net::TcpStream),
     #[cfg(windows)]
     PipeServer(tokio::net::windows::named_pipe::NamedPipeServer),
     #[cfg(windows)]
@@ -165,6 +184,12 @@ pub struct TransportStream {
 }
 
 impl TransportStream {
+    fn tcp(stream: tokio::net::TcpStream) -> Self {
+        Self {
+            inner: TransportStreamInner::Tcp(stream),
+        }
+    }
+
     #[cfg(unix)]
     fn unix(stream: tokio::net::UnixStream) -> Self {
         Self {
@@ -175,6 +200,12 @@ impl TransportStream {
     /// Open a client connection to `endpoint`.
     pub async fn connect(endpoint: &LocalEndpoint) -> Result<Self, TransportError> {
         match endpoint.kind {
+            TransportKind::TcpLoopback => {
+                let stream = tokio::net::TcpStream::connect(endpoint.path_string())
+                    .await
+                    .map_err(|source| TransportError::io("connect loopback TCP", source))?;
+                Ok(Self::tcp(stream))
+            }
             #[cfg(windows)]
             TransportKind::NamedPipe => {
                 use tokio::net::windows::named_pipe::ClientOptions;
@@ -210,6 +241,17 @@ impl TransportStream {
     /// Split into independent read and write halves.
     pub fn into_split(self) -> (TransportReadHalf, TransportWriteHalf) {
         match self.inner {
+            TransportStreamInner::Tcp(stream) => {
+                let (read, write) = stream.into_split();
+                (
+                    TransportReadHalf {
+                        inner: ReadHalfInner::Tcp(read),
+                    },
+                    TransportWriteHalf {
+                        inner: WriteHalfInner::Tcp(write),
+                    },
+                )
+            }
             #[cfg(windows)]
             TransportStreamInner::PipeServer(stream) => {
                 let (read, write) = tokio::io::split(stream);
@@ -251,6 +293,7 @@ impl TransportStream {
 }
 
 enum ReadHalfInner {
+    Tcp(tokio::net::tcp::OwnedReadHalf),
     #[cfg(windows)]
     PipeServer(tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeServer>),
     #[cfg(windows)]
@@ -271,6 +314,7 @@ impl AsyncRead for TransportReadHalf {
         buf: &mut ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         match &mut self.inner {
+            ReadHalfInner::Tcp(read) => std::pin::Pin::new(read).poll_read(cx, buf),
             #[cfg(windows)]
             ReadHalfInner::PipeServer(read) => std::pin::Pin::new(read).poll_read(cx, buf),
             #[cfg(windows)]
@@ -282,6 +326,7 @@ impl AsyncRead for TransportReadHalf {
 }
 
 enum WriteHalfInner {
+    Tcp(tokio::net::tcp::OwnedWriteHalf),
     #[cfg(windows)]
     PipeServer(tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>),
     #[cfg(windows)]
@@ -302,6 +347,7 @@ impl AsyncWrite for TransportWriteHalf {
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
         match &mut self.inner {
+            WriteHalfInner::Tcp(write) => std::pin::Pin::new(write).poll_write(cx, buf),
             #[cfg(windows)]
             WriteHalfInner::PipeServer(write) => std::pin::Pin::new(write).poll_write(cx, buf),
             #[cfg(windows)]
@@ -316,6 +362,7 @@ impl AsyncWrite for TransportWriteHalf {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         match &mut self.inner {
+            WriteHalfInner::Tcp(write) => std::pin::Pin::new(write).poll_flush(cx),
             #[cfg(windows)]
             WriteHalfInner::PipeServer(write) => std::pin::Pin::new(write).poll_flush(cx),
             #[cfg(windows)]
@@ -330,6 +377,7 @@ impl AsyncWrite for TransportWriteHalf {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         match &mut self.inner {
+            WriteHalfInner::Tcp(write) => std::pin::Pin::new(write).poll_shutdown(cx),
             #[cfg(windows)]
             WriteHalfInner::PipeServer(write) => std::pin::Pin::new(write).poll_shutdown(cx),
             #[cfg(windows)]
@@ -401,8 +449,8 @@ mod tests {
         let endpoint = default_endpoint(Path::new("/tmp/retcon"));
         #[cfg(windows)]
         {
-            assert_eq!(endpoint.kind, TransportKind::NamedPipe);
-            assert!(endpoint.path_string().starts_with(r"\\.\pipe\retcon-"));
+            assert_eq!(endpoint.kind, TransportKind::TcpLoopback);
+            assert_eq!(endpoint.path_string(), "127.0.0.1:0");
         }
         #[cfg(unix)]
         {
