@@ -20,14 +20,18 @@ use crate::state::CoreState;
 const OUTPUT_COALESCE_MS: u64 = 50;
 const OUTPUT_COALESCE_BYTES: usize = 4_096;
 const SCROLLBACK_FLUSH_BYTES: usize = 16_384;
+/// Hard cap on in-memory PTY scrollback (artifact flush still checkpoints).
+const SCROLLBACK_MAX_BYTES: usize = 256 * 1024;
+const OUTPUT_CHANNEL_CAP: usize = 256;
 
 struct LiveTerminal {
     pty: Arc<PtySession>,
     session_id: Uuid,
     shell: String,
     cwd: String,
-    scrollback: Mutex<String>,
-    tracker: Mutex<CommandLineTracker>,
+    /// Shared across clones so append/flush mutate the live registry entry.
+    scrollback: Arc<Mutex<String>>,
+    tracker: Arc<Mutex<CommandLineTracker>>,
 }
 
 /// Live PTY sessions owned by the core.
@@ -138,7 +142,7 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     }
 
     let terminal_id = state.terminals().next.fetch_add(1, Ordering::Relaxed) + 1;
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(OUTPUT_CHANNEL_CAP);
     let output_state = state.clone();
     tokio::spawn(async move {
         let mut buffer = String::new();
@@ -171,7 +175,8 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
     });
 
     let session = match PtySession::spawn(&shell, cwd_path.as_deref(), cols, rows, move |chunk| {
-        let _ = tx.send(String::from_utf8_lossy(chunk).into_owned());
+        // Drop newest under backpressure rather than unbounded grow.
+        let _ = tx.try_send(String::from_utf8_lossy(chunk).into_owned());
     }) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -194,8 +199,8 @@ async fn start(state: CoreState, id: u64, params: &Value) -> Response {
         session_id: session_uuid,
         shell: shell.clone(),
         cwd: cwd.clone(),
-        scrollback: Mutex::new(String::new()),
-        tracker: Mutex::new(CommandLineTracker::new()),
+        scrollback: Arc::new(Mutex::new(String::new())),
+        tracker: Arc::new(Mutex::new(CommandLineTracker::new())),
     };
     if let Ok(mut map) = state.terminals().map.lock() {
         map.insert(terminal_id, live);
@@ -413,6 +418,15 @@ fn append_scrollback(state: &CoreState, terminal_id: u64, chunk: &str) {
     let mut should_flush = false;
     if let Ok(mut buffer) = terminal.scrollback.lock() {
         buffer.push_str(chunk);
+        if buffer.len() > SCROLLBACK_MAX_BYTES {
+            let excess = buffer.len() - SCROLLBACK_MAX_BYTES;
+            let trim_at = buffer
+                .char_indices()
+                .find(|(index, _)| *index >= excess)
+                .map(|(index, _)| index)
+                .unwrap_or(excess);
+            buffer.drain(..trim_at);
+        }
         should_flush = buffer.len() >= SCROLLBACK_FLUSH_BYTES;
     }
     if should_flush {
@@ -441,13 +455,15 @@ fn flush_scrollback(state: &CoreState, terminal: &LiveTerminal) {
 }
 
 fn read_artifact_text(state: &CoreState, hash: &str) -> Result<String, String> {
+    const MAX_ARTIFACT_READ_BYTES: u64 = SCROLLBACK_MAX_BYTES as u64;
     let mut file = state
         .storage()
         .artifacts()
         .get(hash)
         .map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    std::io::Read::take(&mut file, MAX_ARTIFACT_READ_BYTES)
+        .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -471,18 +487,8 @@ impl Clone for LiveTerminal {
             session_id: self.session_id,
             shell: self.shell.clone(),
             cwd: self.cwd.clone(),
-            scrollback: Mutex::new(
-                self.scrollback
-                    .lock()
-                    .map(|buffer| buffer.clone())
-                    .unwrap_or_default(),
-            ),
-            tracker: Mutex::new(
-                self.tracker
-                    .lock()
-                    .map(|tracker| tracker.clone())
-                    .unwrap_or_default(),
-            ),
+            scrollback: Arc::clone(&self.scrollback),
+            tracker: Arc::clone(&self.tracker),
         }
     }
 }
