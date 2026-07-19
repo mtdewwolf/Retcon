@@ -21,6 +21,9 @@ class ConversationController extends ChangeNotifier {
 
   ConversationSessionState _sessionState = ConversationSessionState.idle;
   final List<ConversationMessage> _messages = [];
+  static const int _maxMessages = 500;
+  Timer? _streamNotifyTimer;
+  bool _streamNotifyPending = false;
   final List<PendingApproval> _pendingApprovals = [];
   TokenUsage _usage = const TokenUsage();
   int? _activeTurnId;
@@ -153,6 +156,7 @@ class ConversationController extends ChangeNotifier {
         timestamp: DateTime.now(),
       ),
     );
+    _trimMessages();
     notifyListeners();
 
     try {
@@ -464,6 +468,7 @@ class ConversationController extends ChangeNotifier {
         timestamp: DateTime.now(),
       ),
     );
+    _trimMessages();
   }
 
   void _appendAssistantText(String chunk) {
@@ -475,8 +480,24 @@ class ConversationController extends ChangeNotifier {
     }
     final last = _messages.removeLast();
     _messages.add(last.copyWith(text: last.text + chunk));
+    _trimMessages();
     _sessionState = ConversationSessionState.running;
-    notifyListeners();
+    _scheduleStreamNotify();
+  }
+
+  void _trimMessages() {
+    if (_messages.length <= _maxMessages) return;
+    _messages.removeRange(0, _messages.length - _maxMessages);
+  }
+
+  void _scheduleStreamNotify() {
+    if (_streamNotifyPending) return;
+    _streamNotifyPending = true;
+    _streamNotifyTimer?.cancel();
+    _streamNotifyTimer = Timer(const Duration(milliseconds: 32), () {
+      _streamNotifyPending = false;
+      notifyListeners();
+    });
   }
 
   void _addToolMessage({
@@ -599,6 +620,7 @@ class ConversationController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _streamNotifyTimer?.cancel();
     unawaited(_events?.cancel());
     _core.removeListener(_handleCoreStatus);
     super.dispose();
